@@ -9,6 +9,7 @@
 #include <fstream>
 #include <iostream>
 #include <sstream>
+#include <string>
 #include <unordered_set>
 
 #include <MNN/AutoTime.hpp>
@@ -65,6 +66,13 @@ static MNNForwardType backend_type_convert(const std::string& type_str) {
 template <typename T>
 static inline VARP _var(std::vector<T> vec, const std::vector<int> &dims) {
     return _Const(vec.data(), dims, NHWC, halide_type_of<T>());
+}
+void show_dim(std::vector<int> dim, std::string name){
+    std::cout<<std::endl<<name<<" dim";
+    for(int d: dim){
+        std::cout<<" "<<d;
+    }
+    std::cout<<std::endl;
 }
 
 Llm* Llm::createLLM(const std::string& config_path) {
@@ -231,7 +239,9 @@ void Llm::load() {
     mModules.resize(1);
     std::string model_path = mConfig->llm_model();
 
+    // std::vector<std::string> inputNames {"input_ids", "attention_mask", "position_ids"};
     std::vector<std::string> inputNames {"input_ids", "attention_mask", "position_ids", "logits_index"};
+    // std::vector<std::string> inputNames {"input_ids", "attention_mask", "position_ids", "logits_index", "past_key_values"};
     std::vector<std::string> outputNames {"logits"};
     if (mConfig->has_talker()) {
         outputNames.emplace_back("talker_embeds");
@@ -345,7 +355,7 @@ void Llm::tuning(TuneType type, std::vector<int> candidates) {
             return;
         }
         auto logits = outputs[0];
-        if (nullptr == logits.get()) {
+        if (logits->getInfo() == nullptr || nullptr == logits.get()) {
             return;
         }
         if (logits->getInfo()->size == 0) {
@@ -402,6 +412,10 @@ std::vector<Express::VARP> Llm::forwardRaw(Express::VARP hiddenState, Express::V
     mGenerateParam->input_embeds = nullptr;
     mGenerateParam->outputs.clear();
     std::vector<Express::VARP> outputs;
+    // show_dim(hiddenState->getInfo()->dim, hiddenState->name());
+    // show_dim(mask->getInfo()->dim, mask->name());
+    // show_dim(inputPos->getInfo()->dim, inputPos->name());
+    // show_dim(logitsIndex->getInfo()->dim, logitsIndex->name());
     outputs = mModulePool[moduleKey]->onForward({hiddenState, mask, inputPos, logitsIndex});
 
     if (outputs.empty()) {
@@ -499,7 +513,66 @@ std::vector<VARP> Llm::forwardVec(MNN::Express::VARP input_embeds) {
     auto logits = forwardRaw(input_embeds, attention_mask, position_ids);
     return logits;
 }
+std::vector<Express::VARP> Llm::forwardDyn(Express::VARP& hidden_states, Express::VARP& attention_mask, Express::VARP& position_ids, Express::VARP& logits_index){
+    return this->getModules()[0]->onForward({hidden_states, attention_mask, position_ids, logits_index});
+}
+std::vector<Express::VARP> Llm::forwardDyn(const std::vector<int>& input_ids){
+    Timer _t;
+    _t.reset();
+    Express::VARP hidden_states = this->embedding(input_ids);
+    hidden_states->readMap<void>();
+    // show_dim(hidden_states->getInfo()->dim, "Embedding "+ hidden_states->name()+" Shape:");
+    // std::cout<<"Embedding time: "<<_t.durationInUs()/1000.0f<<" ms"<<std::endl;
+    // _t.reset();
 
+    int seq_len         = hidden_states->getInfo()->dim[this->getSeqLenIndex()];
+    Express::VARP attention_mask = this->gen_attention_mask(seq_len);
+    attention_mask->readMap<void>();
+    // show_dim(attention_mask->getInfo()->dim, "Attention "+ attention_mask->name()+" Shape:");
+    // std::cout<<"Attention time: "<<_t.durationInUs()/1000.0f<<" ms"<<std::endl;
+    // _t.reset();
+
+    Express::VARP position_ids = this->gen_position_ids(seq_len);
+    position_ids->readMap<void>();
+    // show_dim(position_ids->getInfo()->dim, "Position "+ position_ids->name()+" Shape:");
+    // std::cout<<"Position time: "<<_t.durationInUs()/1000.f<<" ms"<<std::endl;
+    _t.reset();
+    Express::VARP logits_index = _var<int>({-1}, {1});
+    // forward
+    std::vector<Express::VARP> res = this->forwardDyn(hidden_states, attention_mask, position_ids, logits_index);
+    res[0]->readMap<void>();
+
+    // for(auto r: res){
+    //     show_dim(r->getInfo()->dim, r->name());
+    //     r->readMap<void>();
+    // }
+    // show_dim(res[0]->getInfo()->dim, "Res "+ res[0]->name() + " Shape:");
+    // std::cout<<"Pure forward time: "<<_t.durationInUs()/1000.0f<<" ms"<<std::endl;
+    return res;
+}
+
+void Llm::generateDyn(const ChatMessages& chat_prompts){
+    if (chat_prompts.empty()) {
+        return;
+    }
+    auto prompt = mPrompt->applyTemplate(chat_prompts);
+    std::vector<int> input_ids = tokenizer_encode(prompt);
+    std::string res = this->generateDyn(input_ids);
+    std::cout<<res<<std::endl;
+}
+std::string Llm::generateDyn(std::vector<int>& input_ids, std::string ret, int gen_len){
+    if(this->is_stop(input_ids.back()) || gen_len >= this->mConfig->max_new_tokens()){// TODO: max_new_tokens
+        return ret;
+    }
+    auto res = this->forwardDyn(input_ids);
+    auto token = this->sample(res[0]);
+    auto new_token = this->tokenizer_decode(token);
+    // recursive generate
+    ret += new_token;
+    input_ids.emplace_back(token);
+    gen_len++;
+    return generateDyn(input_ids, ret, gen_len);
+}
 void Llm::updateContext(int seq_len, int gen_len) {
     mContext->all_seq_len += seq_len;
     mContext->gen_seq_len += gen_len;

@@ -13,6 +13,8 @@
 #include <sstream>
 #include <stdlib.h>
 #include <initializer_list>
+#define DYNAMICRUN
+// #define STATICRUN
 //#define LLM_SUPPORT_AUDIO
 #ifdef LLM_SUPPORT_AUDIO
 #include "audio/audio.hpp"
@@ -222,6 +224,7 @@ void chat(Llm* llm) {
     ChatMessages messages;
     messages.emplace_back("system", "You are a helpful assistant.");
     auto context = llm->getContext();
+    MNN::Timer _t;
     while (true) {
         std::cout << "\nUser: ";
         std::string user_str;
@@ -236,7 +239,14 @@ void chat(Llm* llm) {
         }
         messages.emplace_back("user", user_str);
         std::cout << "\nA: " << std::flush;
-        llm->response(messages);
+        _t.reset();
+        # ifdef STATICRUN
+            llm->response(messages);
+        #endif
+        # ifdef DYNAMICRUN
+            llm->generateDyn(messages);
+        #endif
+        std::cout<<"\n\n[Time cost: "<<_t.durationInUs()/1e6<<" s]"<<std::endl;
         auto assistant_str = context->generate_str;
         messages.emplace_back("assistant", assistant_str);
     }
@@ -258,10 +268,10 @@ int main(int argc, const char* argv[]) {
         AUTOTIME;
         llm->load();
     }
-    if (true) {
-        AUTOTIME;
-        tuning_prepare(llm.get());
-    }
+    // if (true) {
+    //     AUTOTIME;
+    //     tuning_prepare(llm.get());
+    // }
     if (argc < 3) {
         chat(llm.get());
         return 0;

@@ -12,4 +12,4 @@ cmake ../../../ \
 -DMNN_BUILD_FOR_ANDROID_COMMAND=true \
 -DNATIVE_LIBRARY_OUTPUT=. -DNATIVE_INCLUDE_OUTPUT=. $*
 
-make -j4
+make -j$(nproc)

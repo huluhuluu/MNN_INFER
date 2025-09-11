@@ -1012,7 +1012,8 @@ std::vector<VARP> Variable::load(const uint8_t* buffer, size_t length) {
     std::vector<VARP> variable;
     variable.reserve(tensorCount);
     std::map<int, VARP> variableMap;
-    bool isStatic = source->usage == Usage_INFERENCE_STATIC;
+    // bool isStatic = source->usage == Usage_INFERENCE_STATIC;
+    bool isStatic = source->usage == Usage_TRAIN; // TODO:zjh modify here
     std::vector<std::shared_ptr<Tensor>> allTensors;
     if (isStatic) {
         allTensors.resize(source->tensorName.size());
@@ -1054,6 +1055,9 @@ std::vector<VARP> Variable::load(const uint8_t* buffer, size_t length) {
                 }
                 variableMap[outputIndex] = newVariable;
                 variable.emplace_back(newVariable);
+                if(newVariable.get() == nullptr){    
+                    std::cout<<"v null? "<<std::endl;
+                }
             }
         }
     }
@@ -1066,6 +1070,23 @@ std::map<std::string, VARP> Variable::loadMap(const uint8_t* buffer, size_t leng
     std::map<std::string, VARP> varMap;
     for (auto v : variables) {
         varMap[v->name()] = v;
+    }
+    // remove past_key_values
+    std::stack<std::string> removeStack;
+    removeStack.push("presents");
+    // removeStack.push("logits_index");
+    while(!removeStack.empty()){
+        auto removeStr = removeStack.top();
+        removeStack.pop();
+        auto iter = varMap.find(removeStr);
+        if(iter == varMap.end()){
+            continue;
+        }
+        for(auto inp: iter->second->expr().first->inputs()){
+            removeStack.push(inp->name());
+        }
+        std::cout<<"Removing "<<removeStr<<std::endl;
+        varMap.erase(iter);
     }
     return varMap;
 }

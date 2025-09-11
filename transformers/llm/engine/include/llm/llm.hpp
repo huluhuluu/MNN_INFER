@@ -36,7 +36,11 @@ struct TimePerformance;
 
 using ChatMessage = std::pair<std::string, std::string>; // <role, content>
 using ChatMessages = std::vector<ChatMessage>;
-
+template <typename T>
+static inline Express::VARP new_var(std::vector<T> vec, const std::vector<int> &dims) {
+    return Express::_Const(vec.data(), dims, Express::NHWC, halide_type_of<T>());
+}
+void show_dim(std::vector<int> dim, std::string name);
 enum TuneType {
     // op encoder number for commit
     OP_ENCODER_NUMBER = 0,
@@ -118,6 +122,16 @@ public:
     }
     virtual void setWavformCallback(std::function<bool(const float*, size_t, bool)> callback) {}
     virtual void generateWavform() {}
+    std::vector<std::shared_ptr<Express::Module>>  getModules() const {
+        return mModules;
+    }
+    int getSeqLenIndex() const {
+        return mSeqLenIndex;
+    }
+    std::vector<Express::VARP> forwardDyn(Express::VARP& hidden_states, Express::VARP& attention_mask, Express::VARP& position_ids, Express::VARP& logits_index);
+    std::vector<Express::VARP> forwardDyn(const std::vector<int>& input_ids);
+    void generateDyn(const ChatMessages& chat_prompts);
+    std::string generateDyn(std::vector<int>& input_ids, std::string ret = "", int gen_len = 0);
 protected:
     void initRuntime();
     void setRuntimeHint(std::shared_ptr<Express::Executor::RuntimeManager> &rtg);
