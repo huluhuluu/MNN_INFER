@@ -265,7 +265,7 @@ struct markdownPrinter : public Printer {
             return 20;
         }
         if (field == "threads") {
-            return 5;
+            return 7;
         }
         if (field == "useMmap") {
             return 4;
@@ -292,13 +292,13 @@ struct markdownPrinter : public Printer {
     void printHeader(const RuntimeParameters & rp, const TestParameters & tp) override {
         // select fields to print
         fields.emplace_back("model");
-        fields.emplace_back("modelSize");
+        // fields.emplace_back("modelSize");
         fields.emplace_back("backend");
         fields.emplace_back("threads");
         fields.emplace_back("memory");
-        fields.emplace_back("FBwd Time(s)");
         fields.emplace_back("Fwd Time(s)");
-        fields.emplace_back("Bwd Time(s)");
+        // fields.emplace_back("Bwd Time(s)");
+        fields.emplace_back("FBwd Time(s)");
         fields.emplace_back("loadingTime(s)");
         fields.emplace_back("test");
 
@@ -749,10 +749,10 @@ static bool parseCmdParams(int argc, char ** argv, RuntimeParameters & runtimePa
     if (testParams.nRepeat.empty()) {
         testParams.nRepeat = testParamsDefaults.nRepeat;
     }
-    if (testParams.begin <= 0) {
+    if (testParams.begin < 0) {
         testParams.begin = testParamsDefaults.begin;
     }
-    if (testParams.end <= 0) {
+    if (testParams.end < 0) {
         testParams.end = testParamsDefaults.end;
     }
 
@@ -827,13 +827,8 @@ int main(int argc, char ** argv) {
     std::unique_ptr<Printer> printer_(new markdownPrinter());
     bool printHeader = true;
 
-    std::cout<<"test param size: "<<paramsInstances.size()<<std::endl;
-    std::cout<<testParams.kvCache<<std::endl;
     for (auto instance: paramsInstances){
         TestInstance t(instance);
-        // auto llmWeightPath = getDirectoryOf(t.modelConfigFile, t.modelType); // To check path
-        // file_t file = MNNOpenFile(llmWeightPath.c_str(), MNN_FILE_READ);
-        // t.modelSize = MNNGetFileSize(file);
 
         MNN::BackendConfig backendConfig;
         auto executor = MNN::Express::Executor::newExecutor(MNN_FORWARD_CPU, backendConfig, 1);
@@ -847,14 +842,126 @@ int main(int argc, char ** argv) {
             llm->load();
             t.loadingS.push_back((double)loadingCost.durationInUs() / 1e6);
         }
-        // tuning_prepare(llm.get());
+        break;
         auto context = llm->getContext();
-        // if (instance.mCmdParam.nGenerate > 0) {
-        //     llm->set_config("{\"max_new_tokens\":1}");
-        // }
+        if (instance.mCmdParam.nGenerate > 0) {
+            llm->set_config("{\"max_new_tokens\":1}");
+        }
         
         auto prompt_tokens = instance.mCmdParam.nPrompt;
-        // TODO: get block0
+        // TODO: forward time too long
+        
+        // TODO: too long prompt casue heap overflow
+        /*
+            =================================================================
+            ==2180924==ERROR: AddressSanitizer: heap-buffer-overflow on address 0x62d000008450 at pc 0x7f521fc1a0af bp 0x7f521cafdf30 sp 0x7f521cafdf28
+            WRITE of size 4 at 0x62d000008450 thread T1
+                #0 0x7f521fc1a0ae in void MNN::KVCacheManager::pack_key<float>(MNN::Tensor const*, int, int) /root/code/mnn_base/MNN_LLM_TUNEING/source/backend/cpu/KVCacheManager.cpp:622:94
+                #1 0x7f521fc177d2 in MNN::KVCacheManager::onPushBack(MNN::Tensor const*, MNN::Tensor const*)::$_0::operator()(int) const /root/code/mnn_base/MNN_LLM_TUNEING/source/backend/cpu/KVCacheManager.cpp:676:17
+                #2 0x7f521fc1742d in void std::__invoke_impl<void, MNN::KVCacheManager::onPushBack(MNN::Tensor const*, MNN::Tensor const*)::$_0&, int>(std::__invoke_other, MNN::KVCacheManager::onPushBack(MNN::Tensor const*, MNN::Tensor const*)::$_0&, int&&) /usr/include/c++/11/bits/invoke.h:61:14
+                #3 0x7f521fc17371 in std::enable_if<__and_<std::is_void<void>, std::__is_invocable<MNN::KVCacheManager::onPushBack(MNN::Tensor const*, MNN::Tensor const*)::$_0&, int> >::value, void>::type std::__invoke_r<void, MNN::KVCacheManager::onPushBack(MNN::Tensor const*, MNN::Tensor const*)::$_0&, int>(MNN::KVCacheManager::onPushBack(MNN::Tensor const*, MNN::Tensor const*)::$_0&, int&&) /usr/include/c++/11/bits/invoke.h:154:7
+                #4 0x7f521fc17211 in std::_Function_handler<void (int), MNN::KVCacheManager::onPushBack(MNN::Tensor const*, MNN::Tensor const*)::$_0>::_M_invoke(std::_Any_data const&, int&&) /usr/include/c++/11/bits/std_function.h:290:9
+                #5 0x7f52211eb521 in std::function<void (int)>::operator()(int) const /usr/include/c++/11/bits/std_function.h:590:9
+                #6 0x7f521fc1b82f in MNN::KVCacheManager::onPushBack(MNN::Tensor const*, MNN::Tensor const*)::$_1::operator()(int) const /root/code/mnn_base/MNN_LLM_TUNEING/source/backend/cpu/KVCacheManager.cpp:682:9
+                #7 0x7f521fc1b7cd in void std::__invoke_impl<void, MNN::KVCacheManager::onPushBack(MNN::Tensor const*, MNN::Tensor const*)::$_1&, int>(std::__invoke_other, MNN::KVCacheManager::onPushBack(MNN::Tensor const*, MNN::Tensor const*)::$_1&, int&&) /usr/include/c++/11/bits/invoke.h:61:14
+                #8 0x7f521fc1b721 in std::enable_if<__and_<std::is_void<void>, std::__is_invocable<MNN::KVCacheManager::onPushBack(MNN::Tensor const*, MNN::Tensor const*)::$_1&, int> >::value, void>::type std::__invoke_r<void, MNN::KVCacheManager::onPushBack(MNN::Tensor const*, MNN::Tensor const*)::$_1&, int>(MNN::KVCacheManager::onPushBack(MNN::Tensor const*, MNN::Tensor const*)::$_1&, int&&) /usr/include/c++/11/bits/invoke.h:154:7
+                #9 0x7f521fc1b611 in std::_Function_handler<void (int), MNN::KVCacheManager::onPushBack(MNN::Tensor const*, MNN::Tensor const*)::$_1>::_M_invoke(std::_Any_data const&, int&&) /usr/include/c++/11/bits/std_function.h:290:9
+                #10 0x7f52211eb521 in std::function<void (int)>::operator()(int) const /usr/include/c++/11/bits/std_function.h:590:9
+                #11 0x7f521fc28512 in MNN::ThreadPool::ThreadPool(int)::$_1::operator()() const /root/code/mnn_base/MNN_LLM_TUNEING/source/backend/cpu/ThreadPool.cpp:63:29
+                #12 0x7f521fc2825c in void std::__invoke_impl<void, MNN::ThreadPool::ThreadPool(int)::$_1>(std::__invoke_other, MNN::ThreadPool::ThreadPool(int)::$_1&&) /usr/include/c++/11/bits/invoke.h:61:14
+                #13 0x7f521fc281ec in std::__invoke_result<MNN::ThreadPool::ThreadPool(int)::$_1>::type std::__invoke<MNN::ThreadPool::ThreadPool(int)::$_1>(MNN::ThreadPool::ThreadPool(int)::$_1&&) /usr/include/c++/11/bits/invoke.h:96:14
+                #14 0x7f521fc281c4 in void std::thread::_Invoker<std::tuple<MNN::ThreadPool::ThreadPool(int)::$_1> >::_M_invoke<0ul>(std::_Index_tuple<0ul>) /usr/include/c++/11/bits/std_thread.h:259:13
+                #15 0x7f521fc28194 in std::thread::_Invoker<std::tuple<MNN::ThreadPool::ThreadPool(int)::$_1> >::operator()() /usr/include/c++/11/bits/std_thread.h:266:11
+                #16 0x7f521fc280b8 in std::thread::_State_impl<std::thread::_Invoker<std::tuple<MNN::ThreadPool::ThreadPool(int)::$_1> > >::_M_run() /usr/include/c++/11/bits/std_thread.h:211:13
+                #17 0x7f521f144252  (/lib/x86_64-linux-gnu/libstdc++.so.6+0xdc252) (BuildId: e37fe1a879783838de78cbc8c80621fa685d58a2)
+                #18 0x7f521edccac2 in start_thread nptl/./nptl/pthread_create.c:442:8
+                #19 0x7f521ee5da03 in __clone misc/../sysdeps/unix/sysv/linux/x86_64/clone.S:100
+
+            0x62d000008450 is located 8 bytes to the right of 32840-byte region [0x62d000000400,0x62d000008448)
+            allocated by thread T0 here:
+                #0 0x56018f04708e in malloc (/root/code/mnn_base/MNN_LLM_TUNEING/build/llm_backward+0xc508e) (BuildId: a4a0d3901e26bac8b097d9b695985986f683f48d)
+                #1 0x7f521f6236ec in MNNMemoryAllocAlign /root/code/mnn_base/MNN_LLM_TUNEING/source/core/MNNMemoryUtils.cpp:24:30
+                #2 0x7f521f5cd819 in MNN::DefaultAllocator::onAlloc(unsigned long, unsigned long) /root/code/mnn_base/MNN_LLM_TUNEING/source/core/BufferAllocator.cpp:59:25
+                #3 0x7f521f5c040b in MNN::EagerBufferAllocator::alloc(unsigned long, bool, unsigned long) /root/code/mnn_base/MNN_LLM_TUNEING/source/core/BufferAllocator.cpp:223:30
+                #4 0x7f521f9e98f4 in MNN::CPUBackend::allocBuffer(unsigned long, MNN::Tensor*, MNN::Backend::StorageType) /root/code/mnn_base/MNN_LLM_TUNEING/source/backend/cpu/CPUBackend.cpp:600:49
+                #5 0x7f521fe20df9 in MNN::AVX2Backend::onAcquire(MNN::Tensor const*, MNN::Backend::StorageType) /root/code/mnn_base/MNN_LLM_TUNEING/source/backend/cpu/x86_x64/AVX2Backend.cpp:344:16
+                #6 0x7f521f5b8e80 in MNN::Backend::onAcquireBuffer(MNN::Tensor const*, MNN::Backend::StorageType) /root/code/mnn_base/MNN_LLM_TUNEING/source/core/Backend.cpp:128:22
+                #7 0x7f521fc0ace6 in MNN::KVCacheManager::onAlloc(int) /root/code/mnn_base/MNN_LLM_TUNEING/source/backend/cpu/KVCacheManager.cpp:390:19
+                #8 0x7f521f9c7f5b in MNN::CPUAttention::onExecute(std::vector<MNN::Tensor*, std::allocator<MNN::Tensor*> > const&, std::vector<MNN::Tensor*, std::allocator<MNN::Tensor*> > const&) /root/code/mnn_base/MNN_LLM_TUNEING/source/backend/cpu/CPUAttention.cpp:271:30
+                #9 0x7f521f6b71c7 in MNN::Pipeline::execute() /root/code/mnn_base/MNN_LLM_TUNEING/source/core/Pipeline.cpp:1214:40
+                #10 0x7f521f71d351 in MNN::Session::run() const /root/code/mnn_base/MNN_LLM_TUNEING/source/core/Session.cpp:243:28
+                #11 0x7f52205e6833 in MNN::Express::Executor::ComputeCache::compute() /root/code/mnn_base/MNN_LLM_TUNEING/express/Utils.cpp:273:41
+                #12 0x7f522044efd6 in MNN::Express::Variable::readInternal(bool) /root/code/mnn_base/MNN_LLM_TUNEING/express/Expr.cpp:838:28
+                #13 0x56018f092bf6 in void const* MNN::Express::Variable::readMap<void>() /root/code/mnn_base/MNN_LLM_TUNEING/include/MNN/expr/Expr.hpp:130:26
+                #14 0x56018f08832f in main /root/code/mnn_base/MNN_LLM_TUNEING/transformers/llm/engine/demo/llm_backward.cpp:886:21
+                #15 0x7f521ed61d8f in __libc_start_call_main csu/../sysdeps/nptl/libc_start_call_main.h:58:16
+
+            Thread T1 created by T0 here:
+                #0 0x56018f03050c in __interceptor_pthread_create (/root/code/mnn_base/MNN_LLM_TUNEING/build/llm_backward+0xae50c) (BuildId: a4a0d3901e26bac8b097d9b695985986f683f48d)
+                #1 0x7f521f144328 in std::thread::_M_start_thread(std::unique_ptr<std::thread::_State, std::default_delete<std::thread::_State> >, void (*)()) (/lib/x86_64-linux-gnu/libstdc++.so.6+0xdc328) (BuildId: e37fe1a879783838de78cbc8c80621fa685d58a2)
+                #2 0x7f521fc27e10 in void __gnu_cxx::new_allocator<std::thread>::construct<std::thread, MNN::ThreadPool::ThreadPool(int)::$_1>(std::thread*, MNN::ThreadPool::ThreadPool(int)::$_1&&) /usr/include/c++/11/ext/new_allocator.h:162:23
+                #3 0x7f521fc2781c in void std::allocator_traits<std::allocator<std::thread> >::construct<std::thread, MNN::ThreadPool::ThreadPool(int)::$_1>(std::allocator<std::thread>&, std::thread*, MNN::ThreadPool::ThreadPool(int)::$_1&&) /usr/include/c++/11/bits/alloc_traits.h:516:8
+                #4 0x7f521fc27b1d in void std::vector<std::thread, std::allocator<std::thread> >::_M_realloc_insert<MNN::ThreadPool::ThreadPool(int)::$_1>(__gnu_cxx::__normal_iterator<std::thread*, std::vector<std::thread, std::allocator<std::thread> > >, MNN::ThreadPool::ThreadPool(int)::$_1&&) /usr/include/c++/11/bits/vector.tcc:449:4
+                #5 0x7f521fc1f0fe in void std::vector<std::thread, std::allocator<std::thread> >::emplace_back<MNN::ThreadPool::ThreadPool(int)::$_1>(MNN::ThreadPool::ThreadPool(int)::$_1&&) /usr/include/c++/11/bits/vector.tcc:121:4
+                #6 0x7f521fc1e843 in MNN::ThreadPool::ThreadPool(int) /root/code/mnn_base/MNN_LLM_TUNEING/source/backend/cpu/ThreadPool.cpp:58:18
+                #7 0x7f521fc1d3ff in MNN::ThreadPool::init(int, unsigned long, MNN::ThreadPool*&) /root/code/mnn_base/MNN_LLM_TUNEING/source/backend/cpu/ThreadPool.cpp:26:35
+                #8 0x7f521f9ded57 in MNN::CPURuntime::_resetThreadPool() const /root/code/mnn_base/MNN_LLM_TUNEING/source/backend/cpu/CPUBackend.cpp:122:25
+                #9 0x7f521f9e1222 in MNN::CPURuntime::onReset(int, MNN::BackendConfig const*, bool) /root/code/mnn_base/MNN_LLM_TUNEING/source/backend/cpu/CPUBackend.cpp:221:5
+                #10 0x7f52203d8f86 in MNN::Express::Executor::_getOrCreateRuntime(MNNForwardType, MNN::BackendConfig const*, int, bool) /root/code/mnn_base/MNN_LLM_TUNEING/express/Executor.cpp:57:23
+                #11 0x7f52203de865 in MNN::Express::Executor::RuntimeManager::createRuntimeManager(MNN::ScheduleConfig const&) /root/code/mnn_base/MNN_LLM_TUNEING/express/Executor.cpp:309:20
+                #12 0x7f5220f74bc3 in MNN::Transformer::Llm::initRuntime() /root/code/mnn_base/MNN_LLM_TUNEING/transformers/llm/engine/src/llm.cpp:171:27
+                #13 0x7f5220f760f7 in MNN::Transformer::Llm::load() /root/code/mnn_base/MNN_LLM_TUNEING/transformers/llm/engine/src/llm.cpp:219:5
+                #14 0x56018f087431 in main /root/code/mnn_base/MNN_LLM_TUNEING/transformers/llm/engine/demo/llm_backward.cpp:846:18
+                #15 0x7f521ed61d8f in __libc_start_call_main csu/../sysdeps/nptl/libc_start_call_main.h:58:16
+
+            SUMMARY: AddressSanitizer: heap-buffer-overflow /root/code/mnn_base/MNN_LLM_TUNEING/source/backend/cpu/KVCacheManager.cpp:622:94 in void MNN::KVCacheManager::pack_key<float>(MNN::Tensor const*, int, int)
+            Shadow bytes around the buggy address:
+            0x0c5a7fff9030: 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00
+            0x0c5a7fff9040: 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00
+            0x0c5a7fff9050: 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00
+            0x0c5a7fff9060: 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00
+            0x0c5a7fff9070: 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00
+            =>0x0c5a7fff9080: 00 00 00 00 00 00 00 00 00 fa[fa]fa fa fa fa fa
+            0x0c5a7fff9090: fa fa fa fa fa fa fa fa fa fa fa fa fa fa fa fa
+            0x0c5a7fff90a0: fa fa fa fa fa fa fa fa fa fa fa fa fa fa fa fa
+            0x0c5a7fff90b0: fa fa fa fa fa fa fa fa fa fa fa fa fa fa fa fa
+            0x0c5a7fff90c0: fa fa fa fa fa fa fa fa fa fa fa fa fa fa fa fa
+            0x0c5a7fff90d0: fa fa fa fa fa fa fa fa fa fa fa fa fa fa fa fa
+            Shadow byte legend (one shadow byte represents 8 application bytes):
+            Addressable:           00
+            Partially addressable: 01 02 03 04 05 06 07 
+            Heap left redzone:       fa
+            Freed heap region:       fd
+            Stack left redzone:      f1
+            Stack mid redzone:       f2
+            Stack right redzone:     f3
+            Stack after return:      f5
+            Stack use after scope:   f8
+            Global redzone:          f9
+            Global init order:       f6
+            Poisoned by user:        f7
+            Container overflow:      fc
+            Array cookie:            ac
+            Intra object redzone:    bb
+            ASan internal:           fe
+            Left alloca redzone:     ca
+            Right alloca redzone:    cb
+            ==2180924==ABORTING
+        */
+        // TODO: backward only to "logits__matmul_converted"
+        /*
+        graph:
+            logits
+            -> ConvertTensor6467 Concat6482 
+            -> logits__matmul_converted --- here...
+            -> Reshape6465___tr4logits__matmul_converted
+            -> Reshape6465
+            -> hidden_states Concat14 
+            -> /norm/Cast_output_0 
+            -> /Add_119_output_0 logits_index /Constant_19_output_0 Unsqueeze27 Unsqueeze27 
+            -> /post_attention_layernorm_23/Cast_output_0 /mlp/down_proj_23/FakeLinear_output_0 
+        */
+        // TODO: get single block
         
         // profiler forward
         int tok = 16;
@@ -877,8 +984,9 @@ int main(int argc, char ** argv) {
         //     if (i == begin){
         //         _t.reset();
         //     }
-        //     if (i == end) {
-        //         t.fwdUs.push_back(_t.durationInUs() / (end - begin));
+        //     if (i <= end && i > begin) {
+        //         t.fwdUs.push_back(_t.durationInUs());
+        //         _t.reset();
         //     }
         //     if (i == instance.mCmdParam.nRepeat) {
         //         break;
@@ -896,8 +1004,9 @@ int main(int argc, char ** argv) {
             if (i == begin){
                 _t.reset();
             }
-            if (i == end) {
-                t.fbwdUs.push_back(_t.durationInUs() / (end - begin));
+            if (i <= end && i > begin) {
+                t.fbwdUs.push_back(_t.durationInUs());
+                _t.reset();
             }
             if (i == instance.mCmdParam.nRepeat) {
                 break;
@@ -906,15 +1015,12 @@ int main(int argc, char ** argv) {
             res[0]->readMap<void>();
             std::vector<Express::VARP> diff;
             for (auto r:res){
-                r->readMap<void>();
                 auto shape_ = r->getInfo()->dim; // Express::_Shape(r); 1 1 151936
                 std::vector<int> shape(shape_.begin(), shape_.end());
                 diff.emplace_back(Express::_Const(1.0f, shape));
             }
-            std::vector<Express::VARP> param;
             // backward
-            auto grad = MNN::OpGrad::gradCommon({res}, diff, param);
-            grad.second.front()->readMap<void>();
+            auto grad = MNN::OpGrad::gradCommon(res, diff, {}); 
         }
         
         // Print
