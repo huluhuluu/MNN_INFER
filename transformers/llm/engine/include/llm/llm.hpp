@@ -18,6 +18,7 @@
 #include <functional>
 #include <unordered_map>
 
+#include <llm/BatchScheduler.hpp>
 #include <MNN/expr/Expr.hpp>
 #include <MNN/expr/Module.hpp>
 #include <MNN/expr/MathOp.hpp>
@@ -33,6 +34,7 @@ class Sampler;
 class Prompt;
 class Generation;
 class EagleGeneration;
+class BatchScheduler;
 struct TimePerformance;
 
 using ChatMessage = std::pair<std::string, std::string>; // <role, content>
@@ -70,6 +72,7 @@ enum class MatchStrictLevel : int;
 enum class NgramSelectRule : int;
 
 struct KVMeta;
+struct BatchKVMeta;
 struct LlmContext {
     // forward
     int prompt_len = 0;
@@ -107,8 +110,11 @@ public:
     virtual ~Llm();
     virtual bool load();
     virtual Express::VARP gen_attention_mask(int seq_len);
+    virtual Express::VARP gen_attention_mask(const std::vector<int>& calLen);
     virtual Express::VARP gen_position_ids(int seq_len);
+    virtual Express::VARP gen_position_ids(const std::vector<int>& pos, const std::vector<int>& calLen, int culLen);
     virtual Express::VARP embedding(const std::vector<int>& input_ids);
+    virtual Express::VARP embedding(const std::vector<std::vector<int>>& input_ids, const std::vector<int>& calLen, int culLen);
     virtual int sample(Express::VARP logits, int offset = 0, int size = 0);
     std::vector<Express::VARP> getOutputs() const;
     int getOutputIndex(const std::string& name) const;
@@ -154,11 +160,18 @@ public:
     }
     virtual void setWavformCallback(std::function<bool(const float*, size_t, bool)> callback) {}
     virtual void generateWavform() {}
+    
+    void response(const std::vector<std::vector<int>>& input_ids, std::ostream* os = &std::cout, const char* end_with = nullptr, int max_new_tokens = -1);
+    void response(const std::vector<ChatMessages>& chat_prompts, std::ostream* os = &std::cout, const char* end_with = nullptr, int max_new_tokens = -1);
+    
+    std::vector<std::vector<int>> generate(const std::vector<std::vector<int> >& input_ids, int max_new_tokens = -1);
 protected:
     void initRuntime();
     void setRuntimeHint(std::shared_ptr<Express::Executor::RuntimeManager> &rtg);
     std::shared_ptr<LlmContext> mContext;
     std::shared_ptr<KVMeta> mMeta;
+    std::shared_ptr<BatchKVMeta> mBatchMeta;
+    std::shared_ptr<BatchScheduler> mScheduler;
     std::shared_ptr<LlmConfig> mConfig;
     std::shared_ptr<Prompt> mPrompt;
     std::shared_ptr<Tokenizer> mTokenizer;

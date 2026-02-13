@@ -32,7 +32,7 @@ public:
     MetalKVCacheManager(Backend * backend, KVCacheConfig & kvConfig): KVCacheManager(backend, kvConfig) {
         // nothing todo
     }
-    ~MetalKVCacheManager() {
+    virtual ~MetalKVCacheManager() {
         onClear();
     }
     Tensor * getKeyTensor() {

@@ -167,5 +167,16 @@ void DiskEmbedding::embedding(const std::vector<int>& input_ids, float* dst) {
 #undef TRY_CACHE_TOKEN
 }
 
+void DiskEmbedding::embedding(const std::vector<std::vector<int> >& input_ids, const std::vector<int>& calLen ,float* dst) {
+    // TODO: optimize with map {input_id:token}
+    // std::map<int, void*> token_cache;
+    assert(input_ids.size() > 0); 
+    int ind = 0;
+    for (int b = 0; b < input_ids.size(); ++b) {
+        DiskEmbedding::embedding(input_ids[b], dst + ind * mHiddenSize);
+        ind += calLen[b];
+    }
+}
+
 }
 }

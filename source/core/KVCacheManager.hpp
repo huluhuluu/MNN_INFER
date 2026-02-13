@@ -26,6 +26,7 @@ public:
         int  mExpandChunk = 64;                 // Number of expand chunks when the buffer is full
         int mBlockNum = 1;
         int mKvAlignNum;
+        std::string prefixName = "";    // TODO: prefix name and prefix cahce dir modify
     };
 protected:
     Backend * mBackend;
@@ -57,7 +58,7 @@ public:
         mBackend   = backend;
         mConfig    = kvConfig;
     }
-    ~KVCacheManager() {
+    virtual ~KVCacheManager() {
         // nothing todo
     }
     const Backend * backend() {
@@ -89,6 +90,29 @@ public:
     virtual void onRealloc(KVMeta* meta) = 0;
 };
 
+// TODO: mutithrea read and write
+class BatchKVCacheManager : public NonCopyable{
+public:
+    bool remove(BatchKVMeta* meta);
+    KVCacheManager* getCacheManager(int req_id);
+    bool addCacheManager(int req_id, KVCacheManager* cacheManager);
+    
+    void onClear(){
+        for (auto& iter : mBatchKVCacheManager) {
+            iter.second->onClear();
+            delete iter.second;
+        }
+        mBatchKVCacheManager.clear();
+    }
+    BatchKVCacheManager() {
+        // do nothing
+    }
+    ~BatchKVCacheManager() {
+        onClear();
+    }
+private:
+    std::map<int, KVCacheManager*> mBatchKVCacheManager;
+};
 } // namespace MNN
 
 #endif // KVCACHE_MANAGER_HPP

@@ -46,6 +46,23 @@ void KVMeta::sync() {
     add = 0;
 }
 
+void BatchKVMeta::sync() {
+    // remove kvmeta
+    for(int& id: remove){
+        if(mMetas.find(id) != mMetas.end()) {
+            delete mMetas[id];
+            mMetas[id] = nullptr;
+            mMetas.erase(id);
+        }
+    }
+
+    // resize and sync old elements
+    for (auto& meta : mMetas) {
+        meta.second->sync();
+    }
+    // TODO: remove kvcache problem
+    calId.clear();
+}
 static MNNForwardType backend_type_convert(const std::string& type_str) {
     if (type_str == "cpu")
         return MNN_FORWARD_CPU;
@@ -147,7 +164,9 @@ void Llm::setRuntimeHint(std::shared_ptr<Express::Executor::RuntimeManager> &rtg
     rtg->setExternalPath(mConfig->npu_model_dir(), MNN::Interpreter::EXTERNAL_NPU_FILE_DIR);
     rtg->setHint(MNN::Interpreter::DYNAMIC_QUANT_OPTIONS, mConfig->config_.value("dynamic_option", 0));
 
-    rtg->setHintPtr(Interpreter::KVCACHE_INFO, mMeta.get());
+    // rtg->setHintPtr(Interpreter::KVCACHE_INFO, mMeta.get());
+    
+    rtg->setHintPtr(Interpreter::KVCACHE_INFO, mBatchMeta.get());
     if (backend_type_convert(mConfig->backend_type()) != 0) { // not cpu
         std::string cacheFilePath = tmpPath.length() != 0 ? tmpPath : ".";
         rtg->setCache(cacheFilePath + "/mnn_cachefile.bin");
@@ -798,6 +817,88 @@ std::vector<int> Llm::generate(const std::vector<int>& input_ids, int max_tokens
     return mContext->output_tokens;
 }
 
+std::vector<std::vector<int>> Llm::generate(const std::vector<std::vector<int> >& input_ids, int max_new_tokens){
+    int gen_len = 0, bs = input_ids.size();
+    // TODO: modify to additional thread
+    std::vector<std::vector<int>> ret(bs, std::vector<int>{});
+    // add all requests
+    std::vector<int> reqIds= mScheduler->addRequest(input_ids);
+    
+    // set batch kvcache
+    // mRuntimeManager->setHintPtr(Interpreter::KVCACHE_INFO, mBatchMeta.get());
+    // TODO: delete
+    auto p = [](VARP v, std::string s){
+        std::cout<<s<<" : ";
+        if(v->getInfo() == nullptr){std::cout<<"nullptr\n";return;}
+        auto shape = v->getInfo()->dim;
+        for(int i: shape){
+            std::cout<<i<<" ";
+        }
+        std::cout<<std::endl;
+    };
+
+    // generation loop
+    while (std::shared_ptr<BatchScheduler::Chunk> chunk = mScheduler->schedule()){// chunk prefill
+        // prepare inputs
+        Express::VARP hidden_states = this->embedding(chunk->inputs, chunk->calLen, chunk->culLen);
+        Express::VARP attention_mask = this->gen_attention_mask(chunk->calLen);
+        Express::VARP position_ids = this->gen_position_ids(chunk->pos, chunk->calLen, chunk->culLen);
+        Express::VARP logitsIndex = logitsAllIdx;
+        // set KVCache
+        for(int i = 0; i < chunk->pos.size() ; i++) {
+            int req_id = chunk->reqId[i];
+            mBatchMeta->setKVCacheInfo(chunk->reqId[i], chunk->calLen[i], 0, nullptr, 0);
+            mBatchMeta->setKVMetaInfo(req_id, mConfig->layer_nums(), 0, 0, "", KVMeta::NoChange);
+        }
+        // TODO: static graph doesn't match
+        auto moduleKey = std::make_pair(chunk->culLen, false);
+        std::shared_ptr<Module> selectModule = mModule;
+        if(mModulePool.find(moduleKey) == mModulePool.end()) {
+            mRuntimeManager->setHintPtr(Interpreter::KVCACHE_INFO, mBatchMeta.get());
+            mModulePool[moduleKey].reset(Module::clone(mModule.get()));
+        }
+        selectModule = mModulePool[moduleKey];
+        // get all logits 
+        // [1, seqLen, hidden]
+        std::vector<Express::VARP> res = selectModule->onForward({hidden_states, attention_mask, position_ids, logitsIndex});
+        auto o = res[0]->readMap<float>();
+        Express::VARP logits = _Squeeze(res[0], {0});
+        
+        int sumLen = 0;
+        for (int i = 0; i < chunk->pos.size(); ++i) {
+            sumLen += chunk->calLen[i];
+            // skip prefill
+            if(mScheduler->state(chunk->reqId[i]) != BatchScheduler::RequestState::DECODE) {
+                continue;
+            }
+
+            // get logits for request i
+            Express::VARP logit = MNN::Express::_Gather(logits, _Scalar(sumLen - 1));
+            // sample
+            // Express::VARP sampleTokens = MNN::Express::_ArgMax(logit, 0);
+            // int token = sampleTokens->readMap<int>()[0];
+            int token  = this->sample(logit);
+
+            int id = chunk->reqId[i];
+            mScheduler->update(id, token, is_stop(token));
+            if(mScheduler->isFinished(id)){
+                // get result and clear
+                for(int j = 0; j < bs; j++) {
+                    if(reqIds[j] == id) {
+                        ret[j] = mScheduler->getResult(id);
+                        break;
+                    }
+                }
+                mScheduler->releaseReq(id);
+            }
+            // print token str
+            std::cout<<"ReqId: "<<chunk->reqId[i]<<" | token: "<<token<<" | "<<this->tokenizer_decode(token)<<std::endl;
+        }
+        mBatchMeta->sync();
+    }
+    return ret;
+}
+
 std::string Llm::apply_chat_template(const std::string& user_content) const {
     return mPrompt->applyTemplate(user_content, true);
 }
@@ -890,6 +991,12 @@ void Llm::response(const std::vector<int>& input_ids, std::ostream* os, const ch
     generate(input_ids, max_new_tokens);
 }
 
+void Llm::response(const std::vector<std::vector<int>>&  input_ids, std::ostream* os, const char* end_with, int max_new_tokens) {
+    if (!end_with) { end_with = "\n"; }
+    generate_init(os, end_with);
+    generate(input_ids, max_new_tokens);
+}
+
 void Llm::response(MNN::Express::VARP input_embeds, std::ostream* os, const char* end_with, int max_new_tokens) {
     if (!end_with) { end_with = "\n"; }
     generate_init(os, end_with);
@@ -914,11 +1021,31 @@ void Llm::response(const ChatMessages& chat_prompts, std::ostream* os, const cha
     response(input_ids, os, end_with, max_new_tokens);
 }
 
+void Llm::response(const std::vector<ChatMessages>& chat_prompts, std::ostream* os, const char* end_with, int max_new_tokens) {
+    if (chat_prompts.empty()) {
+        return;
+    }
+    std::vector<std::vector<int> > input_ids;
+    for(const auto& chat: chat_prompts){
+        if(chat.empty()){
+            continue;
+        }
+        auto prompt = mPrompt->applyTemplate(chat);
+        std::vector<int> input_id = tokenizer_encode(prompt);
+        input_ids.push_back(input_id);
+    }
+    generate(input_ids);
+}
+
+
 Llm::Llm(std::shared_ptr<LlmConfig> config) : mConfig(config) {
     mContext.reset(new LlmContext);
     mMeta.reset(new KVMeta);
     mMeta->layer_nums = mConfig->layer_nums();
     mGenerateParam.reset(new GenerationParams);
+    
+    mBatchMeta.reset(new BatchKVMeta);
+    mScheduler.reset(new BatchScheduler(mConfig, mBatchMeta));
 }
 
 Llm::~Llm() {
@@ -994,6 +1121,17 @@ VARP Llm::embedding(const std::vector<int>& input_ids) {
     VARP res = _Input({seq_len, 1, hidden_size}, NCHW);
     // disk embedding to save memory
     mDiskEmbedding->embedding(input_ids, res->writeMap<float>());
+    return res;
+}
+
+VARP Llm::embedding(const std::vector<std::vector<int>>& input_ids, const std::vector<int>& calLen, int culLen) {
+    AUTOTIME;
+    int hidden_size = mConfig->hidden_size();
+    
+    // Shape: [bs, max_seq_len, hidden_size]
+    VARP res = _Input({culLen, 1, hidden_size}, NCHW);
+    // disk embedding to save memory
+    mDiskEmbedding->embedding(input_ids, calLen, res->writeMap<float>());
     return res;
 }
 
@@ -1093,6 +1231,45 @@ VARP Llm::gen_attention_mask(int seq_len) {
     }
 }
 
+VARP Llm::gen_attention_mask(const std::vector<int>& calLen){
+    int bs = calLen.size();
+    assert(bs > 0);
+
+    if (mConfig->attention_mask() == "float") {
+        // TODO: full and sliding mix, using normal mask
+        if (mConfig->attention_type() == "mix") {
+        }
+
+        // Use square mask just for new generation token, save memory of attention mask
+        // casual mask
+        int mask_size = 0;
+        for (int len : calLen) {
+            mask_size += len * len;
+        }
+        attentionMask = _Input({1, 1, 1, mask_size}, NCHW, halide_type_of<float>());
+        auto ptr = attentionMask->writeMap<float>();
+        
+        float min_val = std::numeric_limits<float>::lowest();
+        int ind = 0;
+        for (int b = 0; b < bs; b++) {
+            float* batch_ptr = ptr + ind;
+            for (int i = 0; i < calLen[b]; i++) {
+                for (int j = 0; j < calLen[b]; j++) {
+                    // 3. Causal Mask 
+                    batch_ptr[i * calLen[b] + j] = (j > i) * std::numeric_limits<float>::lowest();
+                }
+            }
+            ind += calLen[b] * calLen[b];
+        }
+        return attentionMask;
+    }
+    else{
+        // TODO: int attention mask
+        return attentionMask;
+    }
+    return attentionMask;
+}
+
 VARP Llm::gen_position_ids(int seq_len) {
     if (mConfig->attention_mask() == "glm") {
         // chatglm
@@ -1139,6 +1316,30 @@ VARP Llm::gen_position_ids(int seq_len) {
         return positionIds;
     }
 }
+
+VARP Llm::gen_position_ids(const std::vector<int>& pos, const std::vector<int>& calLen, int culLen) {
+    int bs = pos.size();
+    assert(culLen > 0 && bs > 0);
+
+    if (mConfig->attention_mask() == "glm") {
+        // TODO: chatglm
+    } else {
+        positionIds = _Input({culLen}, NCHW, halide_type_of<int>());
+        auto ptr = positionIds->writeMap<int>();
+        int ind = 0;
+        for (int b = 0; b < bs; ++b) {
+            int start_pos = pos[b];
+            int* batch_ptr = ptr + ind;
+
+            // position ids
+            std::iota(batch_ptr, batch_ptr + calLen[b], start_pos);
+            ind += calLen[b];
+        }
+        return positionIds;
+    }
+    return positionIds;
+}
+
 
 bool Llm::is_stop(int token_id) {
     if (mContext->status == LlmStatus::USER_CANCEL || mContext->status == LlmStatus::INTERNAL_ERROR) {

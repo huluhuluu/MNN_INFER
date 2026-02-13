@@ -673,7 +673,7 @@ void CPUKVCacheManager::onClear() {
 }
 
 template <typename T>
-void CPUKVCacheManager::ProcessKey(const Tensor* key, int seqLen, int kvHead) {
+void CPUKVCacheManager::ProcessKey(const Tensor* key, int seqLen, int kvHead, int bias) {
     if (mQuantKey) {  // [seqLen, headDim] -> [maxlen/hP8, blockNum, (headDim/blockNum)/lP8, hP8, lP8]
         int8_t * keyDst = reinterpret_cast<int8_t*>(addrOfKey(kvHead));
         float * sumDst = reinterpret_cast<float*>(addrOfKeySum(kvHead));
@@ -685,14 +685,15 @@ void CPUKVCacheManager::ProcessKey(const Tensor* key, int seqLen, int kvHead) {
 
         T* keyMax = reinterpret_cast<T*>(addrOfKeyMax(kvHead));
         int32_t params[] = {mKvNumHead, seqLen, mHeadDim, mConfig.mBlockNum, eP8, lP8, hP8, mPastLength, kvHead};
-        mQuantKeyFunc(keyDst, key->host<float>(), sumDst, (float*)keyMax, params);
+        // TODO: verify
+        mQuantKeyFunc(keyDst, key->host<float>() + bias, sumDst, (float*)keyMax, params);
     }
     else { // target: [maxlen/hP, headdim/lP, hP, lP]
         T * key_dst = reinterpret_cast<T*>(addrOfKey(kvHead));
         auto stride0 = ROUND_UP(mHeadDim, lP) * hP;
         auto stride1 = hP * lP;
         for (int i = 0; i < seqLen; i++) {
-            T * key_src = key->host<T>() + i * mKvNumHead * mHeadDim + kvHead * mHeadDim;
+            T * key_src = key->host<T>() + i * mKvNumHead * mHeadDim + kvHead * mHeadDim + bias;
             int out_index = (mPastLength + i) / hP;
             int in_index  = (mPastLength + i) % hP;
             for (int j = 0; j < mHeadDim; j++) {
@@ -703,13 +704,13 @@ void CPUKVCacheManager::ProcessKey(const Tensor* key, int seqLen, int kvHead) {
 }
 
 template <typename T>
-void CPUKVCacheManager::ProcessValue(const Tensor* value, int seqLen, int kvHead) { // [headdim/hP, maxlen, hP]
+void CPUKVCacheManager::ProcessValue(const Tensor* value, int seqLen, int kvHead, int bias) { // [headdim/hP, maxlen, hP]
     if (mQuantValue) {
         int8_t* valueDst = reinterpret_cast<int8_t*>(addrOfValue(kvHead));
         float* valueSum = reinterpret_cast<float*>(addrOfValueSum(kvHead));
 
         int32_t params[] = {mKvNumHead, seqLen, mHeadDim, mConfig.mBlockNum, mMaxLength, lP8, hP8, mPastLength, kvHead, (int32_t)mFlashAttentionUpperKv};
-        mQuantValueFunc(valueDst, value->host<float>(), valueSum, params);
+        mQuantValueFunc(valueDst, value->host<float>() + bias, valueSum, params);
     }
     else {
         // [mHeadDim/hP, mMaxLength/lP, hP, lP]
@@ -722,7 +723,7 @@ void CPUKVCacheManager::ProcessValue(const Tensor* value, int seqLen, int kvHead
 
         T * value_dst = reinterpret_cast<T*>(addrOfValue(kvHead));
         for (int i = 0; i < seqLen; i++) {
-            T * value_src = value->host<T>() + i * mKvNumHead * mHeadDim + kvHead * mHeadDim;
+            T * value_src = value->host<T>() + i * mKvNumHead * mHeadDim + kvHead * mHeadDim + bias;
             // int seqLenOut = (mPastLength + i) / lP;
             // int seqLenIn = (mPastLength + i) % lP;
 
@@ -767,7 +768,7 @@ void CPUKVCacheManager::moveKV(int src, int dst, int size) {
     }
 }
 
-void CPUKVCacheManager::onUpdateKV(const Tensor * key, const Tensor * value, int add) {
+void CPUKVCacheManager::onUpdateKV(const Tensor * key, const Tensor * value, int add, int bias) {
     auto core = static_cast<CPUBackend*>(mBackend)->functions();
     int seq_len = add;
     auto divPart = UP_DIV(mKvNumHead, 1);
@@ -779,11 +780,11 @@ void CPUKVCacheManager::onUpdateKV(const Tensor * key, const Tensor * value, int
             int endIdx = startIdx + remainPart;
             for (int h = startIdx; h < endIdx; ++h) {
                 if (mBytes == 2) {
-                    ProcessKey<FLOAT16_T>(key, seq_len, h);
-                    ProcessValue<FLOAT16_T>(value, seq_len, h);
+                    ProcessKey<FLOAT16_T>(key, seq_len, h, bias);
+                    ProcessValue<FLOAT16_T>(value, seq_len, h, bias);
                 } else {
-                    ProcessKey<float>(key, seq_len, h);
-                    ProcessValue<float>(value, seq_len, h);
+                    ProcessKey<float>(key, seq_len, h, bias);
+                    ProcessValue<float>(value, seq_len, h, bias);
                 }
             }
         }

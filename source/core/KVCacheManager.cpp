@@ -28,6 +28,7 @@ void KVCacheManager::createKVCacheFile(std::string keyPath, std::string valuePat
     // Each layer has its own kvcache, so we have to create a key file and a value file for each layer and the file name must be unique
     // Here we use the address of the mResource as the file name because the addresses of mResource in different layers are guaranteed to be different
     std::string fileName = addrToHex(this);
+    fileName = mConfig.prefixName + fileName;
     mBaseFileName = MNNFilePathConcat(mConfig.mKVCacheDir, fileName);
 
     std::string pathk    = keyPath.size() > 0 ? keyPath : mBaseFileName + ".k";
@@ -106,6 +107,38 @@ void KVCacheManager::unmapKVCache(size_t keySize, size_t valueSize)
         MNNUnmapFile(mMapValueAddr, valueSize);
         mMapValueAddr = nullptr;
     }
+}
+
+bool BatchKVCacheManager::remove(BatchKVMeta* meta){
+    if(meta == nullptr){
+        return false;
+    }
+    // remove request's kvmeta
+    for(int id: meta->remove){
+        auto iter = mBatchKVCacheManager.find(id);
+        if(iter != mBatchKVCacheManager.end()){
+            delete iter->second;
+            iter->second = nullptr;
+            mBatchKVCacheManager.erase(iter);
+        }
+    }
+    return true;
+}
+
+KVCacheManager* BatchKVCacheManager::getCacheManager(int req_id){
+    auto iter = mBatchKVCacheManager.find(req_id);
+    if(iter != mBatchKVCacheManager.end()){
+        return iter->second;
+    }
+    return nullptr;
+}
+
+bool BatchKVCacheManager::addCacheManager(int req_id, KVCacheManager* cacheManager){
+    if(cacheManager == nullptr){
+        return false;
+    }
+    mBatchKVCacheManager[req_id] = cacheManager;
+    return true;
 }
 
 } // namespace MNN

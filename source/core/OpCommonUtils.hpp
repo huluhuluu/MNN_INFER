@@ -46,6 +46,14 @@ struct KVMeta {
         return sum;
     }
 };
+struct BatchKVMeta{
+    std::map<int, KVMeta*> mMetas;
+    std::vector<int> remove;
+
+    // calculated request id for next compute
+    std::vector<int> calId; 
+};
+
 #endif
 
 class MNN_PUBLIC OpCommonUtils {

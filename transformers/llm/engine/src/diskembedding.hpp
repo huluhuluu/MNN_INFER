@@ -21,6 +21,7 @@ public:
     explicit DiskEmbedding(const std::shared_ptr<LlmConfig>& config, std::string fileName = "");
     ~DiskEmbedding() {}
     void embedding(const std::vector<int>& input_ids, float* ptr);
+    void embedding(const std::vector<std::vector<int> >& input_ids, const std::vector<int>& calLen, float* ptr);
 
 private:
     void seek_read(uint8_t* dst, size_t size, size_t offset);

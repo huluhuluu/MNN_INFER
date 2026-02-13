@@ -34,11 +34,13 @@ private:
     int eP, lP, hP, mPack; // float matmul packing
     int eP8, lP8, hP8;    // GemmInt8 packing
     int mNumHead, mKvNumHead, mHeadDim;
-    KVMeta* mMeta;
+    BatchKVMeta* mBatchMeta = nullptr;
 
     // common
     std::shared_ptr<Tensor> mPackQ, mPackQKV, mRunningMax, mRunningSum, mTempQKBlock, mTempOut, mExpfDiffMax;
-    std::shared_ptr<CPUKVCacheManager> mKVCacheManager = nullptr;
+    Backend * mBackend;
+    MNN::KVCacheManager::KVCacheConfig kvconfig;
+    std::shared_ptr<BatchKVCacheManager> mKVCacheManagers;
     bool mUseFlashAttention = true;
 
     // quant Query/Key/Value

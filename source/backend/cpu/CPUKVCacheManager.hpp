@@ -37,8 +37,8 @@ private:
     void expandKVCacheInMem(int oldMaxLength);
     void moveKVCacheFromMemToDisk(int oldMaxLength);
     void expandKVCacheInDisk(int oldMaxLength, int oldKeySize, int oldValueSize, int keySize, int valueSize, file_t specKeyFile = INVALID_FILE, file_t specValueFile = INVALID_FILE);
-    template <typename T> void ProcessKey(const Tensor* key, int seq_len, int kv_h);
-    template <typename T> void ProcessValue(const Tensor* value, int seq_len, int kv_h);
+    template <typename T> void ProcessKey(const Tensor* key, int seq_len, int kv_h, int bias = 0);
+    template <typename T> void ProcessValue(const Tensor* value, int seq_len, int kv_h, int bias = 0);
     template <typename T> void moveKV(int src, int dst, int size);
     size_t keyIndex(int seq, int dim) const;
     size_t valueIndex(int seq, int dim) const;
@@ -63,7 +63,7 @@ public:
     CPUKVCacheManager(Backend * backend, KVCacheConfig & kvConfig): KVCacheManager(backend, kvConfig) {
         // nothing todo
     }
-    ~CPUKVCacheManager() {
+    virtual ~CPUKVCacheManager() {
         onClear();
     }
     const Tensor * keySum() {
@@ -96,7 +96,7 @@ public:
     
     void onPushBack(const Tensor * key, const Tensor * value, int add);
     void onDequantValue(Tensor * dequantedValues);
-    void onUpdateKV(const Tensor * key, const Tensor * value, int add);
+    void onUpdateKV(const Tensor * key, const Tensor * value, int add, int bias = 0);
 
     // quant Key/Value
     int8_t * addrOfKeySum(int kv_h) {
