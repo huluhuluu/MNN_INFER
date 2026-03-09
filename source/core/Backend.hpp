@@ -12,6 +12,7 @@
 #include <MNN/MNNForwardType.h>
 #include <MNN/ErrorCode.hpp>
 #include <map>
+#include <string>
 #include "Command.hpp"
 #include "NonCopyable.hpp"
 #include "BufferAllocator.hpp"
@@ -19,6 +20,16 @@
 #include <atomic>
 
 namespace MNN {
+
+/**
+ * @brief Profile data for a single operator
+ */
+struct OpProfileInfo {
+    std::string name;       // Op name
+    std::string type;       // Op type
+    float timeMs = 0.0f;    // Time in milliseconds
+    int callCount = 0;      // Number of calls
+};
 
 struct Op;
 class Execution;
@@ -376,6 +387,46 @@ public:
         // Do nothing
     }
 
+    /**
+     * @brief Get profile data for operator timing statistics
+     * @return map of op name to OpProfileInfo (with type and time)
+     */
+    virtual std::map<std::string, OpProfileInfo> onGetProfileData() const {
+        std::map<std::string, OpProfileInfo> result;
+        for (const auto& pair : mProfileData) {
+            OpProfileInfo info;
+            info.name = pair.first;
+            info.type = getProfileOpType(pair.first);
+            info.timeMs = pair.second / 1000.0f; // us -> ms
+            info.callCount = 1;  // Each record is one call
+            result[pair.first] = info;
+        }
+        return result;
+    }
+
+    /**
+     * @brief Clear profile data after collection
+     */
+    virtual void onClearProfileData() {
+        mProfileData.clear();
+    }
+
+    /**
+     * @brief Record op time with type (called by backends, time in microseconds)
+     */
+    void recordOpProfileTime(const std::string& opName, const std::string& opType, uint64_t timeUs) const {
+        mProfileData[opName] += timeUs;
+        mProfileOpTypes[opName] = opType;  // Store op type
+    }
+    
+    /**
+     * @brief Get op type for a given op name
+     */
+    std::string getProfileOpType(const std::string& opName) const {
+        auto it = mProfileOpTypes.find(opName);
+        return it != mProfileOpTypes.end() ? it->second : "";
+    }
+
     mutable int pCurrentStatus = 0; // NO_ERROR
 
     // TODO: Move to Backend
@@ -383,6 +434,11 @@ public:
 private:
     std::future<int> mFuture;
     RuntimeHint mHint;
+    
+    // Profile data storage (time in us)
+    mutable std::map<std::string, uint64_t> mProfileData;
+    // Op name -> Op type mapping
+    mutable std::map<std::string, std::string> mProfileOpTypes;
 };
 
 /** abstract Runtime register */

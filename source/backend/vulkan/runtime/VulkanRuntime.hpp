@@ -57,6 +57,11 @@ public:
 
     virtual Backend* onCreate(const BackendConfig* config, Backend* origin) const override;
     enum GPUType { ADRENO = 0, MALI = 1, OTHER = 2 };
+
+    // TODO: Implement profile data interface for Vulkan backend
+    // virtual std::map<std::string, OpProfileInfo> onGetProfileData() const override;
+    // void onClearProfileData() override;
+
     virtual void onGabageCollect(int level) override;
     virtual float onGetMemoryInMB() override;
     int onGetRuntimeStatus(RuntimeStatus statusEnum) const override;

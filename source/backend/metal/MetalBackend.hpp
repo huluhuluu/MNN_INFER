@@ -64,8 +64,13 @@ public:
     std::map<std::string, std::vector<std::pair<std::vector<uint32_t>, std::tuple<std::vector<uint32_t>, std::vector<uint32_t>, uint32_t>>>>& getTunedThreadGroupVec() {
         return mTunedThreadGroupVec;
     }
-    virtual Backend *onCreate(const BackendConfig* config, Backend* origin) const override;
-    virtual void onGabageCollect(int level) override;
+        virtual Backend *onCreate(const BackendConfig* config, Backend* origin) const override;
+    
+        // TODO: Implement profile data interface for Metal backend
+        // virtual std::map<std::string, OpProfileInfo> onGetProfileData() const override;
+        // void onClearProfileData() override;
+    
+        virtual void onGabageCollect(int level) override;
     virtual CompilerType onGetCompilerType() const override {
         return Compiler_Loop;
     }

@@ -1,0 +1,270 @@
+//
+//  llm_profiler.hpp
+//  MNN
+//
+//  Created for LLM Op Profiling
+//
+
+#ifndef LLM_PROFILER_HPP
+#define LLM_PROFILER_HPP
+
+#include <string>
+#include <vector>
+#include <map>
+#include <memory>
+#include <functional>
+#include <cmath>
+#include <MNN/Interpreter.hpp>
+#include <MNN/AutoTime.hpp>
+#include <MNN/expr/Expr.hpp>
+#include <MNN/MNNForwardType.h>
+
+namespace MNN {
+namespace Transformer {
+
+// Forward declarations
+class Llm;
+
+/**
+ * Op Record for storing profiling data
+ * Key format: "opName@backend" to support multi-backend execution
+ */
+struct OpRecord {
+    std::string name;           // Op name (without backend suffix)
+    std::string type;           // Op type
+    std::string backend;        // Backend name (CPU, OpenCL, QNN)
+    float totalTime = 0.0f;     // Total time in ms
+    int callCount = 0;          // Number of calls
+    float flops = 0.0f;         // Computation amount
+    bool isSpecial = false;     // Special op: listed separately in output, not merged with same-name ops
+    std::vector<float> timeHistory;  // Time per call (optional)
+    
+    float avgTime() const {
+        return callCount > 0 ? totalTime / callCount : 0.0f;
+    }
+    
+    // Calculate standard deviation of call times (if history available)
+    float stdTime() const {
+        if (timeHistory.size() < 2) return 0.0f;
+        float mean = avgTime();
+        float sum = 0.0f;
+        for (float t : timeHistory) {
+            sum += (t - mean) * (t - mean);
+        }
+        return sqrtf(sum / timeHistory.size());
+    }
+};
+
+/**
+ * Profile data for a single phase (Prefill or Decode)
+ */
+struct PhaseProfile {
+    // Key format: "opName@backend" - supports same op on different backends
+    std::map<std::string, OpRecord> opRecords;
+    std::map<std::string, OpRecord> opTypeRecords;       // By op type (aggregated)
+    
+    // Per-backend total times (from op-level profiling)
+    std::map<std::string, float> backendTotalTimes;      // backend -> total time
+    
+    float totalTime = 0.0f;              // Total phase time in ms (from op-level profiling)
+    float tokenTotalTime = 0.0f;         // Total time from token-level measurement (decode only)
+    int tokenCount = 0;                  // Number of tokens (for decode)
+    
+    void reset() {
+        opRecords.clear();
+        opTypeRecords.clear();
+        backendTotalTimes.clear();
+        totalTime = 0.0f;
+        tokenTotalTime = 0.0f;
+        tokenCount = 0;
+    }
+};
+
+/**
+ * Profile info for a single operator (from backend)
+ */
+struct BackendOpInfo {
+    std::string name;       // Op name
+    std::string type;       // Op type
+    float timeMs = 0.0f;    // Time in milliseconds
+    int callCount = 0;      // Number of calls
+};
+
+/**
+ * Backend profile data interface
+ */
+struct BackendProfileData {
+    MNNForwardType backendType;
+    std::string backendName;                               // Backend name string
+    std::map<std::string, BackendOpInfo> opInfos;          // op_name -> info (with type and time)
+    float totalTime = 0.0f;
+    bool valid = false;
+};
+
+/**
+ * LLM Op Profiler Class
+ * 
+ * Provides operator-level profiling for LLM inference,
+ * supporting CPU, OpenCL, and QNN backends.
+ */
+class LLMOpProfiler {
+public:
+    /**
+     * Profiler configuration
+     */
+    struct Config {
+        std::vector<std::string> specialOps;   // Special ops for separate timing
+        bool enableDetailedHistory = false;     // Record each call time
+        bool separatePrefillDecode = true;      // Separate prefill/decode timing
+        int decodeIterationsPerReport = 1;      // Report interval for decode
+    };
+    
+    LLMOpProfiler();
+    ~LLMOpProfiler();
+    
+    /**
+     * Set configuration
+     */
+    void setConfig(const Config& config);
+    
+    /**
+     * Set special ops for separate timing
+     */
+    void setSpecialOps(const std::vector<std::string>& specialOps);
+    
+    /**
+     * Check if an op name is special
+     */
+    bool isSpecialOp(const std::string& opName) const;
+    
+    // ========== Phase Control ==========
+    
+    /**
+     * Called when prefill phase starts
+     */
+    void onPrefillStart();
+    
+    /**
+     * Called when prefill phase ends
+     */
+    void onPrefillEnd();
+    
+    /**
+     * Called when decode phase starts (per token)
+     */
+    void onDecodeTokenStart(int tokenId);
+    
+    /**
+     * Called when decode phase ends (per token)
+     */
+    void onDecodeTokenEnd(int tokenId);
+    
+    
+    /**
+     * Called when entire decode phase start
+     */
+    void onDecodePhaseStart();
+    
+
+    /**
+     * Called when entire decode phase ends
+     */
+    void onDecodePhaseEnd();
+    
+    // ========== CPU Backend Callbacks ==========
+    
+    /**
+     * Before op execution (for CPU backend)
+     * Returns true to execute the op, false to skip
+     */
+    bool beforeOp(const std::vector<MNN::Tensor*>& tensors, const std::string& opName);
+    
+    /**
+     * After op execution (for CPU backend)
+     */
+    void afterOp(const std::vector<MNN::Tensor*>& tensors, const std::string& opName);
+    
+    /**
+     * Before op execution with OperatorInfo
+     */
+    bool beforeOpWithInfo(const std::vector<MNN::Tensor*>& tensors, const MNN::OperatorInfo* info);
+    
+    /**
+     * After op execution with OperatorInfo
+     */
+    void afterOpWithInfo(const std::vector<MNN::Tensor*>& tensors, const MNN::OperatorInfo* info);
+    
+    // ========== Backend Profile Data Collection ==========
+    
+    /**
+     * Collect profile data from backend (OpenCL/QNN)
+     * Called after each phase (prefill or decode batch)
+     */
+    void collectBackendProfile(const BackendProfileData& data);
+    
+    // ========== Results ==========
+    
+    /**
+     * Print statistics to stdout
+     */
+    void printStats() const;
+    
+    /**
+     * Export results to JSON file
+     */
+    bool exportJSON(const std::string& filepath) const;
+    
+    /**
+     * Get prefill phase profile
+     */
+    const PhaseProfile& getPrefillProfile() const { return mPrefillProfile; }
+    
+    /**
+     * Get decode phase profile
+     */
+    const PhaseProfile& getDecodeProfile() const { return mDecodeProfile; }
+    
+    /**
+     * Reset all profiling data
+     */
+    void reset();
+    
+    /**
+     * Enable/disable profiling
+     */
+    void setEnabled(bool enabled) { mEnabled = enabled; }
+    bool isEnabled() const { return mEnabled; }
+    
+private:
+    // Check if op name matches pattern (supports wildcards)
+    bool matchPattern(const std::string& opName, const std::string& pattern) const;
+    
+private:
+    Config mConfig;
+    bool mEnabled = true;
+    bool mInPrefill = true;
+    int mCurrentDecodeToken = -1;
+    
+    // Profile data for each phase
+    PhaseProfile mPrefillProfile;
+    PhaseProfile mDecodeProfile;
+    
+    // Timing for CPU callback (op-level)
+    MNN::Timer mOpTimer;
+    std::string mCurrentOpName;
+    std::string mCurrentOpType;
+    
+    // Timing for token-level (separate from op-level)
+    MNN::Timer mTokenTimer;
+    
+    // Special ops patterns
+    std::vector<std::string> mSpecialOpPatterns;
+    
+    // Decode token timing history
+    std::vector<float> mDecodeTokenTimes;
+};
+
+} // namespace Transformer
+} // namespace MNN
+
+#endif // LLM_PROFILER_HPP

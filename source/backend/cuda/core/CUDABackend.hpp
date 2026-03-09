@@ -33,6 +33,11 @@ public:
     virtual ~CUDARuntimeWrapper();
     virtual Backend *onCreate(const BackendConfig* config, Backend* origin) const override;
     virtual void onGabageCollect(int level) override;
+
+    // TODO: Implement profile data interface for CUDA backend
+    // virtual std::map<std::string, OpProfileInfo> onGetProfileData() const override;
+    // void onClearProfileData() override;
+
     bool isCreateError() const {
         return mIsCreateError;
     }

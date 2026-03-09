@@ -37,6 +37,10 @@ public:
      */
     virtual Backend* onCreate(const BackendConfig* config, Backend* origin) const override;
 
+    // TODO: Implement profile data interface for OpenGL backend
+    // virtual std::map<std::string, OpProfileInfo> onGetProfileData() const override;
+    // void onClearProfileData() override;
+
     /**
      @brief clear unuseful resource
      @param level clear level: 0 - 100, bigger mean clear more, smaller mean cache more

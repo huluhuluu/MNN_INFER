@@ -33,6 +33,7 @@ class Sampler;
 class Prompt;
 class Generation;
 struct TimePerformance;
+class LLMOpProfiler;  // Forward declaration for profiler
 
 using ChatMessage = std::pair<std::string, std::string>; // <role, content>
 using ChatMessages = std::vector<ChatMessage>;
@@ -45,6 +46,14 @@ enum class MatchStrictLevel : int;
 enum class NgramSelectRule : int;
 
 struct KVMeta;
+
+// LLM execution stage for profiling
+enum class LlmStage {
+    Idle,
+    Prefill,
+    Decode
+};
+
 struct LlmContext {
     // forward
     int prompt_len = 0;
@@ -66,6 +75,8 @@ struct LlmContext {
     std::vector<int> history_tokens;
     std::vector<int> output_tokens;
     std::string generate_str;
+    // stage for profiling
+    LlmStage current_stage = LlmStage::Idle;
 };
 struct GenerationParams;
 class MNN_PUBLIC Llm {
@@ -116,8 +127,30 @@ public:
     const LlmContext* getContext() const {
         return mContext.get();
     }
+    // ========== Profiler Interface ==========
+    // Enable/disable profiler
+    void enableProfiler(bool enabled = true);
+    // Get profiler instance
+    std::shared_ptr<LLMOpProfiler> getProfiler() const { return mProfiler; }
+    // Print profiler statistics
+    void printProfilerStats() const;
+    // Export profiler results to JSON
+    bool exportProfilerJSON(const std::string& filepath) const;
+    // Get current stage for profiling
+    LlmStage getCurrentStage() const;
+    // Set special ops for profiler (separate timing)
+    void setProfilerSpecialOps(const std::vector<std::string>& specialOps);
+    // ========== End Profiler Interface ==========
+    
+    // Waveform generation
     virtual void setWavformCallback(std::function<bool(const float*, size_t, bool)> callback) {}
     virtual void generateWavform() {}
+    
+private:
+    // Setup profiler callback for CPU backend
+    void setupProfilerCallback();
+    // Collect profile data from backend (OpenCL/QNN)
+    void collectBackendProfileData();
 protected:
     void initRuntime();
     void setRuntimeHint(std::shared_ptr<Express::Executor::RuntimeManager> &rtg);
@@ -152,6 +185,8 @@ private:
     std::shared_ptr<Generation> mGenerationStrategy;
     void setSpeculativeConfig();
     void updateContext(int seq_len, int gen_len);
+    // Profiler
+    std::shared_ptr<LLMOpProfiler> mProfiler;
 
 private:
     bool mInSpec = false;

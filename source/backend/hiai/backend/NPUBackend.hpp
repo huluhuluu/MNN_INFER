@@ -253,6 +253,11 @@ namespace MNN {
         virtual CompilerType onGetCompilerType() const override;
         virtual Backend* onCreate(const BackendConfig* conf, Backend* origin) const override;
         virtual void onGabageCollect(int level) override;
+
+        // TODO: Implement profile data interface for HIAI backend
+        // virtual std::map<std::string, OpProfileInfo> onGetProfileData() const override;
+        // void onClearProfileData() override;
+
         // If buffer is not nullptr, try copy cache, else delete cache
         virtual bool onSetCache(const void* buffer, size_t size) override {
             // if (nullptr == buffer) {

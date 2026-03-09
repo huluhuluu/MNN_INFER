@@ -36,6 +36,11 @@ public:
 
     virtual Backend* onCreate(const BackendConfig* config, Backend* origin) const override;
     virtual void onGabageCollect(int level) override;
+
+    // TODO: Implement profile data interface for TensorRT backend
+    // virtual std::map<std::string, OpProfileInfo> onGetProfileData() const override;
+    // void onClearProfileData() override;
+
     // If buffer is not nullptr, try copy cache, else delete cache
     virtual bool onSetCache(const void* buffer, size_t size) override {
         if (nullptr == buffer) {

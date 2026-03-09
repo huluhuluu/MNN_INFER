@@ -52,6 +52,11 @@ namespace MNN {
         virtual CompilerType onGetCompilerType() const override;
         virtual Backend* onCreate(const BackendConfig* conf, Backend* origin) const override;
         virtual void onGabageCollect(int level) override;
+
+        // TODO: Implement profile data interface for NNAPI backend
+        // virtual std::map<std::string, OpProfileInfo> onGetProfileData() const override;
+        // void onClearProfileData() override;
+
         virtual std::pair<const void*, size_t> onGetCache() override {
             return std::make_pair(mCacheBuffer, mCacheSize);
         }

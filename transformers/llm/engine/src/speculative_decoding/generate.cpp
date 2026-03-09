@@ -7,6 +7,7 @@
 #include "generate.hpp"
 #include <MNN/AutoTime.hpp>
 #include "llm/llm.hpp"
+#include "llm/llm_profiler.hpp"
 #include "../llmconfig.hpp"
 #include "../kvmeta.hpp"
 #include "lookahead.hpp"
@@ -42,6 +43,13 @@ void ArGeneration::generate(GenerationParams& param) {
     int len = 0;
     while (len < max_token) {
         AUTOTIME;
+        
+        // Profiler: Decode token start
+        auto profiler = mLlm->getProfiler();
+        if (profiler && profiler->isEnabled()) {
+            profiler->onDecodeTokenStart(mContext->current_token);
+        }
+        
         // Update gen seq
         mContext->current_token = mLlm->sample(param.outputs[0]);
         mContext->history_tokens.push_back(mContext->current_token);
@@ -71,6 +79,12 @@ void ArGeneration::generate(GenerationParams& param) {
         // Update input seq
         mLlm->updateContext(1, 0);
         mContext->decode_us += _t.durationInUs();
+        
+        // Profiler: Decode token end
+        if (profiler && profiler->isEnabled()) {
+            profiler->onDecodeTokenEnd(mContext->current_token);
+        }
+        
         len++;
     }
 }
