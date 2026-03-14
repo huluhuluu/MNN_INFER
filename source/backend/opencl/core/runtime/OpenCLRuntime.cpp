@@ -22,6 +22,9 @@
 using namespace CLCache;
 namespace MNN {
 
+// Thread-local index for marking op boundaries in profile entries
+thread_local size_t gPendingOpStartIndex = 0;
+
 extern const std::map<std::string, const char*> OpenCLProgramMap;
 static std::mutex gCLMutex;
 static std::weak_ptr<::cl::Context> globalContext;

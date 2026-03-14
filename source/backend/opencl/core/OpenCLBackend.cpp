@@ -199,6 +199,51 @@ std::pair<const void*, size_t> CLRuntime::onGetCache() {
     return mOpenCLRuntime->makeCache(mTunedInfo);
 }
 
+// ========== Profile Data Interface Implementation ==========
+std::map<std::string, OpProfileInfo> CLRuntime::onGetProfileData() const {
+#ifdef ENABLE_OPENCL_TIME_PROFILER
+    const auto& opEntries = mOpenCLRuntime->getOpProfileEntries();
+    const auto& kernelEvents = mOpenCLRuntime->getEvent();
+    // Iterate over each op execution record
+    // Each entry marks a single op execution with its kernel range [startIndex, endIndex)
+    for (const auto& opEntry : opEntries) {
+        // statics max(END) - min(SUBMIT)
+        float totalKernelTimeUs = 0.0f;
+        
+        for (size_t i = opEntry.startIndex; i < opEntry.endIndex; ++i) {
+            const auto& event = kernelEvents[i].second;
+            cl_int res = event.wait();
+            if (res != CL_SUCCESS) {
+                continue;
+            }
+            auto start = event.getProfilingInfo<CL_PROFILING_COMMAND_SUBMIT>();
+            auto end = event.getProfilingInfo<CL_PROFILING_COMMAND_END>();
+            
+            // Calculate each kernel's actual execution time
+            if (end > start) {
+                totalKernelTimeUs += (end - start) / 1000.0f;  // ns -> us
+            }
+        }
+        Runtime::recordOpProfileTime(opEntry.opName, opEntry.opType, totalKernelTimeUs);
+    }
+    mOpenCLRuntime->clearProfileData();
+#endif
+    return Runtime::onGetProfileData();
+}
+
+void CLRuntime::onClearProfileData() {
+    mOpenCLRuntime->clearProfileData();
+}
+
+void CLRuntime::profileStart(const std::vector<MNN::Tensor*>& tensors, const MNN::OperatorInfo* info) const {
+    mOpenCLRuntime->profileStart(tensors, info);
+}
+
+void CLRuntime::profileEnd(const std::vector<MNN::Tensor*>& tensors, const MNN::OperatorInfo* info) const {
+    mOpenCLRuntime->profileEnd(tensors, info);
+}
+// ========== End Profile Data Interface ==========
+
 Backend* CLRuntime::onCreate(const BackendConfig* config, Backend* origin) const {
     auto precision = mPrecision;
     auto memory = mMemory;

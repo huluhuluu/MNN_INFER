@@ -13,8 +13,11 @@
 
 #include <MNN/AutoTime.hpp>
 #include <MNN/expr/ExecutorScope.hpp>
+#include <MNN/Interpreter.hpp>
+#include "core/Backend.hpp"
 #include "cpp/ExprDebug.hpp"
 #include "llm/llm.hpp"
+#include "llm/llm_profiler.hpp"
 #include "kvmeta.hpp"
 #include "llmconfig.hpp"
 #include "prompt.hpp"
@@ -163,6 +166,8 @@ void Llm::initRuntime() {
     mRuntimeManager.reset(Executor::RuntimeManager::createRuntimeManager(config));
     setRuntimeHint(mRuntimeManager);
 
+    // TODO: support llm_profiler
+    mRuntimeManager->setMode(MNN::Interpreter::Session_Debug);
 #if DEBUG_MODE == 1
     mRuntimeManager->setMode(MNN::Interpreter::Session_Debug);
     _initTimeTrace();
@@ -260,6 +265,10 @@ void Llm::load() {
     }
     // set speculative decoding params
     setSpeculativeConfig();
+    
+    // Initialize profiler
+    mProfiler = std::make_shared<LLMOpProfiler>();
+    
     // create generation strategy
     mGenerationStrategy = GenerationStrategyFactory::create(this, mContext, mConfig, mInSpec);
 
@@ -600,13 +609,31 @@ std::vector<int> Llm::generate(MNN::Express::VARP input_embeds, int max_tokens) 
     }
     int seqLen = input_embeds->getInfo()->dim[mSeqLenIndex];
     mContext->prompt_len = seqLen;
+    
+    // ========== Profiler: Prefill Phase Start ==========
+    if (mProfiler && mProfiler->isEnabled()) {
+        mContext->current_stage = LlmStage::Prefill;
+        mProfiler->onPrefillStart();
+    }
+    // ========== End Profiler: Prefill Phase Start ==========
+    
     Timer _t;
     forwardVec(input_embeds);
     if(mGenerateParam->outputs.size() < 1) {
         return {};
     }
     updateContext(seqLen, 0);
-    mContext->prefill_us = _t.durationInUs();
+    int ttt = _t.durationInUs();
+    mContext->prefill_us = ttt;
+    printf("Prefill time: %d us\n", ttt);
+
+    // ========== Profiler: Prefill Phase End ==========
+    if (mProfiler && mProfiler->isEnabled()) {
+        collectBackendProfileData();
+        mProfiler->onPrefillEnd(mContext->prompt_len);
+        mContext->current_stage = LlmStage::Idle;
+    }
+    // ========== End Profiler: Prefill Phase End ==========
 
     MNN::Express::ExecutorScope::Current()->gc(); // after prefill
 
@@ -630,9 +657,27 @@ std::vector<int> Llm::generate(MNN::Express::VARP input_embeds, int max_tokens) 
 #endif
 
     _t.reset();
+    
+    // ========== Profiler: Decode Phase Start ==========
+    if (mProfiler && mProfiler->isEnabled()) {
+        mContext->current_stage = LlmStage::Decode;
+    }
+    // ========== End Profiler: Decode Phase Start ==========
+    
     // call generation function
     mGenerateParam->max_new_tokens = max_tokens;
     mGenerationStrategy->generate(*mGenerateParam);
+    
+    ttt = _t.durationInUs();
+    printf("Decode time: %d us\n", ttt);
+    // ========== Profiler: Decode Phase End ==========
+    if (mProfiler && mProfiler->isEnabled()) {
+        collectBackendProfileData();
+        mProfiler->onDecodePhaseEnd();
+        mContext->current_stage = LlmStage::Idle;
+    }
+    // ========== End Profiler: Decode Phase End ==========
+    
     return mContext->output_tokens;
 }
 
@@ -890,5 +935,142 @@ VARP Llm::gen_position_ids(int seq_len) {
 bool Llm::is_stop(int token_id) {
     return mTokenizer->is_stop(token_id);
 }
+
+// ========== Profiler Implementation ==========
+
+void Llm::enableProfiler(bool enabled) {
+    if (mProfiler) {
+        mProfiler->setEnabled(enabled);
+        if (enabled) {
+            setupProfilerCallback();
+        }
+    }
+}
+
+void Llm::printProfilerStats() const {
+    if (mProfiler) {
+        mProfiler->printStats();
+    } else {
+        MNN_PRINT("[LLM] Profiler not initialized\n");
+    }
+}
+
+bool Llm::exportProfilerJSON(const std::string& filepath) const {
+    if (mProfiler) {
+        return mProfiler->exportJSON(filepath);
+    }
+    MNN_ERROR("[LLM] Profiler not initialized\n");
+    return false;
+}
+
+LlmStage Llm::getCurrentStage() const {
+    return mContext->current_stage;
+}
+
+void Llm::setProfilerSpecialOps(const std::vector<std::string>& specialOps) {
+    if (mProfiler) {
+        mProfiler->setSpecialOps(specialOps);
+    }
+}
+
+void Llm::setupProfilerCallback() {
+    if (!mProfiler || !mProfiler->isEnabled()) return;
+    
+    auto profiler = mProfiler;
+    
+    // Setup callback for CPU backend timing
+    MNN::TensorCallBackWithInfo beforeOp = [profiler](
+        const std::vector<MNN::Tensor*>& tensors, 
+        const MNN::OperatorInfo* info) {
+        return profiler->beforeOp(tensors, info);
+    };
+    
+    MNN::TensorCallBackWithInfo afterOp = [profiler](
+        const std::vector<MNN::Tensor*>& tensors, 
+        const MNN::OperatorInfo* info) {
+        profiler->afterOp(tensors, info);
+        return true;
+    };
+    
+    // Get current executor and set callback
+    auto executor = Express::ExecutorScope::Current();
+    if (executor) {
+        executor->setCallBack(std::move(beforeOp), std::move(afterOp));
+    }
+}
+
+void Llm::collectBackendProfileData() {
+    if (!mProfiler || !mProfiler->isEnabled()) return;
+    
+    auto executor = Express::ExecutorScope::Current();
+    if (!executor) return;
+    
+    // Get all backend runtimes
+    auto runtimeInfo = executor->getRuntime();
+    
+    // Iterate through all runtimes and collect profile data
+    for (auto& pair : runtimeInfo.first) {
+        auto backendType = pair.first;
+        auto& runtime = pair.second;
+        
+        if (!runtime) continue;
+        
+        // Get profile data from runtime via virtual function
+        auto opProfileData = runtime->onGetProfileData();
+        if (opProfileData.empty()) continue;
+        
+        // Build BackendProfileData
+        BackendProfileData data;
+        data.backendType = backendType;
+        data.valid = true;
+        
+        // Get backend name
+        switch (backendType) {
+            case MNN_FORWARD_CPU:
+                data.backendName = "CPU";
+                break;
+            case MNN_FORWARD_CPU_EXTENSION:
+                data.backendName = "CPU";
+                break;
+            case MNN_FORWARD_OPENCL:
+                data.backendName = "OpenCL";
+                break;
+            case MNN_FORWARD_NN:
+                data.backendName = "QNN";
+                break;
+            case MNN_FORWARD_VULKAN:
+                data.backendName = "Vulkan";
+                break;
+            case MNN_FORWARD_METAL:
+                data.backendName = "Metal";
+                break;
+            case MNN_FORWARD_CUDA:
+                data.backendName = "CUDA";
+                break;
+            default:
+                data.backendName = "Unknown";
+                break;
+        }
+        
+        // Copy op info and calculate total time
+        data.totalTime = 0.0f;
+        for (auto& opPair : opProfileData) {
+            BackendOpInfo info;
+            info.name = opPair.second.name;
+            info.type = opPair.second.type;
+            info.timeMs = opPair.second.timeMs;
+            info.callCount += opPair.second.callCount;
+            data.opInfos[opPair.first] = info;
+            data.totalTime += info.timeMs;
+        }
+        
+        // Collect into profiler
+        mProfiler->collectBackendProfile(data);
+        
+        // Clear backend profile data for next phase
+        runtime->onClearProfileData();
+    }
+}
+
 } // namespace Transformer
 } // namespace MNN

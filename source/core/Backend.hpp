@@ -29,6 +29,9 @@ struct OpProfileInfo {
     std::string type;       // Op type
     float timeMs = 0.0f;    // Time in milliseconds
     int callCount = 0;      // Number of calls
+
+    OpProfileInfo() = default;  // Default constructor required by std::map::operator[]
+    OpProfileInfo(std::string name, std::string type): name(name), type(type){};
 };
 
 struct Op;
@@ -388,43 +391,47 @@ public:
     }
 
     /**
+     * @brief Mark the start of an op for profiling (for backends that need batch processing)
+     * Called before op execution to record current position
+     */
+    virtual void profileStart(const std::vector<MNN::Tensor*>& tensors, const MNN::OperatorInfo* info) const {
+        // Default: do nothing, CPU backend uses recordOpProfileTime directly
+    }
+    
+    /**
+     * @brief Mark the end of an op and set op info for entries collected since onMarkOpStart
+     * Called after op execution to batch set op name and type
+     */
+    virtual void profileEnd(const std::vector<MNN::Tensor*>& tensors, const MNN::OperatorInfo* info) const {
+        // Default: do nothing, CPU backend uses recordOpProfileTime directly
+    }
+
+    /**
      * @brief Get profile data for operator timing statistics
      * @return map of op name to OpProfileInfo (with type and time)
      */
     virtual std::map<std::string, OpProfileInfo> onGetProfileData() const {
-        std::map<std::string, OpProfileInfo> result;
-        for (const auto& pair : mProfileData) {
-            OpProfileInfo info;
-            info.name = pair.first;
-            info.type = getProfileOpType(pair.first);
-            info.timeMs = pair.second / 1000.0f; // us -> ms
-            info.callCount = 1;  // Each record is one call
-            result[pair.first] = info;
-        }
-        return result;
+        return mProfileInfo;
     }
 
     /**
      * @brief Clear profile data after collection
      */
     virtual void onClearProfileData() {
-        mProfileData.clear();
+        mProfileInfo.clear();
     }
 
     /**
      * @brief Record op time with type (called by backends, time in microseconds)
      */
     void recordOpProfileTime(const std::string& opName, const std::string& opType, uint64_t timeUs) const {
-        mProfileData[opName] += timeUs;
-        mProfileOpTypes[opName] = opType;  // Store op type
-    }
-    
-    /**
-     * @brief Get op type for a given op name
-     */
-    std::string getProfileOpType(const std::string& opName) const {
-        auto it = mProfileOpTypes.find(opName);
-        return it != mProfileOpTypes.end() ? it->second : "";
+        if(mProfileInfo.find(opName) == mProfileInfo.end()){
+            mProfileInfo[opName] = OpProfileInfo(opName, opType);
+        }
+        // static op info
+        OpProfileInfo& info = mProfileInfo[opName];
+        info.timeMs += (timeUs / 1000.0f);
+        info.callCount += 1;
     }
 
     mutable int pCurrentStatus = 0; // NO_ERROR
@@ -435,10 +442,8 @@ private:
     std::future<int> mFuture;
     RuntimeHint mHint;
     
-    // Profile data storage (time in us)
-    mutable std::map<std::string, uint64_t> mProfileData;
-    // Op name -> Op type mapping
-    mutable std::map<std::string, std::string> mProfileOpTypes;
+    // record op profile
+    mutable std::map<std::string, OpProfileInfo> mProfileInfo;
 };
 
 /** abstract Runtime register */

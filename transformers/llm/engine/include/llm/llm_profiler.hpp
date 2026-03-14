@@ -37,21 +37,9 @@ struct OpRecord {
     int callCount = 0;          // Number of calls
     float flops = 0.0f;         // Computation amount
     bool isSpecial = false;     // Special op: listed separately in output, not merged with same-name ops
-    std::vector<float> timeHistory;  // Time per call (optional)
     
     float avgTime() const {
         return callCount > 0 ? totalTime / callCount : 0.0f;
-    }
-    
-    // Calculate standard deviation of call times (if history available)
-    float stdTime() const {
-        if (timeHistory.size() < 2) return 0.0f;
-        float mean = avgTime();
-        float sum = 0.0f;
-        for (float t : timeHistory) {
-            sum += (t - mean) * (t - mean);
-        }
-        return sqrtf(sum / timeHistory.size());
     }
 };
 
@@ -114,7 +102,6 @@ public:
      */
     struct Config {
         std::vector<std::string> specialOps;   // Special ops for separate timing
-        bool enableDetailedHistory = false;     // Record each call time
         bool separatePrefillDecode = true;      // Separate prefill/decode timing
         int decodeIterationsPerReport = 1;      // Report interval for decode
     };
@@ -146,8 +133,9 @@ public:
     
     /**
      * Called when prefill phase ends
+     * @param promptTokenCount Number of input tokens in prompt
      */
-    void onPrefillEnd();
+    void onPrefillEnd(int promptTokenCount = 0);
     
     /**
      * Called when decode phase starts (per token)
@@ -174,25 +162,14 @@ public:
     // ========== CPU Backend Callbacks ==========
     
     /**
-     * Before op execution (for CPU backend)
-     * Returns true to execute the op, false to skip
-     */
-    bool beforeOp(const std::vector<MNN::Tensor*>& tensors, const std::string& opName);
-    
-    /**
-     * After op execution (for CPU backend)
-     */
-    void afterOp(const std::vector<MNN::Tensor*>& tensors, const std::string& opName);
-    
-    /**
      * Before op execution with OperatorInfo
      */
-    bool beforeOpWithInfo(const std::vector<MNN::Tensor*>& tensors, const MNN::OperatorInfo* info);
+    bool beforeOp(const std::vector<MNN::Tensor*>& tensors, const MNN::OperatorInfo* info);
     
     /**
      * After op execution with OperatorInfo
      */
-    void afterOpWithInfo(const std::vector<MNN::Tensor*>& tensors, const MNN::OperatorInfo* info);
+    void afterOp(const std::vector<MNN::Tensor*>& tensors, const MNN::OperatorInfo* info);
     
     // ========== Backend Profile Data Collection ==========
     
@@ -254,8 +231,8 @@ private:
     std::string mCurrentOpName;
     std::string mCurrentOpType;
     
-    // Timing for token-level (separate from op-level)
-    MNN::Timer mTokenTimer;
+    // Timing for token-level(separate from op-level)
+    MNN::Timer mTimer;
     
     // Special ops patterns
     std::vector<std::string> mSpecialOpPatterns;

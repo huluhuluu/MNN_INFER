@@ -20,6 +20,7 @@
 
 #include <string>
 #include <vector>
+#include "MNN/Interpreter.hpp"
 #include "core/Macro.h"
 #include "Type_generated.h"
 #include "backend/opencl/core/runtime/OpenCLWrapper.hpp"
@@ -63,6 +64,17 @@ struct TuneInfo{
     std::vector<uint32_t>localSize;
     uint32_t timeCost;
 };
+
+// Op execution record: marks kernel range by index
+struct OpProfileEntry {
+    std::string opName;
+    std::string opType;
+    size_t startIndex;  // Start index in kernel entries
+    size_t endIndex;    // End index (exclusive) in kernel entries
+};
+
+// Thread-local index for marking op boundaries
+extern thread_local size_t gPendingOpStartIndex;
 
 class KernelWrap {
 public:
@@ -152,6 +164,31 @@ public:
     
     unsigned int mKernelTime = 0;
     
+    // ========== Profile Data Interface ==========
+    const std::vector<OpProfileEntry>& getOpProfileEntries() const { return mOpProfileEntries; }
+    void clearProfileData() {
+        mOpProfileEntries.clear();
+        clearEvent();
+    }
+    unsigned int getTotalKernelTime() const { return mKernelTime; }
+    
+    // Mark op boundaries - record execution range
+    void profileStart(const std::vector<MNN::Tensor*>& tensors, const MNN::OperatorInfo* info) {
+        gPendingOpStartIndex = mEvents.size();
+    }
+    void profileEnd(const std::vector<MNN::Tensor*>& tensors, const MNN::OperatorInfo* info) {
+#ifdef ENABLE_OPENCL_TIME_PROFILER
+        // Create an entry recording this op execution with its kernel range
+        OpProfileEntry entry;
+        entry.opName = info->name();
+        entry.opType = info->type();
+        entry.startIndex = gPendingOpStartIndex;
+        entry.endIndex = mEvents.size();
+        mOpProfileEntries.push_back(entry);
+#endif
+    }
+    const std::vector<std::pair<std::string, cl::Event>>& getEvent() const {return mEvents;}
+    // ========== End Profile Data Interface ==========
     
     std::map<std::vector<uint32_t>, std::vector<uint32_t>>& tunedGemmParamsMap();
 
@@ -223,6 +260,9 @@ private:
     GpuLevel mGpuLevel = UNDEFINED;
     float mCLVersion = 1.0f;
     std::vector<std::pair<std::string, cl::Event>> mEvents;
+    
+    // Profile entries, recorde event index
+    std::vector<OpProfileEntry> mOpProfileEntries;
 
 #ifdef MNN_OPENCL_SVM_ENABLE
     cl_device_svm_capabilities mSvmCapabilities;

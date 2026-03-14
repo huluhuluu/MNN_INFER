@@ -63,6 +63,13 @@ public:
     void convertFromDevice(const Tensor* srcTensor, const Tensor* dstTensor, MNN_DATA_FORMAT data_format, int precision, int backend_memtype, bool svmFlag = false, int memtype = MNN_FORWARD_CPU) const;
     void copyBetweenDevice(const Tensor* srcTensor, const Tensor* dstTensor, int precision, int backend_memtype) const;
 
+    // ========== Profile Data Interface ==========
+    std::map<std::string, OpProfileInfo> onGetProfileData() const override;
+    void onClearProfileData() override;
+    void profileStart(const std::vector<MNN::Tensor*>& tensors, const MNN::OperatorInfo* info) const override;
+    void profileEnd(const std::vector<MNN::Tensor*>& tensors, const MNN::OperatorInfo* info) const override;
+    // ========== End Profile Data Interface ==========
+
 private:
     Backend::Info mInfo;
     std::shared_ptr<OpenCLRuntime> mOpenCLRuntime;

@@ -9,6 +9,7 @@
 #include <MNN/MNNDefine.h>
 #include <MNN/expr/ExecutorScope.hpp>
 #include "core/Backend.hpp"  // For Runtime class
+#include "core/TensorUtils.hpp"  // For TensorUtils::getDescribeOrigin
 #include <algorithm>
 #include <sstream>
 #include <iomanip>
@@ -100,24 +101,32 @@ void LLMOpProfiler::onPrefillStart() {
     if (!mEnabled) return;
     mInPrefill = true;
     mPrefillProfile.reset();
-    MNN_PRINT("[LLM Profiler] Prefill phase started\n");
+    mTimer.reset(); 
+    printf("[LLM Profiler] Prefill phase started\n");
 }
 
-void LLMOpProfiler::onPrefillEnd() {
+void LLMOpProfiler::onPrefillEnd(int promptTokenCount) {
     if (!mEnabled) return;
     mInPrefill = false;
-    MNN_PRINT("[LLM Profiler] Prefill phase ended, total time: %.2f ms\n", mPrefillProfile.totalTime);
+    // Record token time for prefill
+    mPrefillProfile.tokenTotalTime = mTimer.durationInUs() / 1000.0f;  // us -> ms
+    mPrefillProfile.tokenCount = promptTokenCount;
+    
+    printf("[LLM Profiler] Prefill phase ended, %d tokens, time %.4f ms, avg time: %.4f ms/token\n", 
+              promptTokenCount, 
+              mPrefillProfile.tokenTotalTime ,
+              promptTokenCount==0 ? 0 : mPrefillProfile.tokenTotalTime  / promptTokenCount);
 }
 
 void LLMOpProfiler::onDecodeTokenStart(int tokenId) {
     if (!mEnabled) return;
     mCurrentDecodeToken = tokenId;
-    mTokenTimer.reset();  // Use separate timer for token-level timing
+    mTimer.reset();  // Use separate timer for token-level timing
 }
 
 void LLMOpProfiler::onDecodeTokenEnd(int tokenId) {
     if (!mEnabled) return;
-    float tokenTime = mTokenTimer.durationInUs() / 1000.0f;  // us -> ms
+    float tokenTime = mTimer.durationInUs() / 1000.0f;  // us -> ms
     mDecodeTokenTimes.push_back(tokenTime);
     mDecodeProfile.tokenCount++;
 }
@@ -127,7 +136,7 @@ void LLMOpProfiler::onDecodePhaseStart(){
     mInPrefill = false;
     mDecodeProfile.reset();
     mDecodeTokenTimes.clear();
-    MNN_PRINT("[LLM Profiler] Decode phase started\n");
+    printf("[LLM Profiler] Decode phase started\n");
 }
 void LLMOpProfiler::onDecodePhaseEnd() {
     if (!mEnabled) return;
@@ -139,7 +148,7 @@ void LLMOpProfiler::onDecodePhaseEnd() {
         avgTime /= mDecodeTokenTimes.size();
         mDecodeProfile.tokenTotalTime = avgTime * mDecodeTokenTimes.size();
     }
-    MNN_PRINT("[LLM Profiler] Decode phase ended, %d tokens, time %.4f ms, avg time: %.4f ms/token\n", 
+    printf("[LLM Profiler] Decode phase ended, %d tokens, time %.4f ms, avg time: %.4f ms/token\n", 
               mDecodeProfile.tokenCount, 
               mDecodeTokenTimes.empty() ? 0 : mDecodeProfile.tokenTotalTime,
               mDecodeTokenTimes.empty() ? 0 : mDecodeProfile.tokenTotalTime / mDecodeTokenTimes.size());
@@ -147,83 +156,98 @@ void LLMOpProfiler::onDecodePhaseEnd() {
 
 // ========== CPU Backend Callbacks ==========
 
-bool LLMOpProfiler::beforeOp(const std::vector<MNN::Tensor*>& tensors, const std::string& opName) {
-    if (!mEnabled) return true;
-    mCurrentOpName = opName;
-    mOpTimer.reset();
-    return true;
-}
-
-void LLMOpProfiler::afterOp(const std::vector<MNN::Tensor*>& tensors, const std::string& opName) {
-    if (!mEnabled) return;
-    float opTime = mOpTimer.durationInUs() / 1000.0f;  // us -> ms
-    
-    // Get CPU Runtime and record timing
-    auto executor = MNN::Express::ExecutorScope::Current();
-    if (executor) {
-        auto runtimeInfo = executor->getRuntime();
-        auto it = runtimeInfo.first.find(MNN_FORWARD_CPU);
-        if (it != runtimeInfo.first.end() && it->second) {
-            uint64_t timeUs = static_cast<uint64_t>(opTime * 1000.0f);
-            it->second->recordOpProfileTime(opName, "", timeUs);  // Empty type for simple callback
-        }
-    }
-}
-
-bool LLMOpProfiler::beforeOpWithInfo(const std::vector<MNN::Tensor*>& tensors, const MNN::OperatorInfo* info) {
+bool LLMOpProfiler::beforeOp(const std::vector<MNN::Tensor*>& tensors, const MNN::OperatorInfo* info) {
     if (!mEnabled) return true;
     
     mCurrentOpName = info->name();
     mCurrentOpType = info->type();
     mOpTimer.reset();
+    
+    // Get actual backend from tensor (set during _allocMemory based on execution->backend())
+    // This correctly handles fallback scenarios where OpenCL ops fall back to CPU
+    MNNForwardType actualBackend = MNN_FORWARD_CPU;
+    if (!tensors.empty()) {
+        auto describe = TensorUtils::getDescribeOrigin(tensors[0]);
+        if (describe) {
+            Backend* backend = describe->getBackend();
+            if (backend) {
+                actualBackend = backend->type();
+            }
+        }
+    }
+    
+    // Get Runtime for the actual backend
+    auto executor = MNN::Express::ExecutorScope::Current();
+    if (!executor) return true;
+    
+    auto runtimeInfo = executor->getRuntime();
+    auto it = runtimeInfo.first.find(actualBackend);
+    std::shared_ptr<Runtime> actualRuntime = (it != runtimeInfo.first.end()) ? it->second : nullptr;
+    
+    // MNN_FORWARD_CPU_EXTENSION uses same runtime as MNN_FORWARD_CPU
+    if (!actualRuntime && actualBackend == MNN_FORWARD_CPU_EXTENSION) {
+        it = runtimeInfo.first.find(MNN_FORWARD_CPU);
+        actualRuntime = (it != runtimeInfo.first.end()) ? it->second : nullptr;
+    }
+
+    // Backend-specific handling
+    // Note: onMarkOpStart() is a virtual function in Runtime base class
+    // - CPU Runtime: default implementation does nothing
+    // - OpenCL Runtime: overridden to mark kernel entries
+    if (actualBackend == MNN_FORWARD_CPU || actualBackend == MNN_FORWARD_CPU_EXTENSION) {
+        // CPU backend: timer already started, timing recorded in afterOp
+    } else if (actualRuntime) {
+        // GPU/NPU backends: mark op start for kernel tracking
+        actualRuntime->profileStart(tensors, info);
+    }
+    
     return true;
 }
 
-void LLMOpProfiler::afterOpWithInfo(const std::vector<MNN::Tensor*>& tensors, const MNN::OperatorInfo* info) {
+void LLMOpProfiler::afterOp(const std::vector<MNN::Tensor*>& tensors, const MNN::OperatorInfo* info) {
     if (!mEnabled) return;
     
-    float opTime = mOpTimer.durationInUs() / 1000.0f;  // us -> ms
-    
-    // Get current backend and Runtime from Executor's RuntimeInfo
-    // Record timing to the Runtime's mProfileData, which will be collected by collectBackendProfileData()
+    // Get actual backend from tensor (set during _allocMemory based on execution->backend())
+    // This correctly handles fallback scenarios where OpenCL ops fall back to CPU
+    MNNForwardType actualBackend = MNN_FORWARD_CPU;
+    if (!tensors.empty()) {
+        auto describe = TensorUtils::getDescribeOrigin(tensors[0]);
+        if (describe) {
+            Backend* backend = describe->getBackend();
+            if (backend) {
+                actualBackend = backend->type();
+            }
+        }
+    }
+
+    // Get Runtime for the actual backend
     auto executor = MNN::Express::ExecutorScope::Current();
-    if (executor) {
-        auto runtimeInfo = executor->getRuntime();
-        
-        // Determine which backend this op is running on
-        MNNForwardType currentBackend = MNN_FORWARD_CPU;
-        std::shared_ptr<Runtime> currentRuntime;
-        
-        if (runtimeInfo.first.size() == 1) {
-            currentBackend = runtimeInfo.first.begin()->first;
-            currentRuntime = runtimeInfo.first.begin()->second;
-        } else if (runtimeInfo.first.size() > 1) {
-            // Multiple backends: find the non-CPU one (GPU/NPU typically executes first)
-            for (const auto& pair : runtimeInfo.first) {
-                if (pair.first != MNN_FORWARD_CPU) {
-                    currentBackend = pair.first;
-                    currentRuntime = pair.second;
-                    break;
-                }
-            }
-            // Fallback to CPU if no non-CPU backend found
-            if (!currentRuntime) {
-                auto it = runtimeInfo.first.find(MNN_FORWARD_CPU);
-                if (it != runtimeInfo.first.end()) {
-                    currentBackend = MNN_FORWARD_CPU;
-                    currentRuntime = it->second;
-                }
-            }
+    if (!executor) return;
+    
+    auto runtimeInfo = executor->getRuntime();
+    auto it = runtimeInfo.first.find(actualBackend);
+    std::shared_ptr<Runtime> actualRuntime = (it != runtimeInfo.first.end()) ? it->second : nullptr;
+    
+    // MNN_FORWARD_CPU_EXTENSION uses same runtime as MNN_FORWARD_CPU
+    if (!actualRuntime && actualBackend == MNN_FORWARD_CPU_EXTENSION) {
+        it = runtimeInfo.first.find(MNN_FORWARD_CPU);
+        actualRuntime = (it != runtimeInfo.first.end()) ? it->second : nullptr;
+    }
+    
+    // Backend-specific handling
+    // Note: onMarkOpEnd() is a virtual function in Runtime base class
+    // - CPU Runtime: default implementation does nothing
+    // - OpenCL Runtime: overridden to set op name/type for kernel entries
+    if (actualBackend == MNN_FORWARD_CPU || actualBackend == MNN_FORWARD_CPU_EXTENSION) {
+        // CPU backend: record synchronous timing
+        // recordOpProfileTime expects time in microseconds (us)
+        uint64_t opTimeUs = mOpTimer.durationInUs();
+        if (actualRuntime) {
+            actualRuntime->recordOpProfileTime(info->name(), info->type(), opTimeUs);
         }
-        
-        // Record timing to Runtime's mProfileData
-        // This unifies data collection: CPU callback -> Runtime, OpenCL/QNN -> Runtime
-        // collectBackendProfileData() will retrieve all data from Runtime
-        if (currentRuntime) {
-            // time in milliseconds, convert to microseconds for recordOpProfileTime
-            uint64_t timeUs = static_cast<uint64_t>(opTime * 1000.0f);
-            currentRuntime->recordOpProfileTime(info->name(), info->type(), timeUs);
-        }
+    } else if (actualRuntime) {
+        // GPU/NPU backends: mark op end for kernel tracking
+        actualRuntime->profileEnd(tensors, info);
     }
 }
 
@@ -239,6 +263,7 @@ void LLMOpProfiler::collectBackendProfile(const BackendProfileData& data) {
     if (backendName.empty()) {
         switch (data.backendType) {
             case MNN_FORWARD_CPU: backendName = "CPU"; break;
+            case MNN_FORWARD_CPU_EXTENSION: backendName = "CPU"; break;
             case MNN_FORWARD_OPENCL: backendName = "OpenCL"; break;
             case MNN_FORWARD_NN: backendName = "QNN"; break;
             default: backendName = "Other"; break;
@@ -269,11 +294,8 @@ void LLMOpProfiler::collectBackendProfile(const BackendProfileData& data) {
         typeRecord.type = opType;
         typeRecord.backend = backendName;
         typeRecord.totalTime += timeMs;
-        typeRecord.callCount++;
+        typeRecord.callCount += opInfo.callCount;
         typeRecord.isSpecial = special;
-        if (mConfig.enableDetailedHistory) {
-            typeRecord.timeHistory.push_back(timeMs);
-        }
         
         // Track per-backend total times
         profile.backendTotalTimes[backendName] += timeMs;
@@ -285,49 +307,66 @@ void LLMOpProfiler::collectBackendProfile(const BackendProfileData& data) {
 // ========== Results ==========
 
 void LLMOpProfiler::printStats() const {
-    MNN_PRINT("\n");
-    MNN_PRINT("================================================================\n");
-    MNN_PRINT("              LLM Operator Profiling Report                    \n");
-    MNN_PRINT("================================================================\n");
+    printf("\n");
+    printf("================================================================\n");
+    printf("              LLM Operator Profiling Report                    \n");
+    printf("================================================================\n");
     
     // Helper function to print phase stats by OpType
     auto printPhaseStats = [this](const PhaseProfile& profile, const std::string& phaseName, bool isDecode) {
-        MNN_PRINT("\n=== %s Phase Ops Statistics ===\n", phaseName.c_str());
+        printf("\n=== %s Phase Ops Statistics ===\n", phaseName.c_str());
         
-        // For decode, show two different time measurements
-        if (isDecode && profile.tokenCount > 0) {
-            // Token-level timing (wall-clock time per token)
-            float avgPerToken = profile.tokenTotalTime / profile.tokenCount;
-            float tokenStd = 0.0f;
-            if (mDecodeTokenTimes.size() > 1) {
-                float sum = 0.0f;
-                for (float t : mDecodeTokenTimes) {
-                    sum += (t - avgPerToken) * (t - avgPerToken);
+        // Show two different time measurements
+        if (profile.tokenTotalTime > 0) {
+            if (isDecode && profile.tokenCount > 0) {
+                // Decode phase: show per-token stats
+                float avgPerToken = profile.tokenTotalTime / profile.tokenCount;
+                float tokenStd = 0.0f;
+                if (mDecodeTokenTimes.size() > 1) {
+                    float sum = 0.0f;
+                    for (float t : mDecodeTokenTimes) {
+                        sum += (t - avgPerToken) * (t - avgPerToken);
+                    }
+                    tokenStd = sqrtf(sum / mDecodeTokenTimes.size());
                 }
-                tokenStd = sqrtf(sum / mDecodeTokenTimes.size());
+                float tokensPerSec = profile.tokenTotalTime > 0 ? 
+                    profile.tokenCount / (profile.tokenTotalTime / 1000.0f) : 0.0f;
+                printf("Token-level time: %.2f ms (%d tokens, %.2f ± %.2f ms/token, %.2f tokens/s)\n", 
+                          profile.tokenTotalTime, profile.tokenCount, avgPerToken, tokenStd, tokensPerSec);
+                
+                // Op-level timing (sum of all op execution times)
+                printf("Op-level time (cumulative): %.2f ms\n", profile.totalTime);
+            } else if (!isDecode && profile.tokenCount > 0) {
+                // Prefill phase: show prompt tokens and tokens/s (aligned with decode format)
+                float tokensPerSec = profile.tokenTotalTime > 0 ? 
+                    profile.tokenCount / (profile.tokenTotalTime / 1000.0f) : 0.0f;
+                printf("Token-level time: %.2f ms (%d prompt tokens, %.2f tokens/s)\n", 
+                          profile.tokenTotalTime, profile.tokenCount, tokensPerSec);
+                
+                // Op-level timing (sum of all op execution times)
+                printf("Op-level time (cumulative): %.2f ms\n", profile.totalTime);
+            } else {
+                // No token count info
+                printf("Token-level time: %.2f ms\n", profile.tokenTotalTime);
+                printf("Op-level time (cumulative): %.2f ms\n", profile.totalTime);
             }
-            MNN_PRINT("Token-level time: %.2f ms (%d tokens, %.2f ± %.2f ms/token)\n", 
-                      profile.tokenTotalTime, profile.tokenCount, avgPerToken, tokenStd);
-            
-            // Op-level timing (sum of all op execution times)
-            MNN_PRINT("Op-level time (cumulative): %.2f ms\n", profile.totalTime);
         } else {
-            MNN_PRINT("Total time: %.2f ms\n", profile.totalTime);
+            printf("Total time: %.2f ms\n", profile.totalTime);
         }
         
         // Print per-backend breakdown (cumulative time)
         if (!profile.backendTotalTimes.empty()) {
-            MNN_PRINT("Backend breakdown: ");
+            printf("Backend breakdown: ");
             bool first = true;
             for (const auto& backendTimePair : profile.backendTotalTimes) {
-                if (!first) MNN_PRINT(", ");
+                if (!first) printf(", ");
                 first = false;
                 float percent = profile.totalTime > 0 ? (backendTimePair.second / profile.totalTime * 100.0f) : 0.0f;
-                MNN_PRINT("%s: %.2f ms (%.1f%%)", backendTimePair.first.c_str(), backendTimePair.second, percent);
+                printf("%s: %.2f ms (%.1f%%)", backendTimePair.first.c_str(), backendTimePair.second, percent);
             }
-            MNN_PRINT("\n");
+            printf("\n");
         }
-        MNN_PRINT("\n");
+        printf("\n");
         
         // Separate special ops and normal ops by type
         std::vector<std::pair<std::string, OpRecord>> normalTypes;
@@ -351,36 +390,34 @@ void LLMOpProfiler::printStats() const {
         sortByTime(specialTypes);
         
         // Print normal OpTypes
-        MNN_PRINT("--- OpType Statistics (by type) ---\n");
-        MNN_PRINT("%-24s %8s %12s %20s %10s %8s\n", 
-                  "OpType", "Backend", "Time(ms)", "Avg±Std(ms)", "Calls", "Percent");
-        MNN_PRINT("----------------------------------------------------------------------------------------\n");
+        printf("--- OpType Statistics (by type) ---\n");
+        printf("%-24s %8s %12s %12s %10s %8s\n", 
+                  "OpType", "Backend", "Time(ms)", "Avg(ms)", "Calls", "Percent");
+        printf("--------------------------------------------------------------------------\n");
         
         for (const auto& keyRecordPair : normalTypes) {
             const OpRecord& record = keyRecordPair.second;
             float percent = profile.totalTime > 0 ? (record.totalTime / profile.totalTime * 100.0f) : 0.0f;
             const char* backend = record.backend.empty() ? "-" : record.backend.c_str();
             float avg = record.avgTime();
-            float std = record.stdTime();
-            MNN_PRINT("%-24s %8s %12.2f %10.2f ± %-8.2f %10d %7.1f%%\n", 
-                      record.name.c_str(), backend, record.totalTime, avg, std, record.callCount, percent);
+            printf("%-24s %8s %12.2f %12.2f %10d %7.1f%%\n", 
+                      record.name.c_str(), backend, record.totalTime, avg, record.callCount, percent);
         }
         
         // Print special OpTypes separately
         if (!specialTypes.empty()) {
-            MNN_PRINT("\n--- Special Ops (as unique OpType) ---\n");
-            MNN_PRINT("%-24s %8s %12s %20s %10s %8s\n", 
-                      "OpType", "Backend", "Time(ms)", "Avg±Std(ms)", "Calls", "Percent");
-            MNN_PRINT("----------------------------------------------------------------------------------------\n");
+            printf("\n--- Special Ops (as unique OpType) ---\n");
+            printf("%-24s %8s %12s %12s %10s %8s\n", 
+                      "OpType", "Backend", "Time(ms)", "Avg(ms)", "Calls", "Percent");
+            printf("--------------------------------------------------------------------------\n");
             
             for (const auto& keyRecordPair : specialTypes) {
                 const OpRecord& record = keyRecordPair.second;
                 float percent = profile.totalTime > 0 ? (record.totalTime / profile.totalTime * 100.0f) : 0.0f;
                 const char* backend = record.backend.empty() ? "-" : record.backend.c_str();
                 float avg = record.avgTime();
-                float std = record.stdTime();
-                MNN_PRINT("%-24s %8s %12.2f %10.2f ± %-8.2f %10d %7.1f%%\n", 
-                          record.name.c_str(), backend, record.totalTime, avg, std, record.callCount, percent);
+                printf("%-24s %8s %12.2f %12.2f %10d %7.1f%%\n", 
+                          record.name.c_str(), backend, record.totalTime, avg, record.callCount, percent);
             }
         }
     };
@@ -392,11 +429,27 @@ void LLMOpProfiler::printStats() const {
     printPhaseStats(mDecodeProfile, "Decode", true);
     
     // Summary
-    MNN_PRINT("\n=== Summary ===\n");
-    MNN_PRINT("Prefill time: %.2f ms\n", mPrefillProfile.totalTime);
+    printf("\n=== Summary ===\n");
+    // Prefill: show both token-level and op-level time
+    if (mPrefillProfile.tokenTotalTime > 0) {
+        if (mPrefillProfile.tokenCount > 0) {
+            float prefillTokensPerSec = mPrefillProfile.tokenTotalTime > 0 ? 
+                mPrefillProfile.tokenCount / (mPrefillProfile.tokenTotalTime / 1000.0f) : 0.0f;
+            printf("Prefill time: %.2f ms (%d prompt tokens, %.2f tokens/s)\n", 
+                      mPrefillProfile.tokenTotalTime, mPrefillProfile.tokenCount, prefillTokensPerSec);
+        } else {
+            printf("Prefill time: %.2f ms \n", mPrefillProfile.tokenTotalTime);
+        }
+        printf("            : %.2f ms (op-level cumulative)\n", mPrefillProfile.totalTime);
+    } else {
+        printf("Prefill time: %.2f ms\n", mPrefillProfile.totalTime);
+    }
+    // Decode: show both token-level and op-level time
     if (mDecodeProfile.tokenCount > 0) {
         float avgPerToken = mDecodeProfile.tokenTotalTime / mDecodeProfile.tokenCount;
         float tokenStd = 0.0f;
+        float decodeTokensPerSec = mDecodeProfile.tokenTotalTime > 0 ? 
+            mDecodeProfile.tokenCount / (mDecodeProfile.tokenTotalTime / 1000.0f) : 0.0f;
         if (mDecodeTokenTimes.size() > 1) {
             float sum = 0.0f;
             for (float t : mDecodeTokenTimes) {
@@ -404,11 +457,11 @@ void LLMOpProfiler::printStats() const {
             }
             tokenStd = sqrtf(sum / mDecodeTokenTimes.size());
         }
-        MNN_PRINT("Decode time: %.2f ms (token-level: %.2f ± %.2f ms/token, %d tokens)\n", 
-                  mDecodeProfile.tokenTotalTime, avgPerToken, tokenStd, mDecodeProfile.tokenCount);
-        MNN_PRINT("           : %.2f ms (op-level cumulative)\n", mDecodeProfile.totalTime);
+        printf("Decode time: %.2f ms (%d tokens, %.2f ± %.2f ms/token, %.2f tokens/s)\n", 
+                  mDecodeProfile.tokenTotalTime, mDecodeProfile.tokenCount, avgPerToken, tokenStd, decodeTokensPerSec);
+        printf("           : %.2f ms (op-level cumulative)\n", mDecodeProfile.totalTime);
     }
-    MNN_PRINT("================================================================\n");
+    printf("================================================================\n");
 }
 
 bool LLMOpProfiler::exportJSON(const std::string& filepath) const {
@@ -496,7 +549,7 @@ bool LLMOpProfiler::exportJSON(const std::string& filepath) const {
     file << "}\n";
     file.close();
     
-    MNN_PRINT("[LLM Profiler] Results exported to: %s\n", filepath.c_str());
+    printf("[LLM Profiler] Results exported to: %s\n", filepath.c_str());
     return true;
 }
 

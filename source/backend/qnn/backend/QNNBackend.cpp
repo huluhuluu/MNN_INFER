@@ -720,7 +720,7 @@ void QnnBackend::onExecuteBegin() const {
     return;
 }
 
-#ifdef QNN_PROFILE_SUMMARIZE
+// Helper function to extract op type from node name (used for profiling)
 static std::string getOpTypeFromName(const std::string& nodeName) {
     // The pattern is usually "OpType_..."
     size_t pos = nodeName.find('_');
@@ -728,6 +728,15 @@ static std::string getOpTypeFromName(const std::string& nodeName) {
         return nodeName.substr(0, pos);
     }
     // Fallback for names without '_', like "Input OpId_2 (cycles)"
+    pos = nodeName.find(' ');
+    if (pos != std::string::npos) {
+        return nodeName.substr(0, pos);
+    }
+    // If no delimiter is found, return the whole name as the type
+    return nodeName;
+}
+
+#ifdef QNN_PROFILE_SUMMARIZE
     pos = nodeName.find(' ');
     if (pos != std::string::npos) {
         return nodeName.substr(0, pos);
@@ -873,6 +882,37 @@ void QnnBackend::onExecuteEnd() const {
         mPerf->setPowerConfigBalanced();
     }
     startProfile();
+    
+    // Extract profile data for LLM profiler (unconditional, if handle exists)
+    if (mQnnProfileHandle) {
+        uint32_t numTopLevelEvents = 0;
+        const QnnProfile_EventId_t* topLevelEvents = nullptr;
+        auto get_err = mRuntime->mQnnInterface.profileGetEvents(mQnnProfileHandle, &topLevelEvents, &numTopLevelEvents);
+        if (get_err == QNN_SUCCESS) {
+            for (uint32_t i = 0; i < numTopLevelEvents; ++i) {
+                QnnProfile_EventData_t eventData = QNN_PROFILE_EVENT_DATA_INIT;
+                mRuntime->mQnnInterface.profileGetEventData(topLevelEvents[i], &eventData);
+                if (eventData.type) {
+                    uint32_t numSubEvents = 0;
+                    const QnnProfile_EventId_t* subEvents = nullptr;
+                    auto get_sub_err = mRuntime->mQnnInterface.profileGetSubEvents(topLevelEvents[i], &subEvents, &numSubEvents);
+                    if (get_sub_err != QNN_SUCCESS) continue;
+                    for (uint32_t j = 0; j < numSubEvents; ++j) {
+                        QnnProfile_EventData_t subEventData = QNN_PROFILE_EVENT_DATA_INIT;
+                        mRuntime->mQnnInterface.profileGetEventData(subEvents[j], &subEventData);
+                        if (subEventData.type == QNN_PROFILE_EVENTTYPE_NODE && subEventData.identifier) {
+                            uint64_t timeValue = subEventData.value;
+                            if (subEventData.unit == QNN_PROFILE_EVENTUNIT_CYCLES) {
+                                timeValue = timeValue / 1000; // rough conversion to microseconds
+                            }
+                            std::string opType = getOpTypeFromName(subEventData.identifier);
+                            mRuntime->recordOpProfileTime(subEventData.identifier, opType, timeValue);
+                        }
+                    }
+                }
+            }
+        }
+    }
     return;
 }
 
