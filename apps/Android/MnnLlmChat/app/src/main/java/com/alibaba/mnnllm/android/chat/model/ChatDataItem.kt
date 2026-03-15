@@ -18,8 +18,17 @@ class ChatDataItem {
     var text: String? = null
     var type: Int
         private set
+    @Deprecated("Use imageUris instead")
+    var imageUri: Uri?
+        get() = imageUris?.firstOrNull()
+        set(value) {
+            imageUris = if (value != null) listOf(value) else null
+        }
+
+    var imageUris: List<Uri>? = null
+
     @JvmField
-    var imageUri: Uri? = null
+    var videoUri: Uri? = null
 
     @JvmField
     var audioUri: Uri? = null
@@ -61,6 +70,14 @@ class ChatDataItem {
             return null
         }
 
+    val videoPath: String?
+        get() {
+            if (this.videoUri != null && "file" == videoUri!!.scheme) {
+                return videoUri!!.path
+            }
+            return null
+        }
+
     var showThinking: Boolean = true
 
     var thinkingFinishedTime = -1L
@@ -70,6 +87,13 @@ class ChatDataItem {
     }
 
     companion object {
+        fun createImageInputData(timeString: String?, text: String?, imageUris: List<Uri>?): ChatDataItem {
+            val result = ChatDataItem(timeString, ChatViewHolders.USER, text)
+            result.imageUris = imageUris
+            return result
+        }
+
+        @Deprecated("Use createImageInputData with list")
         fun createImageInputData(timeString: String?, text: String?, imageUri: Uri?): ChatDataItem {
             val result = ChatDataItem(timeString, ChatViewHolders.USER, text)
             result.imageUri = imageUri
@@ -85,6 +109,16 @@ class ChatDataItem {
             val result = ChatDataItem(timeString, ChatViewHolders.USER, text)
             result.audioUri = Uri.fromFile(File(audioPath))
             result.audioDuration = duration
+            return result
+        }
+
+        fun createVideoInputData(
+            timeString: String?,
+            text: String?,
+            videoPath: String
+        ): ChatDataItem {
+            val result = ChatDataItem(timeString, ChatViewHolders.USER, text)
+            result.videoUri = Uri.fromFile(File(videoPath))
             return result
         }
     }

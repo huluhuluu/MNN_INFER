@@ -10,62 +10,78 @@ import com.alibaba.mls.api.download.ModelDownloadManager
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.cancel
 import com.alibaba.mls.api.download.DownloadListener
 import com.alibaba.mls.api.download.DownloadInfo
+import com.alibaba.mls.api.download.DownloadState
 
 class ModelListPresenter(private val context: Context, private val view: ModelListContract.View) :
     ModelItemListener, DownloadListener {
     private val modelListAdapter: ModelListAdapter?
     private var lastClickTime: Long = -1
     private var mainHandler: Handler?
-    private val presenterScope = CoroutineScope(Dispatchers.Main)
-    private var loading = false
+    private val presenterScope = CoroutineScope(Dispatchers.Main + SupervisorJob())
 
     init {
         this.modelListAdapter = view.adapter
         this.mainHandler = Handler(context.mainLooper)
         ModelDownloadManager.getInstance(context).addListener(this)
-        Log.d(TAG, "onCreate: ModelListPresenter created", Throwable())
+        Log.d(TAG, "ModelListPresenter created")
     }
 
     fun onCreate() {
-        loadDownloadedModels()
-    }
-
-    fun load() {
-        loadDownloadedModels()
-    }
-
-    private fun loadDownloadedModels() {
-        if (loading) {
-            return
-        }
-        loading = true
-        view.onLoading()
+        Log.d(TAG, "onCreate - starting Flow subscription")
+        
+        // Subscribe to model list state changes - auto-initialization will happen
         presenterScope.launch {
-            try {
-                val modelWrappers = ModelListManager.loadAvailableModels(context).toMutableList()
-                val sortedWrappers = modelWrappers.sortedBy { it.hasUpdate }
-                launch {
-                    for (modelWrapper in sortedWrappers) {
-                        if (!modelWrapper.modelItem.isLocal) {
-                            ModelDownloadManager.getInstance(context).checkForUpdate(modelWrapper.modelItem.modelId)
-                        }
-                    }
-                }
-                onListAvailable(sortedWrappers, null)
-            } catch (e: Exception) {
-                Log.e(TAG, "Error loading downloaded models", e)
-                view.onListLoadError(e.message)
+            ModelListManager.observeModelList().collect { state ->
+                handleModelListState(state)
             }
         }
-        loading = false
     }
 
-    private fun onListAvailable(modelWrappers: List<ModelItemWrapper>, onSuccess: Runnable?) {
+    private fun handleModelListState(state: ModelListManager.ModelListState) {
+        when (state) {
+            is ModelListManager.ModelListState.Loading -> {
+                Log.d(TAG, "State: Loading")
+                view.onLoading()
+            }
+            
+            is ModelListManager.ModelListState.Success -> {
+                Log.d(TAG, "State: Success (${state.models.size} models, source: ${state.source})")
+                
+                // Sort models
+                val sortedWrappers = state.models.sortedBy { it.hasUpdate }
+                
+                // Check for updates in background
+                presenterScope.launch {
+                    try {
+                        for (modelWrapper in sortedWrappers) {
+                            if (!modelWrapper.modelItem.isLocal) {
+                                ModelDownloadManager.getInstance(context)
+                                    .checkForUpdate(modelWrapper.modelItem.modelId)
+                            }
+                        }
+                    } catch (e: Exception) {
+                        Log.w(TAG, "Error checking for updates", e)
+                    }
+                }
+                
+                // Update UI
+                onListAvailable(sortedWrappers)
+            }
+            
+            is ModelListManager.ModelListState.Error -> {
+                Log.e(TAG, "State: Error", state.exception)
+                view.onListLoadError(state.exception.message)
+            }
+        }
+    }
+
+    private fun onListAvailable(modelWrappers: List<ModelItemWrapper>) {
         Log.d(TAG, "onListAvailable: received ${modelWrappers.size} modelWrappers")
         modelListAdapter!!.updateItems(modelWrappers)
-        onSuccess?.run()
         Log.d(TAG, "onListAvailable: calling view.onListAvailable()")
         view.onListAvailable()
     }
@@ -90,19 +106,43 @@ class ModelListPresenter(private val context: Context, private val view: ModelLi
     }
 
     override fun onItemDeleted(modelItem: ModelItem) {
-        // Refresh the list after model deletion
-        refreshList()
+        // Model deleted, notify manager to refresh
+        presenterScope.launch {
+            ModelListManager.notifyModelListMayChange(ModelListManager.ChangeReason.MODEL_DELETED)
+        }
     }
 
     override fun onItemUpdate(modelItem: ModelItem) {
         // Start update download for the model
         modelItem.modelId?.let { modelId ->
-            ModelDownloadManager.getInstance(context).startDownload(modelId)
+            Log.d(TAG, "onItemUpdate: starting download for $modelId")
+            presenterScope.launch {
+                try {
+                    ModelDownloadManager.getInstance(context).startDownload(modelId)
+                } catch (e: Exception) {
+                    Log.e(TAG, "Failed to start download for $modelId", e)
+                }
+            }
         }
     }
 
     fun refreshList() {
-        loadDownloadedModels()
+        Log.d(TAG, "refreshList: triggering model list refresh")
+        presenterScope.launch {
+            ModelListManager.notifyModelListMayChange(ModelListManager.ChangeReason.MANUAL_REFRESH)
+        }
+    }
+
+    fun handlePinStateChange(isPinned: Boolean) {
+        Log.d(TAG, "handlePinStateChange: isPinned=$isPinned")
+        presenterScope.launch {
+            val reason = if (isPinned) {
+                ModelListManager.ChangeReason.MODEL_PINNED
+            } else {
+                ModelListManager.ChangeReason.MODEL_UNPINNED
+            }
+            ModelListManager.notifyModelListMayChange(reason)
+        }
     }
 
     // DownloadListener implementation
@@ -119,6 +159,7 @@ class ModelListPresenter(private val context: Context, private val view: ModelLi
     }
 
     override fun onDownloadStart(modelId: String) {
+        Log.d(TAG, "onDownloadStart: $modelId")
         mainHandler?.post {
             // Update UI when model starts updating
             modelListAdapter?.updateItem(modelId)
@@ -126,6 +167,12 @@ class ModelListPresenter(private val context: Context, private val view: ModelLi
     }
 
     override fun onDownloadProgress(modelId: String, downloadInfo: DownloadInfo) {
+        Log.d(TAG, "onDownloadProgress: $modelId state=${downloadInfo.downloadState} progress=${downloadInfo.progress}")
+        if (downloadInfo.downloadState == DownloadState.COMPLETED) {
+            Log.d(TAG, "onDownloadProgress: detected COMPLETED state for $modelId, manually triggering finish")
+            onDownloadFinished(modelId, "")
+            return
+        }
         mainHandler?.post {
             // Update progress for models that are being updated
             modelListAdapter?.updateProgress(modelId, downloadInfo)
@@ -133,13 +180,15 @@ class ModelListPresenter(private val context: Context, private val view: ModelLi
     }
 
     override fun onDownloadFailed(modelId: String, exception: Exception) {
+        Log.e(TAG, "onDownloadFailed: $modelId", exception)
         // Not needed for model list
     }
 
     override fun onDownloadFinished(modelId: String, path: String) {
-        mainHandler?.post {
-            // Refresh the list after download completion
-            refreshList()
+        Log.d(TAG, "onDownloadFinished: $modelId path=$path")
+        // Download completed, notify manager to refresh
+        presenterScope.launch {
+            ModelListManager.notifyModelListMayChange(ModelListManager.ChangeReason.MODEL_DOWNLOADED)
         }
     }
 
@@ -148,15 +197,17 @@ class ModelListPresenter(private val context: Context, private val view: ModelLi
     }
 
     override fun onDownloadFileRemoved(modelId: String) {
-        mainHandler?.post {
-            // Refresh the list after model removal
-            refreshList()
+        // File removed, notify manager to refresh
+        presenterScope.launch {
+            ModelListManager.notifyModelListMayChange(ModelListManager.ChangeReason.MODEL_DELETED)
         }
     }
 
     fun onDestroy() {
+        // Cancel coroutine scope to stop Flow collection
+        presenterScope.cancel()
         ModelDownloadManager.getInstance(context).removeListener(this)
-        mainHandler!!.removeCallbacksAndMessages(null)
+        mainHandler?.removeCallbacksAndMessages(null)
         this.mainHandler = null
     }
 

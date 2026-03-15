@@ -21,11 +21,12 @@ import com.alibaba.mnnllm.android.main.FilterComponent
 import com.alibaba.mnnllm.android.mainsettings.MainSettings
 import com.alibaba.mnnllm.android.model.Modality
 import com.alibaba.mnnllm.android.model.ModelVendors
-import com.alibaba.mnnllm.android.model.ModelUtils
+import com.alibaba.mnnllm.android.model.ModelTypeUtils
 import com.alibaba.mnnllm.android.modelsettings.DropDownMenuHelper
 import com.alibaba.mnnllm.android.utils.Searchable
 import com.alibaba.mnnllm.android.widgets.ModelSwitcherView
 import android.widget.Toast
+import com.alibaba.mnnllm.android.utils.LargeModelConfirmationDialog
 
 class ModelMarketFragment : Fragment(), ModelMarketItemListener, Searchable {
 
@@ -160,7 +161,7 @@ class ModelMarketFragment : Fragment(), ModelMarketItemListener, Searchable {
         // Setup download state filter
         filterDownloadState.setOnClickListener {
             filterDownloadState.isSelected = !filterDownloadState.isSelected
-            val downloadState = if (filterDownloadState.isSelected) "true" else null
+            val downloadState = if (filterDownloadState.isSelected) DownloadState.COMPLETED else null
             updateFilterDownloadState(downloadState)
         }
         
@@ -249,7 +250,7 @@ class ModelMarketFragment : Fragment(), ModelMarketItemListener, Searchable {
         updateQuickFilterButtonStates()
     }
     
-    private fun updateFilterDownloadState(downloadState: String?) {
+    private fun updateFilterDownloadState(downloadState: Int?) {
         currentFilterState = FilterState(
             tagKeys = currentFilterState.tagKeys,
             vendors = currentFilterState.vendors,
@@ -459,13 +460,12 @@ class ModelMarketFragment : Fragment(), ModelMarketItemListener, Searchable {
         dialog.setAvailableTags(availableTags)
         dialog.setCurrentFilterState(currentFilterState)
         dialog.setOnConfirmListener { filterState ->
-            // Merge the dialog filter state with the current filter state from filter components
             currentFilterState = FilterState(
                 tagKeys = filterState.tagKeys,
                 vendors = filterState.vendors,
                 size = filterState.size,
                 modality = currentFilterState.modality,
-                downloadState = currentFilterState.downloadState,
+                downloadState = filterState.downloadState,
                 source = currentFilterState.source,
                 searchQuery = currentFilterState.searchQuery
             )
@@ -554,6 +554,16 @@ class ModelMarketFragment : Fragment(), ModelMarketItemListener, Searchable {
             
             // Update download state selection
             filterDownloadState.isSelected = currentFilterState.downloadState != null
+            filterDownloadState.text = when (currentFilterState.downloadState) {
+                DownloadState.DOWNLOAD_SUCCESS -> getString(R.string.download_state_completed)
+                DownloadState.NOT_START -> getString(R.string.download_state_not_start)
+                DownloadState.DOWNLOADING -> getString(R.string.download_state_downloading)
+                DownloadState.DOWNLOAD_PAUSED -> getString(R.string.download_state_paused)
+                DownloadState.DOWNLOAD_FAILED -> getString(R.string.download_state_failed)
+                DownloadState.DOWNLOAD_CANCELLED -> getString(R.string.download_state_cancelled)
+                DownloadState.PREPARING -> getString(R.string.download_state_preparing)
+                else -> getString(R.string.download_state)
+            }
             
             // Update modality selection and text
             filterModality.isSelected = currentFilterState.modality != null
@@ -594,12 +604,29 @@ class ModelMarketFragment : Fragment(), ModelMarketItemListener, Searchable {
                 }
                 
                 // Check if it's a voice model (TTS or ASR)
-                if (ModelUtils.isTtsModelByTags(item.modelMarketItem.tags) || ModelUtils.isAsrModelByTags(item.modelMarketItem.tags)) {
+                if (ModelTypeUtils.isTtsModelByTags(item.modelMarketItem.tags) || ModelTypeUtils.isAsrModelByTags(item.modelMarketItem.tags)) {
                     // For voice models, clicking the item sets it as default
                     handleVoiceModelClick(item.modelMarketItem)
                 } else {
-                    // For other models, run the model
-                    (requireActivity() as MainActivity).runModel(null, item.modelMarketItem.modelId, null)
+                    // For other models, check if it's a large model before running
+                    if (item.modelMarketItem.sizeB > 10.0) {
+                        // Show confirmation dialog for large models
+                        LargeModelConfirmationDialog.show(
+                            fragment = this,
+                            modelName = item.modelMarketItem.modelName,
+                            modelSize = item.modelMarketItem.sizeB,
+                            onConfirm = {
+                                // User confirmed, proceed with running the model
+                                (requireActivity() as MainActivity).runModel(null, item.modelMarketItem.modelId, null)
+                            },
+                            onCancel = {
+                                // User cancelled, do nothing
+                            }
+                        )
+                    } else {
+                        // Model is not large, run directly
+                        (requireActivity() as MainActivity).runModel(null, item.modelMarketItem.modelId, null)
+                    }
                 }
             }
             DownloadState.NOT_START,
@@ -636,9 +663,9 @@ class ModelMarketFragment : Fragment(), ModelMarketItemListener, Searchable {
     }
 
     private fun handleVoiceModelClick(modelMarketItem: ModelMarketItem) {
-        if (ModelUtils.isTtsModelByTags(modelMarketItem.tags)) {
+        if (ModelTypeUtils.isTtsModelByTags(modelMarketItem.tags)) {
             handleTtsModelClick(modelMarketItem)
-        } else if (ModelUtils.isAsrModelByTags(modelMarketItem.tags)) {
+        } else if (ModelTypeUtils.isAsrModelByTags(modelMarketItem.tags)) {
             handleAsrModelClick(modelMarketItem)
         }
     }
@@ -689,7 +716,7 @@ class ModelMarketFragment : Fragment(), ModelMarketItemListener, Searchable {
      * Refresh adapter to update all checkbox states, ensuring only one is selected
      */
     private fun refreshAdapterForVoiceModelChange() {
-        // 通知 adapter 刷新所有 item，这样每个 item 都会重新检查是否为默认模型
+        //Notify adapter to refresh all items so each item rechecks if it's the default model
         adapter.notifyDataSetChanged()
     }
 

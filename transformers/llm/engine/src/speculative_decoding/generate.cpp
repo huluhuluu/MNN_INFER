@@ -24,6 +24,8 @@ std::shared_ptr<Generation> GenerationStrategyFactory::create(Llm* llm, std::sha
             res.reset(new LookaheadGeneration(llm, context, config));
         } else if(config->speculative_type() == "mtp") {
             res.reset(new MtpGeneration(llm, context, config));
+        } else if(config->speculative_type() == "eagle") {
+            res.reset(new EagleGeneration(llm, context, config));
         } else {
             // autoregressive generation
             res.reset(new ArGeneration(llm, context, config));
@@ -42,6 +44,9 @@ void ArGeneration::generate(GenerationParams& param) {
     int max_token = param.max_new_tokens;
     int len = 0;
     while (len < max_token) {
+        if(mContext->status == LlmStatus::USER_CANCEL) {
+            break;
+        }
         AUTOTIME;
         
         // Profiler: Decode token start
@@ -51,7 +56,7 @@ void ArGeneration::generate(GenerationParams& param) {
         }
         
         // Update gen seq
-        mContext->current_token = mLlm->sample(param.outputs[0]);
+        mContext->current_token = mLlm->sample(param.outputs[0], param.validLogitStart, param.validLogitSize);
         mContext->history_tokens.push_back(mContext->current_token);
         mContext->output_tokens.push_back(mContext->current_token);
         mLlm->updateContext(0, 1);
@@ -69,10 +74,14 @@ void ArGeneration::generate(GenerationParams& param) {
             *mContext->os << decodeStr;
             *mContext->os << std::flush;
         }
-        
         // Compute Next Logits
-        mLlm->mMeta->remove = 0;
         auto outputs = mLlm->forwardVec({mContext->current_token});
+        for (auto o : outputs) {
+            if(nullptr == o->readMap<float>()) {
+                mContext->status = LlmStatus::INTERNAL_ERROR;
+                break;
+            }
+        }
         if(outputs.empty()) {
             break;
         }
@@ -87,6 +96,9 @@ void ArGeneration::generate(GenerationParams& param) {
         
         len++;
     }
+    if(len >= max_token) {
+        mContext->status = LlmStatus::MAX_TOKENS_FINISHED;
+    }
 }
 
 int Generation::draftVerify(VARP logits, const std::vector<int> &drafts, bool& stop) {
@@ -97,9 +109,9 @@ int Generation::draftVerify(VARP logits, const std::vector<int> &drafts, bool& s
         for(; i_dft < drafts.size(); i_dft++) {
             auto sample_size = logits->getInfo()->dim[logits->getInfo()->dim.size() - 1];
             auto sample_offset = logits->getInfo()->size - (drafts.size() - i_dft + 1) * sample_size;
-            
+
             auto predict = mLlm->sample(logits, sample_offset, sample_size);
-            
+
             // stop token just break the process
             if (mLlm->is_stop(predict)) {
                 mContext->current_token = predict;
@@ -124,7 +136,7 @@ int Generation::draftVerify(VARP logits, const std::vector<int> &drafts, bool& s
         if(i_dft == drafts.size()) {
             auto sample_size = logits->getInfo()->dim[logits->getInfo()->dim.size() - 1];
             auto sample_offset = logits->getInfo()->size -  sample_size;
-            
+
             auto predict = mLlm->sample(logits, sample_offset, sample_size);
             mContext->current_token = predict;
         }

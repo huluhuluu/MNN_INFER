@@ -129,6 +129,13 @@ static int dumpModelInfo(const char* modelName) {
     } else {
         MNN_PRINT("Model Version: %s \n", info->version.c_str());
     }
+    if (!info->metaData.empty()) {
+        MNN_PRINT("MetaData: Begin \n");
+        for (auto& iter : info->metaData) {
+            MNN_PRINT("[Meta] %s : %s\n", iter.first.c_str(), iter.second.c_str());
+        }
+        MNN_PRINT("MetaData: End \n");
+    }
     return 0;
 }
 
@@ -214,6 +221,10 @@ bool Cli::initializeMNNConvertArgs(modelConfig &modelPath, int argc, char **argv
      "weightQuantBlock",
      "using block-wise weight quant, set block size, defaut: -1, which means channel-wise weight quant",
      cxxopts::value<int>()
+     )
+    (
+     "hqq",
+     "using hqq quant method to improve accuracy, default: false, if use hqq, weightQuantAsymmetric is set as true"
      )
     (
      "compressionParamsFile",
@@ -320,6 +331,14 @@ bool Cli::initializeMNNConvertArgs(modelConfig &modelPath, int argc, char **argv
       "useOriginRNNImpl",
       "Don't use While Module to Implement LSTM or GRU, use origin OP, if open it, LSTM and GRU can't be quantized or use other compress method",
       cxxopts::value<bool>()
+     )
+    (
+     "splitBlockQuant",
+     "Split Block Quant Convolution"
+     )
+    (
+     "dumpPass",
+     "Enable verbose output for each optimization pass, showing what changes each pass made (like LLVM's -debug-pass)"
      )
     ;
 
@@ -455,6 +474,16 @@ bool Cli::initializeMNNConvertArgs(modelConfig &modelPath, int argc, char **argv
     if (result.count("fp16")) {
         modelPath.saveHalfFloat = true;
     }
+    if (result.count("weightQuantAsymmetric")) {
+        modelPath.weightQuantAsymmetric = result["weightQuantAsymmetric"].as<bool>();
+    }
+    if (result.count("hqq")) {
+        if(modelPath.weightQuantAsymmetric) {
+            modelPath.useHQQ = true;
+        } else {
+            std::cout << "Warning, MNN Convert only support Hqq with weight asymmetric quant! Disable Hqq currently" <<  std::endl;
+        }
+    }
     if (result.count("forTraining")) {
         modelPath.forTraining = true;
     }
@@ -466,9 +495,9 @@ bool Cli::initializeMNNConvertArgs(modelConfig &modelPath, int argc, char **argv
     }
     if (result.count("weightQuantBits")) {
         modelPath.weightQuantBits = result["weightQuantBits"].as<int>();
-    }
-    if (result.count("weightQuantAsymmetric")) {
-        modelPath.weightQuantAsymmetric = result["weightQuantAsymmetric"].as<bool>();
+        if (modelPath.useHQQ) {
+            MNN_PRINT("Use HQQ to quant weight\n");
+        }
     }
     if (result.count("weightQuantBlock")) {
         modelPath.weightQuantBlock = result["weightQuantBlock"].as<int>();
@@ -489,6 +518,9 @@ bool Cli::initializeMNNConvertArgs(modelConfig &modelPath, int argc, char **argv
     }
     if (result.count("authCode")) {
         modelPath.authCode = result["authCode"].as<std::string>();
+    }
+    if (result.count("splitBlockQuant")) {
+        modelPath.splitQuantBlock = true;
     }
     if (result.count("alignDenormalizedValue")) {
         modelPath.alignDenormalizedValue = result["alignDenormalizedValue"].as<int>();
@@ -526,6 +558,9 @@ bool Cli::initializeMNNConvertArgs(modelConfig &modelPath, int argc, char **argv
     if (result.count("useOriginRNNImpl")) {
         modelPath.useOriginRNNImpl = true;
     }
+    if (result.count("dumpPass")) {
+        modelPath.dumpPass = true;
+    }
     return true;
 }
 
@@ -552,17 +587,17 @@ static void computeUnaryBuffer(MNN::NetT* net) {
             if (type == UnaryOpOperation_ABS || type == UnaryOpOperation_NEG || type == UnaryOpOperation_SIGN) {
                 continue;
             }
-            op->main.AsUnaryOp()->tableInt8.resize(255);
-            auto unaryParam = op->main.AsUnaryOp()->tableInt8.data();
 
             auto outputId = op->outputIndexes[0];
-            if (describes.find(outputId) == describes.end()) {
+            auto inputId = op->inputIndexes[0];
+            if (describes.find(outputId) == describes.end() || describes.find(inputId) == describes.end()) {
                 continue;
             }
+            op->main.AsUnaryOp()->tableInt8.resize(255);
+            auto unaryParam = op->main.AsUnaryOp()->tableInt8.data();
             auto unaryDes = describes.find(outputId)->second;
             float outScale = unaryDes->quantInfo->scale;
             float outZero  = unaryDes->quantInfo->zero;
-            auto inputId = op->inputIndexes[0];
             if (describes.find(inputId) == describes.end()) {
                 auto iter = describes.find(outputId);
 
@@ -721,14 +756,18 @@ bool Cli::convertModel(modelConfig& modelPath) {
     if (1 == modelPath.optimizeLevel && modelPath.model == modelConfig::MNN) {
         expectedPass = {
             "TranslateJsonOp",
-            "FuseDupOp"
+            "FuseDupOp",
+            "RemoveInvalidCast",
         };
+    }
+    if (modelPath.splitQuantBlock) {
+        expectedPass.emplace_back("SplitBlockQuantConvolution");
     }
     CommonKit::loadCompress(modelPath);
     if (needOptimize) {
         std::cout << "Start to Optimize the MNN Net..." << std::endl;
         std::unique_ptr<MNN::NetT> newNet = optimizeNet(netT, modelPath.forTraining, modelPath, expectedPass);
-        if (newNet->extraTensorDescribe.size()>0) {
+        if (newNet->extraTensorDescribe.size()>0 && expectedPass.empty()) {
             MNN_PRINT("MNN net has tensor quant info\n");
             computeUnaryBuffer(newNet.get());
         }
@@ -933,7 +972,6 @@ int Cli::testconvert(const std::string& defaultCacheFile, const std::string& dir
     }
     rtmgr->setHint(MNN::Interpreter::INIT_THREAD_NUMBER, 2);
 
-    rtmgr->setExternalFile("./convert_cache.mnn.weight");
     std::shared_ptr<MNN::Express::Module> net(MNN::Express::Module::load(inputNames, outputNames, defaultCacheFile.c_str(), rtmgr, &mConfig));
     std::shared_ptr<MNN::Express::Module> net2;
     net2.reset(MNN::Express::Module::clone(net.get()));
@@ -972,14 +1010,6 @@ int Cli::testconvert(const std::string& defaultCacheFile, const std::string& dir
             inputs[i] = _Input(mInfo->inputs[i].dim, mInfo->inputs[i].order, mInfo->inputs[i].type);
         }
         auto info = inputs[i]->getInfo();
-        auto iter = inputInfo.find(inputNames[i]);
-        if (iter != inputInfo.end()) {
-            auto ptr = inputs[i]->writeMap<float>();
-            for (int v=0; v<mInfo->inputs[i].size; ++v) {
-                ptr[v] = iter->second;
-            }
-            continue;
-        }
         if (info->type == halide_type_of<float>()){
             auto ptr = inputs[i]->writeMap<float>();
             LOAD_DATA(float)

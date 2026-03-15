@@ -13,6 +13,7 @@ import androidx.preference.Preference
 import androidx.preference.PreferenceFragmentCompat
 import com.alibaba.mls.api.source.ModelSources
 import com.alibaba.mnnllm.android.R
+import com.alibaba.mnnllm.android.MNN
 import com.alibaba.mnnllm.android.debug.DebugActivity
 import com.alibaba.mnnllm.android.update.UpdateChecker
 import com.alibaba.mnnllm.android.utils.AppUtils
@@ -80,8 +81,19 @@ class MainSettingsFragment : PreferenceFragmentCompat() {
             }
         }
 
+        // Setup MNN Version preference
+        val mnnVersionPref = findPreference<Preference>("mnn_version")
+        mnnVersionPref?.apply {
+            try {
+                val version = MNN.getVersion()
+                summary = getString(R.string.mnn_version_summary, version)
+            } catch (e: Exception) {
+                summary = "N/A"
+            }
+        }
 
-        // 重置 API配置
+
+        //Reset API configuration
         val resetApiConfigPref = findPreference<Preference>("reset_api_config")
         resetApiConfigPref?.setOnPreferenceClickListener {
             MaterialAlertDialogBuilder(requireContext())
@@ -143,7 +155,7 @@ class MainSettingsFragment : PreferenceFragmentCompat() {
                 Log.d(TAG, "diffusionMemoryModePref updateSummary vale: $vale")
                 diffusionMemoryModePref.summary = when (vale) {
                     "0" -> getString(R.string.diffusion_mode_memory_saving)
-                    "1" -> getString(R.string.diffusion_mode_memory_engough)
+                    "1" -> getString(R.string.diffusion_mode_memory_enough)
                     else -> getString(R.string.diffusion_mode_memory_balance)
                 }
             }

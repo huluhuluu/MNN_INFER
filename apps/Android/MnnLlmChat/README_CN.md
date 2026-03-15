@@ -49,11 +49,36 @@
 + 构建 Android 应用项目并安装：
   ```shell
   cd ../../../apps/Android/MnnLlmChat
-  ./gradlew installDebug
+  ./installDebug.sh
   ```
 
 # Releases
 
+## Version 0.7.5
++ 点击这里 [下载](https://meta.alicdn.com/data/mnn/mnn_chat_0_7_5.apk)
++ 新增 Qwen3-VL 支持（4B、8B、30B-A3B）
++ 支持 smolvlm-video 系列的视频输入
+
+## Version 0.7.3
++ 点击这里 [下载](https://meta.alicdn.com/data/mnn/mnn_chat_0_7_3_1.apk)
++ 优化 API 服务
+
+## 版本 0.7.2
++ 点击这里 [下载](https://meta.alicdn.com/data/mnn/mnn_chat_0_7_2.apk)
++ 问题修复：
+  + 修复通义千问思考/不思考开关有时不生效的问题。
++ 界面更新：
+  + 更新历史记录和性能测试界面。
+  
+## 版本 0.7.1
++ [点击此处下载](https://meta.alicdn.com/data/mnn/mnn_chat_0_7_1.apk)
++ 新增模型：
+  + [MiniCPM-V-4](https://huggingface.co/openbmb/MiniCPM-V-4)：可在手机上运行的、达到 GPT-4V 水准的多模态大语言模型，支持单图、多图和视频理解
+  + [WebSailor-3B](https://huggingface.co/Alibaba-NLP/WebSailor-3B)：一种完整的后训练方法论，旨在教会大语言模型代理在复杂网页导航和信息检索任务中进行高级推理
+  + [Lingshu-7B](https://huggingface.co/lingshu-medical-mllm/Lingshu-7B)：面向医疗领域的多模态大语言模型
++ 问题修复：
+  + 选择图片时崩溃的问题
+  
 ## Version 0.7.0
 + Click here to [download](https://meta.alicdn.com/data/mnn/mnn_chat_0_7_0.apk)
 + 增加新模型: gpt-oss-20b

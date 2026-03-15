@@ -98,7 +98,7 @@ mul \rg1, \rg2, \rg1
 sub \rg0, \rg0, \rg1, LSL #5 // revert weight kernel sum
 .endm
 asm_function MNNGemmInt8AddBiasScale_ARMV82_Unit
-/* 
+/*
 struct QuanPostTreatParameters {
     const float* scale;
     const float* biasFloat;
@@ -118,7 +118,7 @@ struct QuanPostTreatParameters {
 };
 */
 
-//void MNNGemmInt8AddBiasScale_ARMV82_Unit(int8_t* dst, const int8_t* src, 
+//void MNNGemmInt8AddBiasScale_ARMV82_Unit(int8_t* dst, const int8_t* src,
 //    const int8_t* weight, size_t src_depth_quad, size_t dst_step, size_t dst_depth_quad,
 // const QuanPostTreatParameters* parameters, size_t realDstCount);
 
@@ -145,26 +145,28 @@ ldr x27, [x6, #88]  // inputBias
 ldr x10, [x6, #96]  // accumBuffer
 ldr x26, [x6, #64]  // blockNum
 lsl x22, x7, #2 // eDest * SRC_UNIT
-mov x14, #-32
+
+mov x25, #-32
 add x23, x6, #16  // int8 max ptr
 cbz x28, TILE_12
 ldr x23, [x6, #56]  // fp32minmax
 cbz x27, TILE_12
-mov x14, #16
+sub x25, x22, #32
 
 TILE_12:
     cmp x7, #12
     blt TILE_8
     sub x4, x4, #128
+    mov x12, x2
+    mov x6, x0
+    mov x14, x5
     mov x20, x9
     mov x15, x8 // input kernel sum
-    mov x6, x27 // input dequant bias
     mov x21, x24 // input dequant scale
-    mov x12, #-320
     cbnz x28, L8LoopDz_TILE_12
     add x4, x4, #128 // int8 do not change
 L8LoopDz_TILE_12:
-    cmp x5, #2
+    cmp x14, #2
     blt L4LoopDz_TILE_12
     mov x11, x1
     mov x19, #0
@@ -179,8 +181,8 @@ TILE12_BLOCKNUM:
     SET_BIAS v28, v29, v30, v31
 
     L8LoopSz_TILE_12:
-        ld1 {v3.16b, v4.16b}, [x2], #32 // weight
-        ld1 {v0.16b, v1.16b, v2.16b}, [x11], #48 // src
+        ld1 {v3.16b, v4.16b}, [x12], #32 // weight
+        ld1 {v0.16b, v1.16b, v2.16b}, [x11], x22 // src
         .inst 0x4f80e068 // sdot v8.4s, v3.16b, v0.4b[0]
         .inst 0x4fa0e069 // sdot v9.4s, v3.16b, v0.4b[1]
         .inst 0x4f80e86a // sdot v10.4s, v3.16b, v0.4b[2]
@@ -190,6 +192,7 @@ TILE12_BLOCKNUM:
         .inst 0x4fa1e06d // sdot v13.4s, v3.16b, v1.4b[1]
         .inst 0x4f81e86e // sdot v14.4s, v3.16b, v1.4b[2]
         .inst 0x4fa1e86f // sdot v15.4s, v3.16b, v1.4b[3]
+
         .inst 0x4f82e070 // sdot v16.4s, v3.16b, v2.4b[0]
         .inst 0x4fa2e071 // sdot v17.4s, v3.16b, v2.4b[1]
         .inst 0x4f82e872 // sdot v18.4s, v3.16b, v2.4b[2]
@@ -213,9 +216,8 @@ TILE12_BLOCKNUM:
     L8LoopSzEnd_TILE_12:
 
     L8Tile12Quan:
-    ld1 {v0.4s, v1.4s}, [x2], #32 // scale
-    ld1 {v2.4s, v3.4s, v4.4s}, [x8], #48 // input kernel sum
-    ld1 {v5.4s, v6.4s}, [x2], #32 // weight quan zeropoint
+    ld1 {v0.4s, v1.4s, v2.4s, v3.4s}, [x12], #64 // weight scale&bias
+    ld1 {v4.4s, v5.4s, v6.4s}, [x8], x22 // input kernel sum
     Int32ToFloat v8, v9, v10, v11
     Int32ToFloat v12, v13, v14, v15
     Int32ToFloat v16, v17, v18, v19
@@ -230,9 +232,9 @@ TILE12_BLOCKNUM:
     MUL_SCALE v1, v24, v25, v26, v27
     MUL_SCALE v1, v28, v29, v30, v31
 
-    cbz x21, TILE12_L8_MLA
+    cbz x21, TILE12_L8_MLA_TERM
     ld1 {v0.4s, v1.4s}, [x24], #32
-    ld1 {v7.4s}, [x24], x14
+    ld1 {v7.4s}, [x24], x25
     MUL_EXTRA_SCALE v0, v8, v9, v10, v11
     MUL_EXTRA_SCALE v1, v12, v13, v14, v15
     MUL_EXTRA_SCALE v7, v16, v17, v18, v19
@@ -240,37 +242,36 @@ TILE12_BLOCKNUM:
     MUL_EXTRA_SCALE v1, v24, v25, v26, v27
     MUL_EXTRA_SCALE v7, v28, v29, v30, v31
 
-    TILE12_L8_MLA:
-    MLA_WEIGHTZERO v8,  v2, v5, 0 // tile:0, oc:0-3
-    MLA_WEIGHTZERO v9,  v2, v5, 1 // tile:1, oc:0-3
-    MLA_WEIGHTZERO v10, v2, v5, 2 // tile:2, oc:0-3
-    MLA_WEIGHTZERO v11, v2, v5, 3 // tile:3, oc:0-3
-    MLA_WEIGHTZERO v12, v3, v5, 0 // tile:4, oc:0-3
-    MLA_WEIGHTZERO v13, v3, v5, 1 // tile:5, oc:0-3
-    MLA_WEIGHTZERO v14, v3, v5, 2 // tile:6, oc:0-3
-    MLA_WEIGHTZERO v15, v3, v5, 3 // tile:7, oc:0-3
-    MLA_WEIGHTZERO v16, v4, v5, 0 // tile:8, oc:0-3
-    MLA_WEIGHTZERO v17, v4, v5, 1 // tile:9, oc:0-3
-    MLA_WEIGHTZERO v18, v4, v5, 2 // tile:10, oc:0-3 
-    MLA_WEIGHTZERO v19, v4, v5, 3 // tile:11, oc:0-3
+    TILE12_L8_MLA_TERM:
+    MLA_WEIGHTZERO v8,  v4, v2, 0 // tile:0, oc:0-3
+    MLA_WEIGHTZERO v9,  v4, v2, 1 // tile:1, oc:0-3
+    MLA_WEIGHTZERO v10, v4, v2, 2 // tile:2, oc:0-3
+    MLA_WEIGHTZERO v11, v4, v2, 3 // tile:3, oc:0-3
+    MLA_WEIGHTZERO v12, v5, v2, 0 // tile:4, oc:0-3
+    MLA_WEIGHTZERO v13, v5, v2, 1 // tile:5, oc:0-3
+    MLA_WEIGHTZERO v14, v5, v2, 2 // tile:6, oc:0-3
+    MLA_WEIGHTZERO v15, v5, v2, 3 // tile:7, oc:0-3
+    MLA_WEIGHTZERO v16, v6, v2, 0 // tile:8, oc:0-3
+    MLA_WEIGHTZERO v17, v6, v2, 1 // tile:9, oc:0-3
+    MLA_WEIGHTZERO v18, v6, v2, 2 // tile:10, oc:0-3
+    MLA_WEIGHTZERO v19, v6, v2, 3 // tile:11, oc:0-3
 
-    MLA_WEIGHTZERO v20, v2, v6, 0 // tile:0, oc:4-7
-    MLA_WEIGHTZERO v21, v2, v6, 1 // tile:1, oc:4-7
-    MLA_WEIGHTZERO v22, v2, v6, 2 // tile:2, oc:4-7
-    MLA_WEIGHTZERO v23, v2, v6, 3 // tile:3, oc:4-7
-    MLA_WEIGHTZERO v24, v3, v6, 0 // tile:4, oc:4-7
-    MLA_WEIGHTZERO v25, v3, v6, 1 // tile:5, oc:4-7
-    MLA_WEIGHTZERO v26, v3, v6, 2 // tile:6, oc:4-7 
-    MLA_WEIGHTZERO v27, v3, v6, 3 // tile:7, oc:4-7
-    MLA_WEIGHTZERO v28, v4, v6, 0 // tile:8, oc:4-7
-    MLA_WEIGHTZERO v29, v4, v6, 1 // tile:9, oc:4-7
-    MLA_WEIGHTZERO v30, v4, v6, 2 // tile:10, oc:4-7
-    MLA_WEIGHTZERO v31, v4, v6, 3 // tile:11, oc:4-7
+    MLA_WEIGHTZERO v20, v4, v3, 0 // tile:0, oc:4-7
+    MLA_WEIGHTZERO v21, v4, v3, 1 // tile:1, oc:4-7
+    MLA_WEIGHTZERO v22, v4, v3, 2 // tile:2, oc:4-7
+    MLA_WEIGHTZERO v23, v4, v3, 3 // tile:3, oc:4-7
+    MLA_WEIGHTZERO v24, v5, v3, 0 // tile:4, oc:4-7
+    MLA_WEIGHTZERO v25, v5, v3, 1 // tile:5, oc:4-7
+    MLA_WEIGHTZERO v26, v5, v3, 2 // tile:6, oc:4-7
+    MLA_WEIGHTZERO v27, v5, v3, 3 // tile:7, oc:4-7
+    MLA_WEIGHTZERO v28, v6, v3, 0 // tile:8, oc:4-7
+    MLA_WEIGHTZERO v29, v6, v3, 1 // tile:9, oc:4-7
+    MLA_WEIGHTZERO v30, v6, v3, 2 // tile:10, oc:4-7
+    MLA_WEIGHTZERO v31, v6, v3, 3 // tile:11, oc:4-7
 
-    cbz x28, L8Tile12QuanUseInt8
 
     cbz x27, TILE12_ADD_DSTV
-    ld1 {v0.4s, v1.4s, v2.4s}, [x27], #48 // input dequant bias
+    ld1 {v0.4s, v1.4s, v2.4s}, [x27], x22 // input dequant bias
     ld1 {v3.4s, v4.4s}, [x28], #32 // weight kernel sum
     MLA_WEIGHTZERO v8, v0, v3, 0
     MLA_WEIGHTZERO v9, v0, v3, 1
@@ -291,7 +292,7 @@ TILE12_BLOCKNUM:
     MLA_WEIGHTZERO v23, v0, v4, 3 // tile:3, oc:4-7
     MLA_WEIGHTZERO v24, v1, v4, 0 // tile:4, oc:4-7
     MLA_WEIGHTZERO v25, v1, v4, 1 // tile:5, oc:4-7
-    MLA_WEIGHTZERO v26, v1, v4, 2 // tile:6, oc:4-7 
+    MLA_WEIGHTZERO v26, v1, v4, 2 // tile:6, oc:4-7
     MLA_WEIGHTZERO v27, v1, v4, 3 // tile:7, oc:4-7
     MLA_WEIGHTZERO v28, v2, v4, 0 // tile:8, oc:4-7
     MLA_WEIGHTZERO v29, v2, v4, 1 // tile:9, oc:4-7
@@ -309,9 +310,10 @@ TILE12_BLOCKNUM:
     ADD_FLOAT v16, v17, v18, v19, v0, v1, v2, v3
     ADD_FLOAT v20, v21, v22, v23, v4, v5, v6, v7
     ld1 {v0.4s, v1.4s, v2.4s, v3.4s}, [x10], #64
-    ld1 {v4.4s, v5.4s, v6.4s, v7.4s}, [x10], x12
+    ld1 {v4.4s, v5.4s, v6.4s, v7.4s}, [x10]
     ADD_FLOAT v24, v25, v26, v27, v0, v1, v2, v3
     ADD_FLOAT v28, v29, v30, v31, v4, v5, v6, v7
+    sub x10, x10, #320
 
     TILE12_L8_ACCUM_BUFFER:
     add x19, x19, #1
@@ -322,11 +324,13 @@ TILE12_BLOCKNUM:
     st1 {v16.4s, v17.4s, v18.4s, v19.4s}, [x10], #64
     st1 {v20.4s, v21.4s, v22.4s, v23.4s}, [x10], #64
     st1 {v24.4s, v25.4s, v26.4s, v27.4s}, [x10], #64
-    st1 {v28.4s, v29.4s, v30.4s, v31.4s}, [x10], x12
+    st1 {v28.4s, v29.4s, v30.4s, v31.4s}, [x10]
+    sub x10, x10, #320
     b TILE12_BLOCKNUM
 
     TILE12_POST:
-    sub x5, x5, #2
+    cbz x28, L8Tile12QuanUseInt8
+    sub x14, x14, #2
     cbz x9, TILE12_RELU
     ld1 {v0.4s, v1.4s}, [x20], #32
     ADD_BIAS_FLOAT v8, v9, v10, v11, v0
@@ -349,16 +353,16 @@ TILE12_BLOCKNUM:
     sub x23, x23, #4
 
     TILE12_STORE:
-    st1 {v8.4s, v9.4s, v10.4s, v11.4s}, [x0], #64
-    st1 {v12.4s, v13.4s, v14.4s, v15.4s}, [x0], #64
-    st1 {v16.4s, v17.4s, v18.4s, v19.4s}, [x0], x4
-    st1 {v20.4s, v21.4s, v22.4s, v23.4s}, [x0], #64
-    st1 {v24.4s, v25.4s, v26.4s, v27.4s}, [x0], #64
-    st1 {v28.4s, v29.4s, v30.4s, v31.4s}, [x0], x4
+    st1 {v8.4s, v9.4s, v10.4s, v11.4s}, [x6], #64
+    st1 {v12.4s, v13.4s, v14.4s, v15.4s}, [x6], #64
+    st1 {v16.4s, v17.4s, v18.4s, v19.4s}, [x6], x4
+    st1 {v20.4s, v21.4s, v22.4s, v23.4s}, [x6], #64
+    st1 {v24.4s, v25.4s, v26.4s, v27.4s}, [x6], #64
+    st1 {v28.4s, v29.4s, v30.4s, v31.4s}, [x6], x4
     b L8Tile12LoopCheck
 
     L8Tile12QuanUseInt8:
-    sub x5, x5, #2
+    sub x14, x14, #2
     ld1r {v7.4s}, [x23], #4 // int8 max
     ld1r {v6.4s}, [x23]      // int8 min
     ld1 {v0.4s, v1.4s}, [x9], #32
@@ -399,14 +403,15 @@ TILE12_BLOCKNUM:
     smin v19.16b, v7.16b, v19.16b
     smin v20.16b, v7.16b, v20.16b
     smin v21.16b, v7.16b, v21.16b
-    st1 {v16.16b, v17.16b, v18.16b}, [x0], x4
-    st1 {v19.16b, v20.16b, v21.16b}, [x0], x4
+    st1 {v16.16b, v17.16b, v18.16b}, [x6], x4
+    st1 {v19.16b, v20.16b, v21.16b}, [x6], x4
 
     L8Tile12LoopCheck:
-    cbz x5, End
+    cbz x14, Tile12End
     mov x8, x15 // revert input kernel sum
     mov x24, x21 // revert input dequant scale
-    mov x27, x6 // revert input dequant bias
+    cbz x27, L8LoopDz_TILE_12
+    REVERT_INPUT_DEQUANT_BIAS x27, x19, x26, x22
     b L8LoopDz_TILE_12
 
 L4LoopDz_TILE_12:
@@ -419,8 +424,8 @@ L4_TILE12_BLOCKNUM:
     SET_BIAS v16, v17, v18, v19
 
     L4_LoopSz_TILE_12:
-        ld1 {v3.16b}, [x2] // weight
-        ld1 {v0.16b, v1.16b, v2.16b}, [x1], #48 // src
+        ld1 {v3.16b}, [x12] // weight
+        ld1 {v0.16b, v1.16b, v2.16b}, [x11], x22 // src
         .inst 0x4f80e068 // sdot v8.4s, v3.16b, v0.4b[0]
         .inst 0x4fa0e069 // sdot v9.4s, v3.16b, v0.4b[1]
         .inst 0x4f80e86a // sdot v10.4s, v3.16b, v0.4b[2]
@@ -429,7 +434,7 @@ L4_TILE12_BLOCKNUM:
         .inst 0x4fa1e06d // sdot v13.4s, v3.16b, v1.4b[1]
         .inst 0x4f81e86e // sdot v14.4s, v3.16b, v1.4b[2]
         .inst 0x4fa1e86f // sdot v15.4s, v3.16b, v1.4b[3]
-        add x2, x2, #32 // weight offset=lp*hp=32
+        add x12, x12, #32 // weight offset=lp*hp=32
         subs x13, x13, #1
         .inst 0x4f82e070 // sdot v16.4s, v3.16b, v2.4b[0]
         .inst 0x4fa2e071 // sdot v17.4s, v3.16b, v2.4b[1]
@@ -439,11 +444,11 @@ L4_TILE12_BLOCKNUM:
 
 
     L4_Tile12Quan:
-    ld1 {v0.4s}, [x2] // scale
-    add x2, x2, #32
-    ld1 {v2.4s, v3.4s, v4.4s}, [x8], #48 // x kernel sum
-    ld1 {v5.4s}, [x2] // weight quan zeropoint
-    add x2, x2, #32
+    ld1 {v0.4s}, [x12] // scale
+    add x12, x12, #32
+    ld1 {v2.4s, v3.4s, v4.4s}, [x8], x22 // x kernel sum
+    ld1 {v5.4s}, [x12] // weight quan zeropoint
+    add x12, x12, #32
     Int32ToFloat v8, v9, v10, v11
     Int32ToFloat v12, v13, v14, v15
     Int32ToFloat v16, v17, v18, v19
@@ -453,7 +458,7 @@ L4_TILE12_BLOCKNUM:
 
     cbz x21, TILE12_L4_MLA
     ld1 {v0.4s, v1.4s}, [x24], #32
-    ld1 {v7.4s}, [x24], x14
+    ld1 {v7.4s}, [x24], x25
     MUL_EXTRA_SCALE v0, v8, v9, v10, v11
     MUL_EXTRA_SCALE v1, v12, v13, v14, v15
     MUL_EXTRA_SCALE v7, v16, v17, v18, v19
@@ -469,13 +474,11 @@ L4_TILE12_BLOCKNUM:
     MLA_WEIGHTZERO v15, v3, v5, 3 // tile:7, oc:0-3
     MLA_WEIGHTZERO v16, v4, v5, 0 // tile:8, oc:0-3
     MLA_WEIGHTZERO v17, v4, v5, 1 // tile:9, oc:0-3
-    MLA_WEIGHTZERO v18, v4, v5, 2 // tile:10, oc:0-3 
+    MLA_WEIGHTZERO v18, v4, v5, 2 // tile:10, oc:0-3
     MLA_WEIGHTZERO v19, v4, v5, 3 // tile:11, oc:0-3
 
-    cbz x28, L4Tile12QuanUseInt8
-
     cbz x27, L4_TILE12_ADD_DSTV
-    ld1 {v0.4s, v1.4s, v2.4s}, [x27], #48 // input dequant bias
+    ld1 {v0.4s, v1.4s, v2.4s}, [x27], x22 // input dequant bias
     ld1 {v3.4s}, [x28] // weight kernel sum
     MLA_WEIGHTZERO v8, v0, v3, 0
     MLA_WEIGHTZERO v9, v0, v3, 1
@@ -512,6 +515,7 @@ L4_TILE12_BLOCKNUM:
     b L4_TILE12_BLOCKNUM
 
     L4_TILE12_POST:
+    cbz x28, L4Tile12QuanUseInt8
     cbz x9, L4_TILE12_RELU
     ld1 {v0.4s}, [x20], #16
     ADD_BIAS_FLOAT v8, v9, v10, v11, v0
@@ -527,10 +531,10 @@ L4_TILE12_BLOCKNUM:
     sub x23, x23, #4
 
     L4_TILE12_STORE:
-    st1 {v8.4s, v9.4s, v10.4s, v11.4s}, [x0], #64
-    st1 {v12.4s, v13.4s, v14.4s, v15.4s}, [x0], #64
-    st1 {v16.4s, v17.4s, v18.4s, v19.4s}, [x0], x4
-    b End
+    st1 {v8.4s, v9.4s, v10.4s, v11.4s}, [x6], #64
+    st1 {v12.4s, v13.4s, v14.4s, v15.4s}, [x6], #64
+    st1 {v16.4s, v17.4s, v18.4s, v19.4s}, [x6], x4
+    b Tile12End
 
     L4Tile12QuanUseInt8:
     ld1r {v7.4s}, [x23], #4 // int8 max
@@ -556,8 +560,24 @@ L4_TILE12_BLOCKNUM:
     smin v16.16b, v7.16b, v16.16b
     smin v17.16b, v7.16b, v17.16b
     smin v18.16b, v7.16b, v18.16b
-    st1 {v16.16b, v17.16b, v18.16b}, [x0], x4
-    b End
+    st1 {v16.16b, v17.16b, v18.16b}, [x6], x4
+    b Tile12UpdateAddr
+
+Tile12End:
+    add x4, x4, #128 // revert x4, int8 do not need
+    Tile12UpdateAddr:
+    add x0, x0, #192
+    sub x7, x7, #12
+    cbz x7, End
+    add x1, x1, #48
+    add x8, x15, #48
+    add x24, x21, #48
+
+
+    cbz x27, TILE_8
+    REVERT_INPUT_DEQUANT_BIAS x27, x19, x26, x22
+    REVERT_WEIGHT_KERNEL_SUM x28, x14, x26, x5
+    add x27, x27, #48
 
 TILE_8:
     mov x25, #0
@@ -651,7 +671,6 @@ TILE8_BLOCKNUM:
     MLA_WEIGHTZERO v21, v3, v25, 1 // tile:5, oc:4-7
     MLA_WEIGHTZERO v22, v3, v25, 2 // tile:6, oc:4-7
     MLA_WEIGHTZERO v23, v3, v25, 3 // tile:7, oc:4-7
-    cbz x28, L8Tile8QuanUseInt8
 
     cbz x27, TILE8_ADD_DSTV
     ld1 {v2.4s, v3.4s}, [x27], x25
@@ -666,7 +685,7 @@ TILE8_BLOCKNUM:
     MLA_WEIGHTZERO v15, v3, v24, 3 // tile:7, oc:0-3
     MLA_WEIGHTZERO v16, v2, v25, 0 // tile:0, oc:4-7
     MLA_WEIGHTZERO v17, v2, v25, 1 // tile:1, oc:4-7
-    MLA_WEIGHTZERO v18, v2, v25, 2 // tile:2, oc:4-7 
+    MLA_WEIGHTZERO v18, v2, v25, 2 // tile:2, oc:4-7
     MLA_WEIGHTZERO v19, v2, v25, 3 // tile:3, oc:4-7
     MLA_WEIGHTZERO v20, v3, v25, 0 // tile:4, oc:4-7
     MLA_WEIGHTZERO v21, v3, v25, 1 // tile:5, oc:4-7
@@ -697,6 +716,7 @@ TILE8_BLOCKNUM:
     b TILE8_BLOCKNUM
 
     TILE8_POST:
+    cbz x28, L8Tile8QuanUseInt8
     sub x14, x14, #2 // oc-2
     cbz x9, TILE8_RELU
     ld1 {v0.4s, v1.4s}, [x20], #32
@@ -763,7 +783,7 @@ TILE8_BLOCKNUM:
     cbz x27, L8LoopDz_TILE_8
     REVERT_INPUT_DEQUANT_BIAS x27, x19, x26, x22
     b L8LoopDz_TILE_8
-    
+
 L4LoopDz_TILE_8:
     mov x11, x1
     mov x19, #0
@@ -803,7 +823,7 @@ L4_TILE8_BLOCKNUM:
     ld1 {v4.4s, v5.4s}, [x24], x25
     MUL_EXTRA_SCALE v4, v8, v9, v10, v11
     MUL_EXTRA_SCALE v5, v12, v13, v14, v15
-    
+
     TILE8_L4_MLA:
     MLA_WEIGHTZERO v8,  v2, v24, 0 // tile:0, oc:0-3
     MLA_WEIGHTZERO v9,  v2, v24, 1 // tile:1, oc:0-3
@@ -813,7 +833,6 @@ L4_TILE8_BLOCKNUM:
     MLA_WEIGHTZERO v13, v3, v24, 1 // tile:5, oc:0-3
     MLA_WEIGHTZERO v14, v3, v24, 2 // tile:6, oc:0-3
     MLA_WEIGHTZERO v15, v3, v24, 3 // tile:7, oc:0-3
-    cbz x28, L4Tile8QuanUseInt8
 
     cbz x27, L4_TILE8_ADD_DSTV
     ld1 {v2.4s, v3.4s}, [x27], x25
@@ -846,6 +865,7 @@ L4_TILE8_BLOCKNUM:
     b L4_TILE8_BLOCKNUM
 
     L4_TILE8_POST:
+    cbz x28, L4Tile8QuanUseInt8
     cbz x9, L4_TILE8_RELU
     ld1 {v0.4s}, [x20], #16
     ADD_BIAS_FLOAT v8, v9, v10, v11, v0
@@ -965,7 +985,7 @@ TILE4_BLOCKNUM:
     MLA_WEIGHTZERO v13, v2, v25, 1 // tile:1, oc:4-7
     MLA_WEIGHTZERO v14, v2, v25, 2 // tile:2, oc:4-7
     MLA_WEIGHTZERO v15, v2, v25, 3 // tile:3, oc:4-7
-    cbz x28, L8Tile4QuanUseInt8
+
 
     cbz x27, TILE4_ADD_DSTV
     ld1 {v2.4s}, [x27], x25
@@ -997,6 +1017,7 @@ TILE4_BLOCKNUM:
     b TILE4_BLOCKNUM
 
     TILE4_POST:
+    cbz x28, L8Tile4QuanUseInt8
     sub x14, x14, #2
     cbz x9, TILE4_RELU
     ld1 {v4.4s, v5.4s}, [x20], #32
@@ -1082,7 +1103,6 @@ L4_TILE4_BLOCKNUM:
     MLA_WEIGHTZERO v9, v2, v24, 1 // tile:1, oc:0-3
     MLA_WEIGHTZERO v10, v2, v24, 2 // tile:2, oc:0-3
     MLA_WEIGHTZERO v11, v2, v24, 3 // tile:3, oc:0-3
-    cbz x28, L4Tile4QuanUseInt8
 
     cbz x27, L4_TILE4_ADD_DSTV
     ld1 {v2.4s}, [x27], x25
@@ -1106,6 +1126,7 @@ L4_TILE4_BLOCKNUM:
     b L4_TILE4_BLOCKNUM
 
     L4_TILE4_POST:
+    cbz x28, L4Tile4QuanUseInt8
     cbz x9, L4_TILE4_RELU
     ld1 {v4.4s}, [x20], #16
     ADD_BIAS_FLOAT v8, v9, v10, v11, v4
@@ -1172,7 +1193,7 @@ TILE_1_Init_FLOAT:
     cbz x23, TILE_1
     ld1r {v26.4s}, [x23], #4 // f32 min
     ld1r {v27.4s}, [x23] // f32 max
-    
+
 TILE_1:
     mov x6, x0
     mov x12, x2
@@ -1216,7 +1237,7 @@ TILE1_BLOCKNUM:
     MLA_WEIGHTZERO v8, v2, v24, 0 // tile:0, oc:0-3
     MLA_WEIGHTZERO v9, v2, v25, 0 // tile:0, oc:4-7
 
-    cbz x28, L8Tile1QuanUseInt8
+
 
     cbz x27, TILE1_ADD_DSTV
     ld1 {v2.s}[0], [x27], x25
@@ -1238,6 +1259,7 @@ TILE1_BLOCKNUM:
     b TILE1_BLOCKNUM
 
     TILE1_POST:
+    cbz x28, L8Tile1QuanUseInt8
     sub x14, x14, #2
     cbz x9, TILE1_RELU
     ld1 {v10.4s, v11.4s}, [x20], #32
@@ -1308,7 +1330,6 @@ L4_TILE1_BLOCKNUM:
 
     TILE1_L4_MLA:
     MLA_WEIGHTZERO v8, v2, v24, 0 // tile:0, oc:0-3
-    cbz x28, L4Tile1QuanUseInt8
 
     cbz x27, L4_TILE1_ADD_DSTV
     ld1 {v2.s}[0], [x27], x25
@@ -1328,7 +1349,10 @@ L4_TILE1_BLOCKNUM:
     st1 {v8.4s}, [x10]
     b L4_TILE1_BLOCKNUM
 
+
+
     L4_TILE1_POST:
+    cbz x28, L4Tile1QuanUseInt8
     cbz x9, L4_TILE1_RELU
     ld1 {v10.4s}, [x20], #16
     fadd v8.4s, v8.4s, v10.4s

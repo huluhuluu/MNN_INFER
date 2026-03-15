@@ -3,8 +3,8 @@
 
 package com.alibaba.mnnllm.android.model
 
-import com.alibaba.mnnllm.android.model.ModelUtils.isAudioModel
-import com.alibaba.mnnllm.android.model.ModelUtils.isVisualModel
+import com.alibaba.mnnllm.android.model.ModelTypeUtils.isAudioModel
+import com.alibaba.mnnllm.android.model.ModelTypeUtils.isVisualModel
 
 object Modality {
     const val Text = "Text"
@@ -13,17 +13,17 @@ object Modality {
     const val Omni = "Omni"
     const val Diffusion = "Diffusion"
 
-    fun checkModality(modelName: String, modality:String): Boolean {
+    fun checkModality(modelId: String, modality:String): Boolean {
         if (modality == Text) {
             return true
         } else if (modality == Visual) {
-            return isVisualModel(modelName)
+            return isVisualModel(modelId)
         } else if (modality == Audio) {
-            return isAudioModel(modelName)
+            return isAudioModel(modelId)
         } else if (modality == Omni) {
-            return ModelUtils.isOmni(modelName)
+            return ModelTypeUtils.isOmni(modelId)
         } else if (modality == Diffusion) {
-            return ModelUtils.isDiffusionModel(modelName)
+            return ModelTypeUtils.isDiffusionModel(modelId)
         }
         return false
     }

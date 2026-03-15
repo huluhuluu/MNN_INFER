@@ -4,9 +4,9 @@ object TagMapper {
     
     private var tagMap: Map<String, Tag> = emptyMap()
     
-    fun initializeFromData(modelMarketData: ModelMarketData) {
+    fun initializeFromConfig(config: ModelMarketConfig) {
         val mappings = mutableMapOf<String, Tag>()
-        modelMarketData.tagTranslations.forEach { (key, chineseTranslation) ->
+        config.tagTranslations.forEach { (key, chineseTranslation) ->
             mappings[chineseTranslation] = Tag(chineseTranslation, key)
             mappings[key] = Tag(chineseTranslation, key)
         }
@@ -14,6 +14,12 @@ object TagMapper {
     }
     
     fun getTag(stringTag: String): Tag {
+        if (stringTag.equals("local", ignoreCase = true)) {
+            return Tag("本地", "local")
+        }
+        if (stringTag.equals("builtin", ignoreCase = true)) {
+            return Tag("内置", "builtin")
+        }
         return tagMap[stringTag] ?: Tag(stringTag, stringTag) // Fallback for unmapped tags
     }
     

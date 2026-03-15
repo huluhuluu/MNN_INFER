@@ -2,3 +2,8 @@
 toc.pb
 *.apks
 .cursorrules
+release_outputs/
+
+# Model configuration files (contains internal URLs)
+model-config.json
+app/src/main/assets/builtin_models

@@ -71,8 +71,6 @@ std::vector<std::vector<std::string>> parse_csv(const std::vector<std::string>& 
 static int benchmark(Llm* llm, const std::vector<std::string>& prompts, int max_token_number) {
     int prompt_len = 0;
     int decode_len = 0;
-    int64_t vision_time = 0;
-    int64_t audio_time = 0;
     int64_t prefill_time = 0;
     int64_t decode_time = 0;
     int64_t sample_time = 0;
@@ -107,6 +105,7 @@ static int benchmark(Llm* llm, const std::vector<std::string>& prompts, int max_
         if (prompt.substr(0, 1) == "#") {
             continue;
         }
+        
         if (max_token_number >= 0) {
             llm->response(prompt, &std::cout, nullptr, 0);
             while (!llm->stoped() && context->gen_seq_len < max_token_number) {
@@ -117,30 +116,40 @@ static int benchmark(Llm* llm, const std::vector<std::string>& prompts, int max_
         }
         prompt_len += context->prompt_len;
         decode_len += context->gen_seq_len;
-        vision_time += context->vision_us;
-        audio_time += context->audio_us;
         prefill_time += context->prefill_us;
         decode_time += context->decode_us;
         sample_time += context->sample_us;
     }
     llm->generateWavform();
 
-    float vision_s = vision_time / 1e6;
-    float audio_s = audio_time / 1e6;
+    float vision_s = context->vision_us / 1e6;
+    float audio_s = context->audio_us / 1e6;
     float prefill_s = prefill_time / 1e6;
     float decode_s = decode_time / 1e6;
     float sample_s = sample_time / 1e6;
-    printf("\n#################################\n");
-    printf("prompt tokens num = %d\n", prompt_len);
-    printf("decode tokens num = %d\n", decode_len);
-    printf(" vision time = %.2f s\n", vision_s);
-    printf("  audio time = %.2f s\n", audio_s);
-    printf("prefill time = %.2f s\n", prefill_s);
-    printf(" decode time = %.2f s\n", decode_s);
-    printf(" sample time = %.2f s\n", sample_s);
-    printf("prefill speed = %.2f tok/s\n", prompt_len / prefill_s);
-    printf(" decode speed = %.2f tok/s\n", decode_len / decode_s);
-    printf("##################################\n");
+    float vision_speed = 0.0f;
+    if (context->pixels_mp > 0.0f) {
+        vision_speed = context->pixels_mp / vision_s;
+    }
+    float audio_speed = 0.0f;
+    if (context->audio_input_s > 0.0f) {
+        audio_speed = context->audio_input_s / audio_s;
+    }
+    MNN_PRINT("\n#################################\n");
+    MNN_PRINT("prompt tokens num = %d\n", prompt_len);
+    MNN_PRINT("decode tokens num = %d\n", decode_len);
+    MNN_PRINT(" vision time = %.2f s\n", vision_s);
+    MNN_PRINT(" pixels_mp = %.2f MP\n", context->pixels_mp);
+    MNN_PRINT("  audio process time = %.2f s\n", audio_s);
+    MNN_PRINT("  audio input time = %.2f s\n", context->audio_input_s);
+    MNN_PRINT("prefill time = %.2f s\n", prefill_s);
+    MNN_PRINT(" decode time = %.2f s\n", decode_s);
+    MNN_PRINT(" sample time = %.2f s\n", sample_s);
+    MNN_PRINT("prefill speed = %.2f tok/s\n", prompt_len / prefill_s);
+    MNN_PRINT(" decode speed = %.2f tok/s\n", decode_len / decode_s);
+    MNN_PRINT(" vision speed = %.3f MP/s\n", vision_speed);
+    MNN_PRINT(" audio RTF = %.3f \n", audio_s / context->audio_input_s);
+    MNN_PRINT("##################################\n");
     return 0;
 }
 
@@ -156,12 +165,12 @@ static int ceval(Llm* llm, const std::vector<std::string>& lines, std::string fi
         prompt += "\nC. " + elements[4];
         prompt += "\nD. " + elements[5];
         prompt += "\n\n";
-        printf("%s", prompt.c_str());
-        printf("## 进度: %d / %lu\n", i, lines.size() - 1);
+        MNN_PRINT("%s", prompt.c_str());
+        MNN_PRINT("## 进度: %d / %lu\n", i, lines.size() - 1);
         std::ostringstream lineOs;
         llm->response(prompt.c_str(), &lineOs);
         auto line = lineOs.str();
-        printf("%s", line.c_str());
+        MNN_PRINT("%s", line.c_str());
         answers.push_back(line);
     }
     {
@@ -256,7 +265,11 @@ int main(int argc, const char* argv[]) {
     llm->set_config("{\"tmp_path\":\"tmp\"}");
     {
         AUTOTIME;
-        llm->load();
+        bool res = llm->load();
+        if (!res) {
+            MNN_ERROR("LLM init error\n");
+            return 0;
+        }
     }
     if (true) {
         AUTOTIME;

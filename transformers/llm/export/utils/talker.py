@@ -5,18 +5,19 @@ from .model_mapper import ModelMapper
 from .transformers import Rotary, Embedding, Decoder
 from .token2wav import Qwen2_5OmniToken2Wav
 from .spinner import spinner_run
+from .torch_utils import onnx_export
 
 class Talker(torch.nn.Module):
     def __init__(self, talker, token2wav, base):
         super().__init__()
-        self.model_type = base.model_type
+        self.model_type = base.config.model_type
         self.thinker_embed = base.embed
         self.args = base.args
         self.talker = talker.float()
         self.token2wav = Qwen2_5OmniToken2Wav(token2wav, base)
         self.config = base.config
-        self.hidden_size = base.hidden_size
-        self.llm_config = base.llm_config
+        self.hidden_size = base.config.hidden_size
+        self.llm_config = { 'has_talker': True }
         self.rope_ratio = 1.0
         self.quant_bit = 4
         if self.hidden_size <= 2048:
@@ -24,6 +25,9 @@ class Talker(torch.nn.Module):
             self.quant_bit = 8
         self.init_config()
         self.load()
+
+    def get_config(self):
+        return self.llm_config
 
     @staticmethod
     def get_talker(model_type):
@@ -35,7 +39,7 @@ class Talker(torch.nn.Module):
         return None
 
     def init_config(self):
-        self.llm_config['has_talker'] = True
+        pass
 
     def load(self):
         raise NotImplementedError
@@ -86,7 +90,7 @@ class OmniRotary(Rotary):
 class Qwen2_5OmniTalker(Talker):
     def __init__(self, talker, token2wav, base):
         super().__init__(talker, token2wav, base)
-        self.input_hidden_size = base.hidden_size
+        self.input_hidden_size = base.config.hidden_size
         self.seq_len = 0
         self.token_len = 0
         self.talker_embeds = []
@@ -230,17 +234,14 @@ class Qwen2_5OmniTalker(Talker):
         attention_mask = self.get_attention_mask()
         past_key_values = torch.zeros([self.num_hidden_layers, 2, 1, 0, self.num_key_value_heads, self.head_dim])
         talker_onnx = f'{onnx_path}/talker.onnx'
-        torch.onnx.export(self, (inputs_embeds, attention_mask, posision_ids, past_key_values),
-                        talker_onnx,
-                        input_names=['inputs_embeds', 'attention_mask', 'position_ids', 'past_key_values'],
-                        output_names=['logits'],
-                        dynamic_axes={
-                            "inputs_embeds": { 1: "size" },
-                            "attention_mask": { 2: "size", 3: "size" },
-                            "position_ids": { 2: "size" },
-                            "past_key_values": { 3: "size" }
-                        },
-                        do_constant_folding=True,
-                        verbose=False,
-                        opset_version=15)
+        onnx_export(self, (inputs_embeds, attention_mask, posision_ids, past_key_values),
+                    talker_onnx,
+                    input_names=['inputs_embeds', 'attention_mask', 'position_ids', 'past_key_values'],
+                    output_names=['logits'],
+                    dynamic_axes={
+                        "inputs_embeds": { 1: "size" },
+                        "attention_mask": { 2: "size", 3: "size" },
+                        "position_ids": { 2: "size" },
+                        "past_key_values": { 3: "size" }
+                    })
         return talker_onnx

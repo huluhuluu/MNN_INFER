@@ -50,31 +50,33 @@ Prompt* Prompt::createPrompt(std::shared_ptr<LlmContext> context, std::shared_pt
 bool contains(const std::string& str, const std::string& substring) {
     return str.find(substring) != std::string::npos;
 }
-    
+
 void Prompt::setParams(std::shared_ptr<LlmConfig> config) {
+    mSystemPrompt = config->system_prompt();
 #ifdef LLM_USE_MINJA
     if (config->config_.document.HasMember("jinja")) {
         auto& document = config->config_.document["jinja"];
-        if (nullptr == mCommonTemplate.get()) {
-            // Only create jinja once
-            std::string bosToken, eosToken;
-            if (document.HasMember("bos") && document["bos"].IsString()) {
-                bosToken = document["bos"].GetString();
+        if (document.HasMember("chat_template")) {
+            if (nullptr == mCommonTemplate.get()) {
+                // Only create jinja once
+                std::string bosToken, eosToken;
+                if (document.HasMember("bos") && document["bos"].IsString()) {
+                    bosToken = document["bos"].GetString();
+                }
+                if (document.HasMember("eos") && document["eos"].IsString()) {
+                    eosToken = document["eos"].GetString();
+                }
+                std::string templateChat = document["chat_template"].GetString();
+                mCommonTemplate.reset(new JinjaTemplate(templateChat, bosToken, eosToken));
             }
-            if (document.HasMember("eos") && document["eos"].IsString()) {
-                eosToken = document["eos"].GetString();
+            if (document.HasMember("context")) {
+                mCommonTemplate->setExtraContext(document["context"]);
             }
-            std::string templateChat = document["chat_template"].GetString();
-            mCommonTemplate.reset(new JinjaTemplate(templateChat, bosToken, eosToken));
+            return;
         }
-        if (document.HasMember("context")) {
-            mCommonTemplate->setExtraContext(document["context"]);
-        }
-        return;
     }
 #endif
     mCommonTemplate.reset();
-    mSystemPrompt = config->system_prompt();
     if (config->config_.document.HasMember("prompt_template")) {
         // std::cout << "legacy prompt_template" << std::endl;
         // legacy

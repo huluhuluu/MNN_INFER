@@ -1,34 +1,39 @@
 import torch
 from .transformers import Decoder
 from .spinner import spinner_run
+from .torch_utils import onnx_export
 
 class Audio(torch.nn.Module):
     def __init__(self, audio, base):
         super().__init__()
-        self.model_type = base.model_type
+        self.model_type = base.config.model_type
         self.audio = audio
         self.embed_ = base.embed
         self.tokenizer = base.tokenizer
-        self.config = base.config
-        self.hidden_size = base.hidden_size
-        self.llm_config = base.llm_config
+        self.config = base.config.origin_config
+        self.hidden_size = base.config.hidden_size
+        self.llm_config = { 'is_audio': True }
         self.rope_ratio = 1.0
         self.quant_bit = 16
         self.init_config()
         self.load()
 
+    def get_config(self):
+        return self.llm_config
+
     @staticmethod
     def get_audio(model_type):
         audio_models = {
-            'qwen2_audio': Qwen2Audio,
+            'qwen2_audio_encoder': Qwen2Audio,
             'qwen2_5_omni_audio_encoder': Qwen2_5OmniAudio,
+            'funaudiochat_audio_encoder': FunAudioChatAudio,
         }
         if model_type in audio_models:
             return audio_models[model_type]
         return None
 
     def init_config(self):
-        self.llm_config['is_audio'] = True
+        pass
 
     def load(self):
         raise NotImplementedError
@@ -71,7 +76,7 @@ class Qwen2Audio(Audio):
 
     def load(self):
         # model
-        self.audio_tower = self.audio.audio_tower
+        self.audio_tower = self.audio
         self.multi_modal_projector = self.audio.multi_modal_projector
         # config
         self.llm_config['is_audio'] = True
@@ -156,16 +161,13 @@ class Qwen2Audio(Audio):
 
         model = self.float()
         onnx_model = f'{onnx_path}/audio.onnx'
-        torch.onnx.export(model, (input_features),
-                        onnx_model,
-                        input_names=['input_features'],
-                        output_names=['audio_embeds'],
-                        dynamic_axes={"input_features": {
-                            2: "size"
-                        }},
-                        do_constant_folding=True,
-                        verbose=False,
-                        opset_version=15)
+        onnx_export(model, (input_features),
+                    onnx_model,
+                    input_names=['input_features'],
+                    output_names=['audio_embeds'],
+                    dynamic_axes={"input_features": {
+                        2: "size"
+                    }})
         return onnx_model
 
 class AudioMlp(torch.nn.Module):
@@ -260,16 +262,43 @@ class Qwen2_5OmniAudio(Qwen2Audio):
         attention_mask = torch.randn([1, seq_len, seq_len])
         model = self.float()
         onnx_model = f'{onnx_path}/audio.onnx'
-        torch.onnx.export(model, (input_features, attention_mask),
-                        onnx_model,
-                        input_names=['input_features', 'attention_mask'],
-                        output_names=['audio_embeds'],
-                        dynamic_axes={"input_features": {
-                            0: "size"
-                        }, "attention_mask": {
-                            1: "size", 2: "size"
-                        }},
-                        do_constant_folding=True,
-                        verbose=False,
-                        opset_version=15)
+        onnx_export(model, (input_features, attention_mask),
+                    onnx_model,
+                    input_names=['input_features', 'attention_mask'],
+                    output_names=['audio_embeds'],
+                    dynamic_axes={"input_features": {
+                        0: "size"
+                    }, "attention_mask": {
+                        1: "size", 2: "size"
+                    }})
         return onnx_model
+
+class FunAudioChatAudio(Qwen2_5OmniAudio):
+    def __init__(self, audio, base):
+        super().__init__(audio, base)
+        self.audio_pad_id = 151669
+
+    def load(self):
+        # model
+        self.audio = self.audio.float()
+        self.audio_tower = self.audio.audio_tower.float()
+        # config
+        self.group_size = self.audio.config.group_size
+        # call parent load
+        super().load()
+
+    def forward(self, input_features, attention_mask = None):
+        # call parent forward to get audio_features before group pooling
+        audio_features = super().forward(input_features, attention_mask)
+        # group pooling and continual_output_matching
+        batch, seqlen, hidden_size = audio_features.shape
+        padding_feature = torch.zeros(
+            (batch, (self.group_size - seqlen % self.group_size) % self.group_size, hidden_size),
+            dtype=torch.long,
+            device=audio_features.device,
+        )
+        audio_features = torch.cat([audio_features, padding_feature], dim=1)
+        audio_features = audio_features.reshape(batch, -1, self.group_size, hidden_size)
+        audio_features = audio_features.mean(dim=2)
+        audio_features = self.audio_tower.continual_output_matching(audio_features)
+        return audio_features

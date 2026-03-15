@@ -3,15 +3,21 @@
 package com.alibaba.mnnllm.android
 
 import android.app.Application
+import com.facebook.stetho.Stetho
+import com.facebook.stetho.dumpapp.DumperPlugin
+import com.alibaba.mnnllm.android.debug.ModelListDumperPlugin
+import com.alibaba.mnnllm.android.debug.LoggerDumperPlugin
 import com.alibaba.mls.api.ApplicationProvider
 import com.alibaba.mnnllm.android.utils.CrashUtil
 import com.alibaba.mnnllm.android.utils.CurrentActivityTracker
+import com.alibaba.mnnllm.android.utils.TimberConfig
 import timber.log.Timber
 import android.content.Context
-import com.alibaba.mls.api.ModelTagsCache
 import com.jaredrummler.android.device.DeviceName
+import com.alibaba.mnnllm.android.modelist.ModelListManager
 
 class MnnLlmApplication : Application() {
+    
     override fun onCreate() {
         super.onCreate()
         ApplicationProvider.set(this)
@@ -22,10 +28,24 @@ class MnnLlmApplication : Application() {
         // Initialize CurrentActivityTracker
         CurrentActivityTracker.initialize(this)
 
-        Timber.plant(Timber.DebugTree())
+        // Initialize Timber logging based on configuration
+        TimberConfig.initialize(this)
+        
+        // Set context for ModelListManager (enables auto-initialization)
+        ModelListManager.setContext(getInstance())
 
-        // Initialize model tags cache for proper tag loading
-        ModelTagsCache.initializeCache(this)
+        if (BuildConfig.DEBUG) {
+            val initializer = Stetho.newInitializerBuilder(this)
+                .enableDumpapp {
+                    Stetho.DefaultDumperPluginsBuilder(this)
+                        .provide(ModelListDumperPlugin())
+                        .provide(LoggerDumperPlugin())
+                        .finish()
+                }
+                .enableWebKitInspector(Stetho.defaultInspectorModulesProvider(this))
+                .build()
+            Stetho.initialize(initializer)
+        }
     }
 
     companion object {
@@ -33,6 +53,13 @@ class MnnLlmApplication : Application() {
 
         fun getAppContext(): Context {
             return instance.applicationContext
+        }
+        
+        /**
+         * Get the application instance for accessing Timber configuration
+         */
+        fun getInstance(): MnnLlmApplication {
+            return instance
         }
     }
 }

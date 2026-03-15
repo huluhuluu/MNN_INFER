@@ -15,11 +15,20 @@ import android.content.Intent
 import android.net.Uri
 import android.util.Log
 import android.widget.Toast
+import com.alibaba.mnnllm.android.modelist.ModelListManager
 import com.alibaba.mnnllm.android.modelsettings.ModelConfig
 
 object ModelUtils {
-    @Deprecated("Use ModelMarketItem.vendor field instead for market models")
+
     fun getVendor(modelName: String):String {
+        // First try to get vendor from ModelMarketItem
+        val modelItem = ModelListManager.getModelIdModelMap()[modelName]
+        val marketItem = modelItem?.modelMarketItem as? com.alibaba.mnnllm.android.modelmarket.ModelMarketItem
+        if (marketItem?.vendor != null) {
+            return marketItem.vendor
+        }
+
+        // If not available from market item, use the existing logic
         val modelLower = modelName.lowercase(Locale.getDefault())
         if (modelLower.contains("deepseek")) {
             return ModelVendors.DeepSeek
@@ -50,6 +59,21 @@ object ModelUtils {
         } else if (modelLower.contains("openelm")) {
             return ModelVendors.OpenElm
         } else {
+            // If still not found, try to extract vendor from modelName by splitting on - or _
+            // First split by "/" and take last part
+            val lastPart = modelName.split("/").last()
+            
+            // Then split that by "-" or "_"
+            val parts = lastPart.split("-", "_")
+            for (part in parts) {
+                val trimmedPart = part.trim()
+                if (trimmedPart.isNotEmpty()) {
+                    // Capitalize first letter to match vendor naming convention
+                    return trimmedPart.replaceFirstChar { 
+                        if (it.isLowerCase()) it.titlecase(Locale.getDefault()) else it.toString() 
+                    }
+                }
+            }
             return ModelVendors.Others
         }
     }
@@ -85,6 +109,8 @@ object ModelUtils {
             return R.drawable.openai_icon
         } else if (modelLower.contains("hunyuan")) {
             return R.drawable.hunyuan_icon
+        } else if (modelLower.contains("minicpm")) {
+            return R.drawable.minicpm_icon
         }
         return 0
     }
@@ -120,43 +146,10 @@ object ModelUtils {
         val totalDuration = metrics["total_timeus"] as Long * 1.0 / 1000000.0
         return String.format("Generate time: %.2f s", totalDuration)
     }
-    /**
-     * you can add ModelItem.fromLocalModel("Qwen-Omni-7B", "/data/local/tmp/omni_test/model")
-     * to load local models
-     */
-     val localModelList: MutableList<ModelItem> by lazy {
-        val result = mutableListOf<ModelItem>()
-        try {
-            val modelsDir = File("/data/local/tmp/mnn_models/")
-            if (modelsDir.exists() && modelsDir.isDirectory) {
-                modelsDir.listFiles()?.forEach { modelDir ->
-                    if (modelDir.isDirectory && File(modelDir, "config.json").exists()) {
-                        val modelPath = modelDir.absolutePath
-                        val modelId = "local/${modelPath}"
-                        result.add(ModelItem.fromLocalModel(modelId, modelPath))
-                    }
-                }
-            }
-        } catch (e: Exception) {
-            Log.e("ModelUtils", "Failed to load models from /data/local/tmp/mnn_models/", e)
-        }
-        result
-    }
+
 
     private fun isQwen3(modelName: String):Boolean {
         return modelName.lowercase(Locale.getDefault()).contains("qwen3")
-    }
-
-    fun isAudioModel(modelName: String): Boolean {
-        return modelName.lowercase(Locale.getDefault()).contains("audio") || isOmni(modelName)
-    }
-
-    fun isMultiModalModel(modelName: String): Boolean {
-        return isAudioModel(modelName) || isVisualModel(modelName) || isDiffusionModel(modelName) || isOmni(modelName)
-    }
-
-    fun isDiffusionModel(modelName: String): Boolean {
-        return modelName.lowercase(Locale.getDefault()).contains("stable-diffusion")
     }
 
     @JvmStatic
@@ -167,83 +160,8 @@ object ModelUtils {
         return modelId
     }
 
-    @JvmStatic
-    fun generateSimpleTags(modelName: String, modelItem: ModelItem): ArrayList<String> {
-        val splits = modelName.split("-".toRegex()).dropLastWhile { it.isEmpty() }.toTypedArray()
-        val tags = ArrayList<String>()
-        val isDiffusion = isDiffusionModel(modelName)
-        if (splits.size > 1 && !isDiffusion) {
-            val brand = splits[0]
-            tags.add(brand.lowercase(Locale.getDefault()))
-        }
-        for (i in 1 until splits.size) {
-            val tag = splits[i]
-            if (tag.lowercase(Locale.getDefault()).matches("^[\\\\.0-9]+[mb]$".toRegex())) {
-                tags.add(tag.lowercase(Locale.getDefault()))
-            }
-        }
-        if (isDiffusion) {
-            tags.add("diffusion")
-        } else {
-            tags.add("text")
-            if (isAudioModel(modelName)) {
-                tags.add("audio")
-            } else if (isVisualModel(modelName)) {
-                tags.add("visual")
-            }
-        }
-        if (modelItem.isLocal) {
-            tags.add("local")
-        } else {
-            tags.add(ModelItem.sourceToTag(getSource(modelItem.modelId!!)!!))
-        }
-        return tags
-    }
-
-    fun isVisualModel(modelName: String): Boolean {
-        return modelName.lowercase(Locale.getDefault()).contains("vl") || isOmni(modelName)
-    }
-
-    fun isR1Model(modelName: String): Boolean {
-        return modelName.lowercase(Locale.getDefault()).contains("deepseek-r1")
-    }
-
     fun safeModelId(modelId: String): String {
         return modelId.replace("/".toRegex(), "_")
-    }
-
-    fun isOmni(modelName: String): Boolean {
-        return modelName.lowercase(Locale.getDefault()).contains("omni")
-    }
-
-    fun isSupportThinkingSwitch(modelName: String): Boolean {
-        return isQwen3(modelName)
-    }
-
-    fun supportAudioOutput(modelName: String): Boolean {
-        return isOmni(modelName)
-    }
-
-    /**
-     * Check if the model is a TTS (Text-to-Speech) model
-     */
-    fun isTtsModel(modelName: String): Boolean {
-        return modelName.lowercase(Locale.getDefault()).contains("bert-vits") ||
-               modelName.lowercase(Locale.getDefault()).contains("tts")
-    }
-
-    /**
-     * Check if the model is a TTS model based on tags
-     */
-    fun isTtsModelByTags(tags: List<String>): Boolean {
-        return tags.any { it.equals("TTS", ignoreCase = true) }
-    }
-
-    /**
-     * Check if the model is an ASR (Automatic Speech Recognition) model based on tags
-     */
-    fun isAsrModelByTags(tags: List<String>): Boolean {
-        return tags.any { it.equals("ASR", ignoreCase = true) }
     }
 
     //split "Huggingface/taobao-mnn/Qwen-1.5B" to ["Huggingface", "taobao-mnn/Qwen-1.5B"]
@@ -287,7 +205,7 @@ object ModelUtils {
     }
 
     fun getConfigPathForModel(modelId: String): String? {
-        return if (isDiffusionModel(modelId)) {
+        return if (ModelTypeUtils.isDiffusionModel(modelId)) {
             ModelDownloadManager.getInstance(ApplicationProvider.get())
                 .getDownloadedFile(modelId)?.absolutePath
         } else {
@@ -296,11 +214,16 @@ object ModelUtils {
     }
 
     fun getConfigPathForModel(modelItem: ModelItem): String? {
-        val modelId = modelItem.modelId!!
-        val modelName = modelItem.modelName!!
+        val modelId = modelItem.modelId ?: return null
+        val modelName = modelItem.modelName ?: if (modelItem.isLocal) {
+             // Extract name from local path e.g. local//data/.../Name -> Name
+             modelId.substringAfterLast("/")
+        } else ""
 
-        return if (isDiffusionModel(modelName)) {
-            if (modelItem.isLocal) {
+        return if (ModelTypeUtils.isDiffusionModel(modelName)) {
+            if (modelItem.isBuiltin) {
+                ModelConfig.getDefaultConfigFile(modelId)
+            } else if (modelItem.isLocal) {
                 // For local models, use the local path directly
                 modelItem.localPath
             } else {
@@ -308,7 +231,9 @@ object ModelUtils {
                     .getDownloadedFile(modelId)?.absolutePath
             }
         } else {
-            if (modelItem.isLocal) {
+            if (modelItem.isBuiltin) {
+                ModelConfig.getDefaultConfigFile(modelId)
+            } else if (modelItem.isLocal) {
                 // For local models, look for config.json in the same directory
                 val localPath = modelItem.localPath
                 if (!localPath.isNullOrEmpty()) {
@@ -366,6 +291,7 @@ object ModelUtils {
             else -> null
         }
     }
+
 
     private const val TAG = "ModelUtils"
 }

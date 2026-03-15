@@ -16,6 +16,16 @@ object MmapUtils {
     }
 
     fun getMmapDir(modelId: String): String {
+        // Local models use a dedicated cache folder to avoid long/absolute path fragments under tmps
+        if (modelId.startsWith("local/")) {
+            val safeId = ModelUtils.safeModelId(modelId)
+            return ApplicationProvider.get().filesDir.toString() + "/local_temps/" + safeId
+        }
+        if (modelId.startsWith("Builtin/")) {
+            val safeId = ModelUtils.safeModelId(modelId)
+            return ApplicationProvider.get().filesDir.toString() + "/builtin_temps/" + safeId
+        }
+
         var newModelId = modelId
         val isModelScope = modelId.startsWith(ModelSources.sourceModelScope)
         val isModelers = modelId.startsWith(ModelSources.sourceModelers)

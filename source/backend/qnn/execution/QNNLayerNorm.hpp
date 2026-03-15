@@ -13,6 +13,7 @@
 
 namespace MNN {
 namespace QNN {
+#ifdef ENABLE_QNN_ONLINE_FINALIZE
 
 class QNNLayerNorm : public QNNCommonExecution {
 public:
@@ -21,6 +22,7 @@ public:
     virtual ErrorCode onEncode(const std::vector<Tensor *> &inputs, const std::vector<Tensor *> &outputs) override;
 private:
     ErrorCode onEncodeNormWithPermute(const std::vector<Tensor *> &inputs, const std::vector<Tensor *> &outputs);
+    void createGammaBeta(Qnn_DataType_t dataType);
 private:
     Qnn_DataType_t mQnnDataType;
     int mInputDim;
@@ -32,7 +34,7 @@ private:
     std::vector<float> mGammaData;
     std::vector<float> mBetaData;
 };
-
+#endif
 } // end namespace MNN
 } // end namespace QNN
 

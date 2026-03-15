@@ -240,6 +240,10 @@ void Executor::RuntimeManager::setHint(Interpreter::HintMode mode, int* value, s
     }
 }
 void Executor::RuntimeManager::setExternalPath(std::string path, int type) {
+    if (type == MNN::Interpreter::EXTERNAL_NPU_FILE_DIR) {
+        mInside->mContent->mNpuDir = path;
+        return;
+    }
     mInside->mContent->modes.setExternalPath(path, type);
 }
 void Executor::RuntimeManager::setHintPtr(Interpreter::HintMode mode, void* value) {
@@ -277,6 +281,17 @@ bool Executor::RuntimeManager::getInfo(Interpreter::SessionInfoCode code, void* 
         default: {
             // Do nothing
         } break;
+    }
+    return false;
+}
+
+bool Executor::RuntimeManager::getDeviceInfo(const std::string& deviceKey, const MNNForwardType type, std::string& deviceValue) {
+    auto creator = MNNGetExtraRuntimeCreator(type);
+    if (creator != nullptr) {
+        auto res = creator->onGetDeviceInfo(deviceKey, deviceValue);
+        if(res) {
+            return true;
+        }
     }
     return false;
 }
@@ -522,8 +537,7 @@ void Executor::_makeCache(const std::vector<EXPRP>& expr, bool forceCPU) {
             if (TensorUtils::getDescribe(srcTensor)->quantAttr.get()) {
                 TensorUtils::getDescribe(tensor.get())->quantAttr.reset(new QuantAttr);
                 auto quant = TensorUtils::getDescribe(tensor.get())->quantAttr.get();
-                quant->scale = TensorUtils::getDescribe(srcTensor)->quantAttr.get()->scale;
-                quant->zero = TensorUtils::getDescribe(srcTensor)->quantAttr.get()->zero;
+                *quant = *(TensorUtils::getDescribe(srcTensor)->quantAttr);
             }
 
             TensorUtils::getDescribe(tensor.get())->index = (int)scheduleInfo.allTensors.size();

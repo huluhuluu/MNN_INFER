@@ -14,10 +14,17 @@ project("mnnllmapp")
 add_library(${CMAKE_PROJECT_NAME} SHARED
         # List C/C++ source files with relative paths to this CMakeLists.txt.
         llm_mnn_jni.cpp
+        mnn_wrapper_jni.cpp
         diffusion_jni.cpp
         diffusion_session.cpp
         llm_session.cpp
         crash_util.cpp
+        processor.cpp
+        # Video processing files (moved to video/ directory)
+        video/video_decoder.cpp
+        video/byte_buffer_decoder.cpp
+        video/image_utils.cpp
+        video/video_processor.cpp
 )
 
 # Add 16KB page size support (required for Android 15+ devices)
@@ -44,6 +51,7 @@ include_directories("${MNN_SOURCE_ROOT}/transformers/llm/engine/include")
 
 #audio
 include_directories("${MNN_SOURCE_ROOT}/tools/audio/include")
+include_directories("${MNN_SOURCE_ROOT}/3rd_party/")
 include_directories("${CMAKE_SOURCE_DIR}/third_party")
 # Add library paths
 set(LIB_PATH "${MNN_INSTALL_ROOT}/lib")
@@ -82,4 +90,7 @@ target_link_libraries(${CMAKE_PROJECT_NAME}
         android
         log
         MNN
+        # MediaCodec libraries for hardware video decoding
+        mediandk
+
         )

@@ -170,7 +170,7 @@ cpu_mask_t MNNGetCPUMask(const std::vector<int>& cpuIds) {
 
 // cpuinfo
 // Reference from: https://github.com/pytorch/cpuinfo
-#if defined(ENABLE_ARMV82) && defined(__arm__)
+#if (defined(ENABLE_ARMV82) && defined(__arm__)) || (defined(__ANDROID__) && defined(__aarch64__))
 
 /* As per include/sys/system_properties.h in Android NDK */
 #define CPUINFO_HARDWARE_VALUE_MAX 64
@@ -1180,7 +1180,7 @@ struct cpuinfo_arm_chipset cpuinfo_arm_android_decode_chipset(const struct cpuin
     // MNN_PRINT("chipset vendor, series, model is: %d, %d, %d\n", chipset.vendor, chipset.series, chipset.model);
     return chipset;
 }
-static void _getInfoARMv7(MNNCPUInfo* cpuinfo_isa) {
+static void _getInfoArm(MNNCPUInfo* cpuinfo_isa) {
     // Get White List And Black List
     struct cpuinfo_arm_linux_processor* arm_linux_processors = NULL;
     if (0 == cpuinfo_isa->groups.size()) {
@@ -1339,6 +1339,7 @@ static void _getInfoApple(MNNCPUInfo* cpuinfo_isa) {
     }
     if (have_feature("hw.optional.arm.FEAT_SME2")) {
         cpuinfo_isa->sme2 = true;
+        cpuinfo_isa->smeCoreNumber = 2;
     }
 }
 #endif
@@ -1367,6 +1368,7 @@ static void _getInfoAux(MNNCPUInfo* cpuinfo_isa) {
     }
     if (isa_features2 & CPUINFO_ARM_LINUX_FEATURE2_SME2) {
         cpuinfo_isa->sme2 = true;
+        cpuinfo_isa->smeCoreNumber = 1;
     }
 }
 #endif
@@ -1500,8 +1502,8 @@ static void _fillInfo(MNNCPUInfo* cpuinfo_isa) {
 #if defined(__aarch64__)
     _getInfoAux(cpuinfo_isa);
 #endif
-#if defined(ENABLE_ARMV82) && defined(__arm__)
-    _getInfoARMv7(cpuinfo_isa);
+#if (defined(ENABLE_ARMV82) && defined(__arm__)) || (defined(__ANDROID__) && defined(__aarch64__))
+    _getInfoArm(cpuinfo_isa);
 #endif // #ifdef arm / arm64
 #endif // #ifdef __linux__
 

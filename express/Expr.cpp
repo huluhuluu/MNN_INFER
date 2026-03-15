@@ -237,7 +237,7 @@ EXPRP Expr::create(const OpT* op, std::vector<VARP> inputs, int outputSize) {
         return create(std::move(info), nullptr, VARP::INPUT);
     }
     if (OpType_Const == op->type || OpType_TrainableParam == op->type) {
-        if (!op->externalPath.empty()) {
+        if (!op->externalPath.empty() || (!op->main.AsBlob()->external.empty())) {
             flatbuffers::FlatBufferBuilder builder;
             auto offset = Op::Pack(builder, op);
             builder.Finish(offset);
@@ -581,7 +581,7 @@ bool Variable::setDevicePtr(const void* devicePtr, int memoryType) {
         return false;
     }
     informDirty();
-    MNN_ASSERT(TensorUtils::getDescribe(mFrom->inside()->mOutputTensors[0])->quantAttr == nullptr || TensorUtils::getDescribe(mFrom->inside()->mOutputTensors[0])->type == DataType_DT_FLOAT);
+    MNN_ASSERT(TensorUtils::getDescribe(mFrom->inside()->mOutputTensors[0])->quantAttr == nullptr || (!TensorUtils::getDescribe(mFrom->inside()->mOutputTensors[0])->applyQuant));
     mFrom->mInside->mContentDirty = false;
     // Clear host address, Don't malloc hostPtr afterwards
     Utils::releaseMemoryForHostTensor(mFrom->inside()->mOutputTensors[0]);
@@ -805,7 +805,7 @@ void* Variable::readInternal(bool forShape) {
         auto inside = mFrom->inside();
         auto originTensor = inside->mOutputTensors[mFromIndex];
         auto des = TensorUtils::getDescribe(originTensor);
-        if (WrapExecution::needWrap(originTensor, nullptr) || (des->quantAttr != nullptr && des->type == DataType_DT_INT8)) {
+        if (WrapExecution::needWrap(originTensor, nullptr) || (des->quantAttr != nullptr && des->applyQuant)) {
             // For StaticModule will other-device runtime, we may create Variable with other-device's memory
             // The case won't occurred for varibale = INPUT
             // Need Copy
@@ -813,12 +813,28 @@ void* Variable::readInternal(bool forShape) {
                 // The Varp will not be created as input, so we just need copy once
                 return inside->mHostTensor->host<void>();
             }
+            
             inside->mHostTensor = new Tensor;
             TensorUtils::copyShape(originTensor, inside->mHostTensor, true);
             inside->mHostTensor->buffer().type = originTensor->getType();
             inside->mHostTensor->buffer().host = (uint8_t*)MNNMemoryAllocAlign(inside->mHostTensor->size(), MNN_MEMORY_ALIGN_DEFAULT);
             TensorUtils::getDescribe(inside->mHostTensor)->memoryType = Tensor::InsideDescribe::MEMORY_HOST;
             originTensor->copyToHostTensor(inside->mHostTensor);
+            bool hasNoExecution = false;
+            if (nullptr != originTensor) {
+                auto backend = TensorUtils::getDescribeOrigin(originTensor)->getBackend();
+                if (nullptr != backend) {
+                    // Try to sync to check execution status
+                    int syncResult = backend->onSync(Tensor::MAP_TENSOR_READ, false, originTensor);
+                    if (NO_EXECUTION == syncResult) {
+                        hasNoExecution = true;
+                    }
+                }
+            }
+            if (hasNoExecution) {
+                MNN_PRINT("\nWarning, Backend has stop execute, return nullptr for current varp\n");
+                return nullptr;
+            }
             return inside->mHostTensor->host<void>();
         }
         return originTensor->buffer().host;
@@ -912,13 +928,13 @@ void* Variable::writeInternal(bool inform) {
     if (inform) {
         informDirty();
     }
-    MNN_ASSERT(TensorUtils::getDescribe(mFrom->inside()->mOutputTensors[0])->quantAttr == nullptr || TensorUtils::getDescribe(mFrom->inside()->mOutputTensors[0])->type == DataType_DT_FLOAT);
+    MNN_ASSERT(TensorUtils::getDescribe(mFrom->inside()->mOutputTensors[0])->quantAttr == nullptr || !TensorUtils::getDescribe(mFrom->inside()->mOutputTensors[0])->applyQuant);
     mFrom->mInside->mContentDirty = false;
     return mFrom->inside()->mOutputTensors[0]->host<void>();
 }
 
 void Variable::writeScaleInternal(float scaleValue, float zeroPoint, bool inform) {
-    MNN_ASSERT(TensorUtils::getDescribe(mFrom->inside()->mOutputTensors[0])->quantAttr == nullptr || TensorUtils::getDescribe(mFrom->inside()->mOutputTensors[0])->type == DataType_DT_FLOAT);
+    MNN_ASSERT(TensorUtils::getDescribe(mFrom->inside()->mOutputTensors[0])->quantAttr == nullptr || !TensorUtils::getDescribe(mFrom->inside()->mOutputTensors[0])->applyQuant);
     if (inform) {
        informDirty();
     }
@@ -965,9 +981,7 @@ bool Expr::setInfoDirty() {
     mInside->mInfoDirty    = true;
     mInside->mContentDirty = true;
     mValid = true;
-    if (mInside->mCache != nullptr) {
-        mInside->mCache->setShapeDirty();
-    }
+    mInside->mCache = nullptr;
     for (auto o : mInside->mOutputTensors) {
         Utils::releaseMemoryForHostTensor(o);
     }
@@ -1014,10 +1028,8 @@ std::vector<VARP> Variable::load(const uint8_t* buffer, size_t length) {
     std::map<int, VARP> variableMap;
     bool isStatic = source->usage == Usage_INFERENCE_STATIC;
     std::vector<std::shared_ptr<Tensor>> allTensors;
-    if (isStatic) {
-        allTensors.resize(source->tensorName.size());
-        initTensors(allTensors, flatbuffers::GetRoot<MNN::Net>(buffer));
-    }
+    allTensors.resize(source->tensorName.size());
+    initTensors(allTensors, flatbuffers::GetRoot<MNN::Net>(buffer));
 
     // Generate All Exprs by order of net
     for (int i = 0; i < opSize; ++i) {
@@ -1036,6 +1048,8 @@ std::vector<VARP> Variable::load(const uint8_t* buffer, size_t length) {
         if (isStatic && nullptr != expr->get()) {
             // Set tensor shape from net
             expr->mCanDecompose = false;
+        }
+        if (nullptr != expr->get() || expr->inputType() == VARP::INPUT) {
             for (int index = 0; index < op->outputIndexes.size(); ++index) {
                 auto outputIndex = op->outputIndexes[index];
                 delete expr->inside()->mOutputTensors[index];
@@ -1249,6 +1263,7 @@ void Variable::save(const std::vector<VARP>& vars, NetT* dest) {
                 auto tensorDes = TensorUtils::getDescribe(tensor);
                 if (nullptr != tensorDes->quantAttr) {
                     describe->quantInfo.reset(new TensorQuantInfoT);
+                    describe->quantInfo->type = tensorDes->quantAttr->type;
                     describe->quantInfo->max = tensorDes->quantAttr->max;
                     describe->quantInfo->min = tensorDes->quantAttr->min;
                     describe->quantInfo->zero = tensorDes->quantAttr->zero;

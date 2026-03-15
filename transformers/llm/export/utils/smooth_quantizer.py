@@ -7,9 +7,55 @@ import inspect
 from typing import Dict
 from tqdm import tqdm
 from collections import defaultdict
+import math
+
+logging.basicConfig(level=logging.ERROR)
+
+class ACIQ:
+    def __init__(self, size):
+        self.num_bits = size
+        # TODO: expose as cmd line parameters
+        self.stochastic = False
+        self.int_exp = False
+        self.enforce_true_zero = True #params['true_zero']
+        self.alpha_gaus = {2: 1.71, 3: 2.15, 4: 2.55, 5: 2.93, 6: 3.28, 7: 3.61, 8: 3.92}
+        self.alpha_laplace = {2: 2.83, 3: 3.89, 4: 5.03, 5: 6.2, 6: 7.41, 7: 8.64, 8: 9.89}
+        self.gaussian_const = (0.5 * 0.35) * (1 + (math.pi * math.log(4)) ** 0.5)
+    def alpha2DeltaOffset(self, alpha, max_value, min_value, mean):
+        max_range = max_value - min_value
+        if alpha <= 0 or alpha >= max_range / 2:
+            delta = max_range
+        else:
+            delta = 2 * alpha
+            min_value = max(min_value, mean - delta / 2)
+
+        return delta, min_value
+
+    def gemmlowpClippingQuantize(self, input):
+        min_value = input.min()
+        max_value = input.max()
+        mean = input.mean()
 
 
-logging.basicConfig(level=logging.ERROR) 
+        alpha = self.get_alpha_gaus(input)  # gaussian clipping
+
+        delta, min_value = self.alpha2DeltaOffset(alpha, max_value, min_value, mean)
+
+        return torch.stack([delta + min_value, min_value], 0)
+    def get_max_min(self, x):
+        if self.num_bits > 8:
+            return torch.stack([x.max(), x.min()], 0)
+        return self.gemmlowpClippingQuantize(x)
+    def get_alpha_gaus(self, tensor):
+        N = 1
+        for i in range(len(tensor.shape)):
+            N *= tensor.shape[i]
+        min_value = tensor.min()
+        max_value = tensor.max()
+
+        std = ((max_value - min_value) * self.gaussian_const) / ((2 * math.log(N)) ** 0.5)
+        return self.alpha_gaus[self.num_bits] * std
+
 
 class SmoothQuantizer:
     def __init__(
@@ -19,15 +65,19 @@ class SmoothQuantizer:
         max_calib_samples=128,
         max_calib_seq_len=512,
         alpha=0.5,
+        act_bit=8,
+        act_sym=True,
+        generate_for_npu=False
     ) -> None:
-    
+        self.act_sym = act_sym
         self.model = model
         self.tokenizer = model.tokenizer
         #self.w_bit = model.args.quant_bit
-        self.act_bit = 8
+        self.act_bit = act_bit
         self.group_size = model.args.quant_block
         self.alpha = alpha
-        
+        self.generate_for_npu = generate_for_npu
+
         self.max_calib_samples = max_calib_samples
         self.max_calib_seq_len = max_calib_seq_len
         self.split = 'train'
@@ -35,6 +85,11 @@ class SmoothQuantizer:
         self.best_device = SmoothQuantizer.get_best_device()
 
         self.modules = self.model.blocks
+        self.act_quanter = ACIQ(act_bit)
+        self.moment = 0.99
+        if "cpu" != self.best_device:
+            for idx in range(len(self.modules)):
+                SmoothQuantizer.to_device(self.modules[idx], "cpu")
 
         self.act_scales = [{} for _ in range(len(self.modules))]
         self.act_dict = [defaultdict(dict) for _ in range(len(self.modules))]
@@ -54,6 +109,7 @@ class SmoothQuantizer:
         max_seq_len=512,
         split="train",
     ):
+        custom_calib_data = False
         if isinstance(data, str):
             from datasets import load_dataset
             if data == "pileval":
@@ -61,7 +117,10 @@ class SmoothQuantizer:
             elif data == "wikitext":
                 dataset = load_dataset('wikitext', 'wikitext-2-raw-v1', split=split)
             else:
-                dataset = load_dataset(data, split=split)
+                custom_calib_data = True
+                # dataset = load_dataset(data, split=split)
+                with open(data, 'r', encoding='utf-8') as f:
+                    dataset = f.read().splitlines()
             # dataset = dataset.shuffle(seed=42)
         else:
             raise NotImplementedError(
@@ -70,13 +129,24 @@ class SmoothQuantizer:
             )
 
         samples = []
-        dataset = dataset.shuffle(seed=42)
-
-        for i in range(n_samples):
-            input_ids = tokenizer(
-                dataset[i]["text"], return_tensors="pt", max_length=max_seq_len, truncation=True
-            ).input_ids
-            samples.append(input_ids)
+        if custom_calib_data == False:
+            dataset = dataset.shuffle(seed=42)
+            for i in range(n_samples):
+                input_ids = tokenizer(
+                    dataset[i]["text"], return_tensors="pt", max_length=max_seq_len, truncation=True
+                ).input_ids
+                samples.append(input_ids)
+        else:
+            for i in range(n_samples):
+                messages = [
+                    {"role": "system", "content": ""},
+                    {"role": "user", "content": dataset[i]}
+                ]
+                prompt = tokenizer.apply_chat_template(messages)
+                input_ids = tokenizer(
+                    prompt, return_tensors="pt", max_length=max_seq_len, truncation=True
+                ).input_ids
+                samples.append(input_ids)
 
         return samples
 
@@ -88,7 +158,7 @@ class SmoothQuantizer:
             return "cuda:0"
         else:
             return "cpu"
-        
+
     @staticmethod
     def clear_memory(weight=None):
         if weight is not None:
@@ -109,13 +179,12 @@ class SmoothQuantizer:
 
     def _get_first_input(self, sample):
         layer_kwargs = {}
-        self.model.seq_len = sample.numel()
-        self.model.context_len = sample.numel() - 2
-        self.model.token_len = 0
+        seq_len = sample.numel()
+        new_tokens = 0
         inps = self.model.embedding(sample).to(self.best_device)
-        position_ids = self.model.get_position_ids()
+        position_ids = self.model.get_position_ids(seq_len, new_tokens, sample)
         rotary_pos_emb = self.model.rotary(position_ids)
-        attention_mask = self.model.get_attention_mask()
+        attention_mask = self.model.get_attention_mask(seq_len, new_tokens, )
         layer_kwargs["rotary_pos_emb"] = rotary_pos_emb.to(self.best_device)
         layer_kwargs["attention_mask"] = attention_mask.to(self.best_device)
         del sample
@@ -168,7 +237,7 @@ class SmoothQuantizer:
             if k in module_signature:
                 sanitized_kwargs[k] = v
         return sanitized_kwargs
-    
+
     @torch.no_grad()
     def _module_forward(
         self, x: torch.Tensor, module: torch.nn.Module, module_kwargs: Dict
@@ -210,20 +279,26 @@ class SmoothQuantizer:
     @staticmethod
     def get_named_linears(module):
         linears = {}
-        for child_name, child_module in module.named_children():
-            if child_name == 'self_attn':
-                for name, mod in child_module.named_children():
-                    if name != 'config':
-                        if isinstance(mod, torch.nn.Linear):
-                            linears[f"{child_name}.{name}"] = mod
-            else:
-                for name, mod in child_module.named_modules():
-                    if isinstance(mod, torch.nn.Linear):
-                        full_name = f"{child_name}.{name}" if name else child_name
-                        linears[full_name] = mod
-        
+        for name, m in module.named_modules():
+            # 兼容更多潜在的线性层类型
+            if isinstance(m, torch.nn.Linear) or m.__class__.__name__ == 'Linear':
+                linears[name] = m
         return linears
-    
+
+    @staticmethod
+    def get_all_leaf_modules(module):
+        targets = {}
+        for name, submod in module.named_modules():
+            if name == "":
+                continue
+
+            if len(list(submod.children())) == 0:
+                if isinstance(submod, (torch.nn.Dropout, torch.nn.Identity)):
+                    continue
+                targets[name] = submod
+
+        return targets
+
     @staticmethod
     @torch.no_grad()
     def smooth_ln_fcs(ln, fcs, act_scales, alpha=0.5):
@@ -261,7 +336,7 @@ class SmoothQuantizer:
 
         for fc in fcs:
             fc.weight.mul_(scales.view(1, -1))
-    
+
     @staticmethod
     def is_allowed_norms(op):
         if isinstance(op, torch.nn.LayerNorm):
@@ -271,7 +346,7 @@ class SmoothQuantizer:
         if "rmsnorm" in str(op.__class__).lower():
             return True
         return False
-    
+
     def _apply_scale(self, idx, module):
         attn_ln = module.input_layernorm
         qkv = [
@@ -279,7 +354,7 @@ class SmoothQuantizer:
                 module.self_attn.k_proj,
                 module.self_attn.v_proj,
             ]
-        
+
         qkv_input_scales = self.act_scales[idx]["self_attn.q_proj"]
         SmoothQuantizer.smooth_ln_fcs(attn_ln, qkv, qkv_input_scales, self.alpha)
 
@@ -293,20 +368,18 @@ class SmoothQuantizer:
         def stat_io_hook(m, x, y, name):
             if isinstance(x, tuple):
                 x = x[0]
+            max_min = self.act_quanter.get_max_min(x)
             if name not in self.act_dict[idx] or "input" not in self.act_dict[idx][name]:
-                self.act_dict[idx][name]["input"] = x.detach().abs().max().item()
+                self.act_dict[idx][name]["input"] = max_min
             else:
-                self.act_dict[idx][name]["input"] = max(
-                    self.act_dict[idx][name]["input"], x.detach().abs().max().item()
-                )
+                self.act_dict[idx][name]["input"] = max_min * (1-self.moment) + self.moment * self.act_dict[idx][name]["input"]
             if isinstance(y, tuple):
                 y = y[0]
+            max_min = self.act_quanter.get_max_min(y)
             if name not in self.act_dict[idx] or "output" not in self.act_dict[idx][name]:
-                self.act_dict[idx][name]["output"] = y.detach().abs().max().item()
+                self.act_dict[idx][name]["output"] = max_min
             else:
-                self.act_dict[idx][name]["output"] = max(
-                    self.act_dict[idx][name]["output"], y.detach().abs().max().item()
-                )
+                self.act_dict[idx][name]["output"] = max_min * (1-self.moment) + self.moment * self.act_dict[idx][name]["output"]
         handles = []
         for name in named_linears:
             handles.append(
@@ -322,15 +395,44 @@ class SmoothQuantizer:
 
     @torch.no_grad()
     def _extract_static_scales(self):
-        
+
         print("Extracting static scales...")
 
-        scale = 2 ** (self.act_bit - 1) - 1
+        def compute_scale_sym(max_min):
+            bit_scale = 2 ** (self.act_bit - 1) - 1
+            max_v = max_min.abs().max().item()
+            scale = max_v / bit_scale
+            zero = 0.0
+            return [scale, zero]
 
+        def compute_scale_zero_asym(max_min):
+            bit_scale = 2 ** (self.act_bit) - 1
+            max_v = max_min[0].item()
+            min_v = max_min[1].item()
+            # Assume has zeropoint
+            if max_v < 0.0:
+                max_v = 0.0
+            if min_v > 0.0:
+                min_v = 0.0
+            scale = 1.0
+            if max_v == min_v:
+                scale = 1.0
+            else:
+                scale = (max_v - min_v) / bit_scale
+            zero = round(-min_v / scale - 2 ** (self.act_bit - 1))
+            if self.act_bit == 16 and self.generate_for_npu:
+                zero = round(min_v / scale)
+            elif self.act_bit == 16:
+                print("Error: CPU only supports 8 bit feature map quantized")
+            return [scale, zero]
+        if self.act_sym:
+            func = compute_scale_sym
+        else:
+            func = compute_scale_zero_asym
         for idx in range(len(self.modules)):
             for name, input_output in self.act_dict[idx].items():
-                self.act_dict[idx][name]['input'] = input_output['input'] / scale
-                self.act_dict[idx][name]['output'] = input_output['output'] / scale
+                self.act_dict[idx][name]['input'] = func(input_output['input'])
+                self.act_dict[idx][name]['output'] = func(input_output['output'])
 
     def quantize(self):
 
@@ -339,7 +441,7 @@ class SmoothQuantizer:
             if sample.numel() == 0:
                 continue
             self.module_kwargs, self.inps = self._get_first_input(sample)
-            
+
             for idx in range(len(self.modules)):
                 SmoothQuantizer.to_device(self.modules[idx], self.best_device)
 
@@ -349,9 +451,11 @@ class SmoothQuantizer:
                 if self.module_kwargs.get("attention_mask", None) is not None:
                     self.module_kwargs["attention_mask"] = self.module_kwargs["attention_mask"].to(self.best_device)
 
-                named_linears = SmoothQuantizer.get_named_linears(self.modules[idx])
+                named_layers = SmoothQuantizer.get_all_leaf_modules(self.modules[idx])
 
-                self._get_max_input(idx, self.modules[idx], named_linears)
+                self._get_max_input(idx, self.modules[idx], named_layers)
+                if "cpu" != self.best_device:
+                    SmoothQuantizer.to_device(self.modules[idx], "cpu")
 
         for idx in tqdm(range(len(self.modules)), desc="applying scales..."):
             self._apply_scale(idx, self.modules[idx])
@@ -361,7 +465,7 @@ class SmoothQuantizer:
             if sample.numel() == 0:
                 continue
             self.module_kwargs, self.inps = self._get_first_input(sample)
-            
+
             for idx in range(len(self.modules)):
                 SmoothQuantizer.to_device(self.modules[idx], self.best_device)
 
@@ -371,16 +475,175 @@ class SmoothQuantizer:
                 if self.module_kwargs.get("attention_mask", None) is not None:
                     self.module_kwargs["attention_mask"] = self.module_kwargs["attention_mask"].to(self.best_device)
 
-                named_linears = SmoothQuantizer.get_named_linears(self.modules[idx])
+                named_linears = SmoothQuantizer.get_all_leaf_modules(self.modules[idx])
 
                 self._get_all_static_scales(idx, self.modules[idx], named_linears)
+                if "cpu" != self.best_device:
+                    SmoothQuantizer.to_device(self.modules[idx], "cpu")
         self._extract_static_scales()
 
         SmoothQuantizer.clear_memory()
         for idx in range(len(self.modules)):
             SmoothQuantizer.to_device(self.modules[idx], "cpu")
 
-    
+    def _find_match_in_dict(self, mnn_op_name, layer_act_dict):
+        """
+        mnn_op_name: e.g., '/blocks.0/self_attn/q_norm/Mul_1_output_0'
+        layer_act_dict: { 'self_attn.q_norm': {...}, 'self_attn.q_proj': {...} }
+        """
+
+        best_match = None
+        max_len = 0
+
+        for pt_name in layer_act_dict.keys():
+            pt_path = pt_name.replace('.', '/')
+            if pt_path in mnn_op_name:
+                if len(pt_path) > max_len:
+                    max_len = len(pt_path)
+                    best_match = pt_name
+
+        return best_match
+
+    def _propagate_quant_info(self, mnn_ops, quant_info_dict):
+        """
+        量化参数传导机制。
+        通过图的拓扑结构，将已知的量化参数传递给相邻的未知 Tensor。
+        """
+        import copy
+
+        # 定义透传算子：输入和输出共享 Scale/Zero
+        # 这些算子不改变数值分布，只改变形状或排布
+        PASS_THROUGH_OPS = [
+            'Reshape', 'Squeeze', 'Unsqueeze', 'Flatten',
+            'Transpose', 'Permute', 'ConvertTensor', 'Cast',
+            'Slice', 'StridedSlice', 'Split', 'Concat', 'Pack'
+        ]
+
+        # 定义特殊的单向或部分传导算子
+        # Gather: Output Scale == Input[0] (Data) Scale. (Input[1] 是 indices，不需要)
+        DATA_SELECT_OPS = ['Gather', 'GatherV2', 'GatherND']
+
+        print("Start propagating quantization parameters...")
+        changed = True
+        pass_round = 0
+
+        # 不动点迭代：只要这轮循环有更新，就继续跑下一轮
+        while changed:
+            changed = False
+            pass_round += 1
+            update_count = 0
+
+            for op in mnn_ops:
+                op_type = op.get('type', '')
+                inputs = op.get('inputIndexes', [])
+                outputs = op.get('outputIndexes', [])
+
+                if not inputs or not outputs:
+                    continue
+
+                # -----------------------------------------------
+                # 策略 1: 透传算子 (双向传导)
+                # Input <-> Output
+                # -----------------------------------------------
+                if op_type in PASS_THROUGH_OPS:
+                    # 1. Forward: 任意 Input 有参数 -> 传给所有 Output
+                    # 通常取第一个有参数的 input 作为源
+                    source_info = None
+                    for inp_idx in inputs:
+                        if inp_idx in quant_info_dict:
+                            source_info = quant_info_dict[inp_idx]
+                            break
+
+                    if source_info:
+                        for out_idx in outputs:
+                            if out_idx not in quant_info_dict:
+                                quant_info_dict[out_idx] = copy.deepcopy(source_info)
+                                quant_info_dict[out_idx]['index'] = out_idx # 修正 index
+                                changed = True
+                                update_count += 1
+
+                    # 2. Backward: 任意 Output 有参数 -> 传给所有 Input
+                    # (仅当 Input 还没有参数时)
+                    target_info = None
+                    for out_idx in outputs:
+                        if out_idx in quant_info_dict:
+                            target_info = quant_info_dict[out_idx]
+                            break
+
+                    if target_info:
+                        for inp_idx in inputs:
+                            if inp_idx not in quant_info_dict:
+                                quant_info_dict[inp_idx] = copy.deepcopy(target_info)
+                                quant_info_dict[inp_idx]['index'] = inp_idx
+                                changed = True
+                                update_count += 1
+
+                # -----------------------------------------------
+                # 策略 2: Gather 类 (仅数据输入 <-> 输出)
+                # -----------------------------------------------
+                elif op_type in DATA_SELECT_OPS:
+                    data_idx = inputs[0] # 第0个是 params/data
+                    out_idx = outputs[0]
+
+                    # Forward: Data -> Output
+                    if data_idx in quant_info_dict and out_idx not in quant_info_dict:
+                        quant_info_dict[out_idx] = copy.deepcopy(quant_info_dict[data_idx])
+                        quant_info_dict[out_idx]['index'] = out_idx
+                        changed = True
+                        update_count += 1
+
+                    # Backward: Output -> Data
+                    if out_idx in quant_info_dict and data_idx not in quant_info_dict:
+                        quant_info_dict[data_idx] = copy.deepcopy(quant_info_dict[out_idx])
+                        quant_info_dict[data_idx]['index'] = data_idx
+                        changed = True
+                        update_count += 1
+
+                # -----------------------------------------------
+                # 策略 3: BinaryOp (Add/Mul) - 谨慎处理
+                # 通常用于 Residual Add。
+                # -----------------------------------------------
+                elif op_type == 'BinaryOp':
+                    out_idx = outputs[0]
+
+                    # Backward:
+                    # 如果 Add 的输出已知（通常是因为连着下一个 Linear/Norm 的输入），
+                    # 我们可以尝试推导输入的 Scale。
+                    # 注意：对于 Add，如果 Input A 和 Input B 的范围差异巨大，直接回传可能有风险。
+                    # 但在 Transformer 残差结构中，通常 Input 和 Output 的 Scale 是同数量级的。
+                    if out_idx in quant_info_dict:
+                        target_info = quant_info_dict[out_idx]
+                        for inp_idx in inputs:
+                            if inp_idx not in quant_info_dict:
+                                quant_info_dict[inp_idx] = copy.deepcopy(target_info)
+                                quant_info_dict[inp_idx]['index'] = inp_idx
+                                changed = True
+                                update_count += 1
+
+                    # Forward:
+                    # 如果所有输入都有 Scale，取 Scale 最大的那个传给输出
+                    # (保守策略，避免截断)
+                    else:
+                        scales = []
+                        valid_inputs = []
+                        for inp_idx in inputs:
+                            if inp_idx in quant_info_dict:
+                                scales.append(quant_info_dict[inp_idx]['quantInfo']['scale'])
+                                valid_inputs.append(inp_idx)
+
+                        if len(valid_inputs) > 0:
+                            # 找到 Scale 最大的那个 input 的 info
+                            max_scale_idx = valid_inputs[scales.index(max(scales))]
+                            source = quant_info_dict[max_scale_idx]
+
+                            quant_info_dict[out_idx] = copy.deepcopy(source)
+                            quant_info_dict[out_idx]['index'] = out_idx
+                            changed = True
+                            update_count += 1
+
+            print(f"  Pass {pass_round}: Updated {update_count} tensors.")
+
+        return quant_info_dict
 
     def apply(self, base_path):
         mnn = json.load(open(base_path, 'rt'))
@@ -388,39 +651,86 @@ class SmoothQuantizer:
 
         max_val = 2 ** (self.act_bit - 1) - 1
         min_val = -max_val
+        data_type = 'DT_INT16'
+        if self.act_bit <= 8:
+            data_type = 'DT_INT8'
+        elif self.act_bit > 8 and self.act_bit <= 16:
+            data_type = 'DT_INT16'
 
         quant_info_dict = {}
+        npu_ignore_types = {'Input', 'Const', 'Extra', 'Reshape', 'ConvertTensor'}
 
         for op in mnn['oplists']:
-            if op['type'] == 'Convolution' and 'lm_head' not in op['name']:
-                name_vec = op['name'].split('/')
-                layer_idx = int(name_vec[1].split('.')[-1])
-                layer_name = name_vec[2] + '.' + name_vec[3]
+            op_name = op.get('name', '')
+            op_type = op.get('type', '')
 
-                tensor_input_index = op['inputIndexes'][0]
-                tensor_output_index = op['outputIndexes'][0]
+            if 'lm_head' in op_name:
+                continue
 
-                if tensor_input_index not in quant_info_dict:
-                    quant_info_dict[tensor_input_index] = {
-                        'index': tensor_input_index,
-                        'quantInfo': {
-                            'scale': self.act_dict[layer_idx][layer_name]['input'],
-                            'min': min_val,
-                            'max': max_val
-                        }
-                    }
-                
-                if tensor_output_index not in quant_info_dict:
-                    quant_info_dict[tensor_output_index] = {
-                        'index': tensor_output_index,
-                        'quantInfo': {
-                            'scale': self.act_dict[layer_idx][layer_name]['output'],
-                            'min': min_val,
-                            'max': max_val
-                        }
-                    }
+            should_process = False
+            if not self.generate_for_npu:
+                should_process = (op_type == 'Convolution')
+            else:
+                should_process = (op_type not in npu_ignore_types)
+
+            if should_process:
+                try:
+                    import re
+                    match = re.search(r'(?:blocks|layers)\.(\d+)', op_name)
+                    if match:
+                        layer_idx = int(match.group(1))
+                    else:
+                        continue
+                except:
+                    continue
+
+                if layer_idx >= len(self.act_dict):
+                    continue
+
+                layer_act_dict = self.act_dict[layer_idx]
+                matched_pt_name = self._find_match_in_dict(op_name, layer_act_dict)
+
+                if matched_pt_name:
+                    stats = layer_act_dict[matched_pt_name]
+
+                    if 'input' in stats and len(op['inputIndexes']) > 0:
+                        tensor_idx = op['inputIndexes'][0]
+
+                        if tensor_idx not in quant_info_dict:
+                            scale, zero = stats['input']
+                            quant_info_dict[tensor_idx] = {
+                                'index': tensor_idx,
+                                'quantInfo': {
+                                    'scale': scale,
+                                    'zero': zero,
+                                    'min': min_val,
+                                    'max': max_val,
+                                    "type": data_type
+                                }
+                            }
+
+                    if 'output' in stats and len(op['outputIndexes']) > 0:
+                        tensor_idx = op['outputIndexes'][0]
+
+                        if tensor_idx not in quant_info_dict:
+                            scale, zero = stats['output']
+                            quant_info_dict[tensor_idx] = {
+                                'index': tensor_idx,
+                                'quantInfo': {
+                                    'scale': scale,
+                                    'zero': zero,
+                                    'min': min_val,
+                                    'max': max_val,
+                                    "type": data_type
+                                }
+                            }
+
+        if self.generate_for_npu:
+            print(f"Initial collected tensors: {len(quant_info_dict)}")
+            self._propagate_quant_info(mnn['oplists'], quant_info_dict)
+            print(f"final collected tensors: {len(quant_info_dict)}")
         mnn['extraTensorDescribe'] = list(quant_info_dict.values())
-        
+
         with open(base_path, 'w', encoding='utf-8') as f:
             json.dump(mnn, f, ensure_ascii=False, indent=4)
 
@@ -429,7 +739,7 @@ class SmoothQuantizer:
 
 
 
-                
+
 
 
 

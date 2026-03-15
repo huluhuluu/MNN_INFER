@@ -11,7 +11,7 @@ class Embedding(torch.nn.Module):
         self.hidden_size = config.hidden_size
         self.embed = embed
         self.embed_scale = 1.0
-        if config.model_type == 'gemma2':
+        if config.model_type == 'gemma' or config.model_type == 'gemma2':
             self.embed_scale = self.hidden_size**0.5
         if hasattr(embed, 'embed_scale'):
             self.embed_scale = embed.embed_scale
@@ -28,13 +28,14 @@ def repeat_kv(hidden_states: torch.Tensor, n_rep: int) -> torch.Tensor:
     return hidden_states.reshape(batch, num_key_value_heads * n_rep, slen, head_dim)
 
 class Attention(torch.nn.Module):
-    def __init__(self, attn, layer_id, config):
+    def __init__(self, attn, layer_id, config, rotary, mapper):
         super().__init__()
         self.export_fused_attn = False
         if config is None: return
         self.config = config
         self.fused_attn = FusedAttention(config.hidden_size, f'/layers.{layer_id}/self_attn/FusedAttention')
         self.layer_id = layer_id
+        self.rotary = rotary
         self.hidden_size = config.hidden_size
         self.head_dim = config.head_dim
         if isinstance(config.num_attention_heads, list):
@@ -45,9 +46,8 @@ class Attention(torch.nn.Module):
             self.num_heads = config.num_attention_heads
             self.num_key_value_heads = config.num_key_value_heads
         self.num_key_value_groups = self.num_heads // self.num_key_value_heads
-        self.rotary = config.rotary
 
-        ModelMapper.do_map(self, attn, config.model_map['attention'])
+        ModelMapper.do_map(self, attn, mapper['attention'])
 
         if hasattr(self, 'qkv_proj') and self.qkv_proj is not None:
             # split qkv linear to q, k, v
@@ -128,6 +128,11 @@ class Attention(torch.nn.Module):
             cos, sin = rotary_pos_emb[0], rotary_pos_emb[1]
             query_states = self.rotary.apply_rotary_pos(query_states, cos, sin)
             key_states = self.rotary.apply_rotary_pos(key_states, cos, sin)
+
+        # MobileLLM model llama4_text has qk_norm after rotary
+        if hasattr(self, 'qk_norm') and self.qk_norm is not None :
+            query_states = self.qk_norm(query_states)
+            key_states = self.qk_norm(key_states)
 
         if self.export_fused_attn:
             attn_output = self.fused_attn(query_states, key_states, value_states, attention_mask)
@@ -250,7 +255,6 @@ class Rotary(torch.nn.Module):
     def __init__(self, config):
         super().__init__()
         if config is None: return
-
         self.rope_theta = config.rope_theta
         self.rope_ratio = config.rope_ratio
         self.rope_theta *= self.rope_ratio
@@ -264,21 +268,27 @@ class Rotary(torch.nn.Module):
         self.theta_sections = None
         self.attention_scaling = 1.0
         self.is_scaled = False
+
+        def get_theta():
+            return 1.0 / (self.rope_theta ** (torch.arange(0, self.rotary_dim, 2, dtype=torch.float32) / self.rotary_dim))
+        # default rope type's theta
+        self.theta = get_theta()
+        # other type
         if hasattr(config, 'rope_scaling') and config.rope_scaling is not None:
             scaling_config = config.rope_scaling
-            if 'mrope_section' in config.rope_scaling:
-                self.mrope_section = config.rope_scaling['mrope_section']
-                self.theta_sections = self.theta.unsqueeze(0).split(self.mrope_section, dim=-1)
+            # get rope_type
             rope_type = 'default'
             if 'type' in config.rope_scaling:
                 rope_type = config.rope_scaling['type']
             elif 'rope_type' in config.rope_scaling:
                 rope_type = config.rope_scaling['rope_type']
+            # gen theta for rope_type
             if rope_type == 'dynamic': # NTK
-                if 'alpha' in config.rope_scaling: # NTKAlpha
+                if 'alpha' in config.rope_scaling: # NTKAlpha in Hunyuan
                     self.rope_theta *= (config.rope_scaling['alpha'] ** (self.rotary_dim / (self.rotary_dim - 2)))
                 else: # NTKScaling
                     pass
+                self.theta = get_theta()
             elif rope_type == 'yarn':
                 self.is_scaled = True
                 self.theta, self.attention_scaling = _compute_yarn_parameters(
@@ -287,14 +297,25 @@ class Rotary(torch.nn.Module):
                     scaling_config=scaling_config,
                     max_position_embeddings=config.max_position_embeddings
                 )
-        if not self.is_scaled:
-            self.theta = 1.0 / (self.rope_theta ** (torch.arange(0, self.rotary_dim, 2, dtype=torch.float32) / self.rotary_dim))
+            elif rope_type == 'longrope': # longrope in MiniCPM
+                self.is_scaled = True
+                original_max_position_embeddings = config.rope_scaling['original_max_position_embeddings']
+                scale = (config.max_position_embeddings / original_max_position_embeddings)
+                self.attention_scaling = math.sqrt(1 + math.log(scale) / math.log(original_max_position_embeddings))
+                # long_factor = config.rope_scaling['long_factor']
+                short_factor = config.rope_scaling['short_factor']
+                self.theta = get_theta() / torch.tensor(short_factor, dtype=torch.float32)
+
+            # mrope for multimode
+            if 'mrope_section' in scaling_config:
+                self.mrope_section = scaling_config['mrope_section']
+                self.theta_sections = get_theta().unsqueeze(0).split(self.mrope_section, dim=-1)
 
     def forward(self, position_ids):
         if self.theta_sections is not None:
             return self.mrope_forward(position_ids)
         position_ids = position_ids.float().reshape(-1, 1)
-        idx_theta = position_ids * self.theta
+        idx_theta = position_ids * self.theta.to(position_ids.device)
         rotary_pos_emb = torch.stack([torch.cos(idx_theta), torch.sin(idx_theta)])
         if self.model_type == 'ernie4_5':
             rotary_pos_emb = torch.stack((rotary_pos_emb, rotary_pos_emb), dim=-1)
@@ -404,15 +425,47 @@ class GptOssExpert(torch.nn.Module):
         out = self.down_proj_linear(gated_output)
         return out
 
+class Qwen3Expert(torch.nn.Module):
+    def __init__(self, hidden_size, expert_dim, act_fn):
+        super().__init__()
+        self.expert_dim = expert_dim
+        self.gate_up_proj_linear = torch.nn.Linear(hidden_size, 2 * expert_dim, bias=False)
+        self.down_proj_linear = torch.nn.Linear(expert_dim, hidden_size, bias=False)
+        self.act_fn = act_fn
+
+    def forward(self, hidden_states: torch.Tensor, debug=False) -> torch.Tensor:
+        gate_up = self.gate_up_proj_linear(hidden_states)
+        # gate, up = gate_up[..., ::2], gate_up[..., 1::2]
+        gate, up = gate_up.chunk(2, dim=-1)
+        out = self.down_proj_linear(up * self.act_fn(gate))
+        return out
+
 class Mlp(torch.nn.Module):
-    def __init__(self, mlp, config, layer_id):
+    def __init__(self, mlp, mapper, layer_id):
         super().__init__()
         self.layer_id = layer_id
-        ModelMapper.do_map(self, mlp, config.model_map['mlp'])
+        ModelMapper.do_map(self, mlp, mapper['mlp'])
         self.is_moe = hasattr(self, 'experts')
         self.export_moe = False
         self.custom_moe = MoE(self.num_experts, self.top_k, layer_id)
-        self.moe_type = 'qwen3_moe'
+        if isinstance(self.experts, torch.nn.ModuleList):
+            self.moe_type = 'qwen3_moe'
+        else:
+            self.moe_type = 'qwen3_vl_moe'
+            self.norm_topk_prob = True
+            # refacte experts to qwen3_experts
+            original_experts = self.experts
+            hidden_size = original_experts.hidden_size
+            expert_dim = original_experts.expert_dim
+            act_fn = original_experts.act_fn
+            new_experts_list = torch.nn.ModuleList()
+            for i in range(self.num_experts):
+                expert_mlp = Qwen3Expert(hidden_size, expert_dim, act_fn)
+                expert_mlp.gate_up_proj_linear.weight.data = original_experts.gate_up_proj.data[i].transpose(0, 1)
+                expert_mlp.down_proj_linear.weight.data = original_experts.down_proj.data[i].transpose(0, 1)
+                new_experts_list.append(expert_mlp)
+            self.experts = new_experts_list
+
         if hasattr(self, 'router'):
             self.moe_type = 'gpt_oss'
             hidden_dim = self.router.weight.shape[1]
@@ -518,21 +571,22 @@ class Mlp(torch.nn.Module):
         return final_hidden_states
 
 class Decoder(torch.nn.Module):
-    def __init__(self, decoder, layer_id, config):
+    def __init__(self, decoder, layer_id, config, rotary=None, mapper=None):
         super().__init__()
-        self.cross_decoder = False
-        ModelMapper.do_map(self, decoder, config.model_map['decoder'])
-        if 'mlp' in config.model_map:
-            self.mlp = Mlp(self.mlp, config, layer_id)
-        # mllama has cross_attn
-        if hasattr(self, 'cross_attn') and self.cross_attn is not None:
-            self.cross_decoder = True
-            self.self_attn = Attention(self.cross_attn, layer_id, config)
-        else:
-            self.self_attn = Attention(self.self_attn, layer_id, config)
+        if rotary is None:
+            rotary = config.rotary
+        if mapper is None:
+            mapper = config.model_map
+        ModelMapper.do_map(self, decoder, mapper['decoder'])
+        if 'mlp' in mapper:
+            self.mlp = Mlp(self.mlp, mapper, layer_id)
+        self.self_attn = Attention(self.self_attn, layer_id, config, rotary, mapper)
         self.hidden_size = config.hidden_size
-        # chatglm
-        self.alpha = (2 * config.num_hidden_layers) ** 0.5 if config.model_type == 'chatglm' else 1.0
+        if hasattr(config, 'num_hidden_layers'):
+            # minicpm
+            self.num_hidden_layers = config.num_hidden_layers
+            # chatglm
+            self.alpha = (2 * config.num_hidden_layers) ** 0.5 if config.model_type == 'chatglm' else 1.0
 
     def forward(
         self,
@@ -560,7 +614,7 @@ class Decoder(torch.nn.Module):
             # phi
             feed_forward_hidden_states = self.mlp(norm_hidden_states)
             hidden_states = hidden_states + feed_forward_hidden_states + residual
-        elif self.alpha != 1.0:
+        elif hasattr(self, 'alpha') and self.alpha != 1.0:
             # chatglm-6b
             hidden_states = norm_hidden_states * self.alpha + hidden_states
             mlp_input = self.post_attention_layernorm(hidden_states)
@@ -582,6 +636,13 @@ class Decoder(torch.nn.Module):
             hidden_states = self.mlp(hidden_states)
             hidden_states = cross_attention_mask * hidden_states
             hidden_states = residual + self.cross_attn_mlp_gate.tanh() * hidden_states
+        elif hasattr(self, 'scale_depth'):
+            # minicpm
+            hidden_states = residual + hidden_states * (self.scale_depth / math.sqrt(self.num_hidden_layers))
+            residual = hidden_states
+            hidden_states = self.post_attention_layernorm(hidden_states)
+            hidden_states = self.mlp(hidden_states)
+            hidden_states = residual + hidden_states * (self.scale_depth / math.sqrt(self.num_hidden_layers))
         else:
             # general
             hidden_states = residual + hidden_states
@@ -600,3 +661,19 @@ class Lm(torch.nn.Module):
     def forward(self, hidden_states):
         m_logits = self.lm(hidden_states)
         return m_logits
+
+class RMSNorm(torch.nn.Module):
+    def __init__(self, hidden_size, eps=1e-6):
+        """
+        LlamaRMSNorm is equivalent to T5LayerNorm
+        """
+        super().__init__()
+        self.weight = torch.nn.Parameter(torch.ones(hidden_size))
+        self.variance_epsilon = eps
+
+    def forward(self, hidden_states):
+        input_dtype = hidden_states.dtype
+        hidden_states = hidden_states.to(torch.float32)
+        variance = hidden_states.pow(2).mean(-1, keepdim=True)
+        hidden_states = hidden_states * torch.rsqrt(variance + self.variance_epsilon)
+        return self.weight * hidden_states.to(input_dtype)

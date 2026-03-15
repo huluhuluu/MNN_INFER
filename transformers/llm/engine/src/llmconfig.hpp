@@ -15,7 +15,7 @@
 #include <rapidjson/document.h>
 #include <rapidjson/writer.h>
 #include <rapidjson/stringbuffer.h>
-
+#include <MNN/MNNDefine.h>
 
 
 namespace MNN {
@@ -90,6 +90,7 @@ public:
         rapidjson::Document input_doc;
         input_doc.Parse(str);
         if (input_doc.HasParseError()) {
+            MNN_PRINT("Config Parse Error: %d\n", input_doc.GetParseError());
             return false;
         }
         // merge
@@ -314,6 +315,10 @@ public:
     std::string audio_model() const {
         return base_dir_ + config_.value("audio_model", "audio.mnn");
     }
+
+    std::string context_file() const {
+        return base_dir_ + config_.value("context_file", "context.json");
+    }
     // model file config end >
 
     // < generate config start
@@ -357,14 +362,6 @@ public:
     std::string memory(bool mllm = false) const {
         if (mllm) return mllm_config_.value("memory", "low");
         return config_.value("memory", "low");
-    }
-
-    int quant_qkv() const {
-        return config_.value("quant_qkv", 0);
-    }
-
-    int kvcache_limit() const {
-        return config_.value("kvcache_limit", -1);
     }
     // backend config end >
 
@@ -433,6 +430,10 @@ public:
         return config_.value("has_talker", false);
     }
 
+    bool has_deepstack() const {
+        return config_.value("has_deepstack", false);
+    }
+
     bool use_template() const {
         return config_.value("use_template", true);
     }
@@ -451,6 +452,10 @@ public:
     }
     std::string tmp_path() const {
         return config_.value("tmp_path", "");
+    }
+
+    std::string prefix_cache_path() const {
+        return config_.value("prefix_cache_path", "prefixcache");
     }
 
     std::string system_prompt() const {
@@ -566,7 +571,7 @@ public:
 
     /**
      speculative decoding algrithm.
-     optional: "lookahead"、 ”mtp“、 "draftmodel"
+     optional: "lookahead"、 ”mtp“、 "draftmodel", "eagle"
      */
     std::string speculative_type() const {
         return config_.value("speculative_type", "");
@@ -574,7 +579,7 @@ public:
 
     // speculative draft length
     int draft_predict_length() const {
-        return config_.value("draft_predict_length", 4);
+        return config_.value("draft_predict_length", 3);
     }
     /**
      if speculative_type is set "lookahead",
@@ -625,6 +630,21 @@ public:
     }
     std::string mtp_model() const {
         return base_dir_ + config_.value("mtp_model", "mtp.mnn");
+    }
+    std::string eagle_model() const {
+        return base_dir_ + config_.value("eagle_model", "eagle.mnn");
+    }
+    std::string eagle_fc() const {
+        return base_dir_ + config_.value("eagle_fc", "eagle_fc.mnn");
+    }
+    std::string eagle_d2t() const {
+        return base_dir_ + config_.value("eagle_d2t", "eagle_d2t.mnn");
+    }
+    int eagle_depth() const {
+        return config_.value("eagle_depth", 3);
+    }
+    int eagle_topk() const {
+        return config_.value("eagle_topk", 1);
     }
     // speculative decoding config end >
 };
