@@ -144,9 +144,15 @@ void Llm::setRuntimeHint(std::shared_ptr<Express::Executor::RuntimeManager> &rtg
     rtg->setHint(MNN::Interpreter::INIT_THREAD_NUMBER, 4);
 
     rtg->setHint(MNN::Interpreter::MEM_ALLOCATOR_TYPE, 0);
-    rtg->setHint(MNN::Interpreter::QKV_QUANT_OPTIONS, mConfig->config_.value("quant_qkv", 8));
-    if (mConfig->reuse_kv() && mConfig->config_.value("quant_qkv", 8) == 10) {
-        rtg->setHint(MNN::Interpreter::QKV_QUANT_OPTIONS, 9);
+
+    /* 'quant_qkv' is deprecated, use 'attention_mode '*/
+    int legacyAttentionMode = mConfig->config_.value("quant_qkv", 8); // compatibility
+    int attentionMode = mConfig->config_.value("attention_mode", legacyAttentionMode); // try to read 'attention_mode'
+
+    // 3. 设置 Hint
+    rtg->setHint(MNN::Interpreter::ATTENTION_OPTION, attentionMode);
+    if (mConfig->reuse_kv() && attentionMode == 10) {
+        rtg->setHint(MNN::Interpreter::ATTENTION_OPTION, 9);
     }
     if (mConfig->use_cached_mmap()) {
         rtg->setHint(MNN::Interpreter::USE_CACHED_MMAP, 1);
@@ -354,11 +360,18 @@ bool Llm::load() {
         }
         // attentiion mask var
         {
-            mAttentionMaskVarVec[i] = _Input({1, 1, index, index}, NCHW, halide_type_of<float>());
-            auto ptr = mAttentionMaskVarVec[i]->writeMap<float>();
-            for (int i = 0; i < index; i++) {
-                for (int j = 0; j < index; j++) {
-                    ptr[index * i + j] = (j > i) * std::numeric_limits<float>::lowest();
+            // Mask: lower triangular
+            if (mConfig->backend_type() == "cpu") {
+                mAttentionMaskVarVec[i] = _Input({}, NCHW, halide_type_of<float>());
+                auto ptr = mAttentionMaskVarVec[i]->writeMap<float>();
+                ptr[0] = 0;
+            } else {
+                mAttentionMaskVarVec[i] = _Input({1, 1, index, index}, NCHW, halide_type_of<float>());
+                auto ptr = mAttentionMaskVarVec[i]->writeMap<float>();
+                for (int i = 0; i < index; i++) {
+                    for (int j = 0; j < index; j++) {
+                        ptr[index * i + j] = (j > i) * std::numeric_limits<float>::lowest();
+                    }
                 }
             }
         }
@@ -1193,11 +1206,18 @@ VARP Llm::gen_attention_mask(int seq_len) {
             }
         }
 
-        attentionMask = _Input({1, 1, seq_len, kv_seq_len}, NCHW, halide_type_of<float>());
-        auto ptr = attentionMask->writeMap<float>();
-        for (int i = 0; i < seq_len; i++) {
-            for (int j = 0; j < kv_seq_len; j++) {
-                ptr[kv_seq_len * i + j] = (j > i) * std::numeric_limits<float>::lowest();
+        // Mask: lower triangular
+        if (mConfig->backend_type() == "cpu") { // Now only cpu supports using lower triangular to opt the attention performance
+            attentionMask = _Input({}, NCHW, halide_type_of<float>());
+            auto ptr = attentionMask->writeMap<float>();
+            ptr[0] = 0;
+        } else {
+            attentionMask = _Input({1, 1, seq_len, kv_seq_len}, NCHW, halide_type_of<float>());
+            auto ptr = attentionMask->writeMap<float>();
+            for (int i = 0; i < seq_len; i++) {
+                for (int j = 0; j < kv_seq_len; j++) {
+                    ptr[kv_seq_len * i + j] = (j > i) * std::numeric_limits<float>::lowest();
+                }
             }
         }
         return attentionMask;

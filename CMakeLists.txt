@@ -80,6 +80,7 @@ option(MNN_LOW_MEMORY "Build MNN support low memory for weight quant model." OFF
 option(MNN_CPU_WEIGHT_DEQUANT_GEMM "Build MNN CPU weight dequant related gemm kernels." OFF)
 option(MNN_BUILD_AUDIO "Build audio api in MNN." OFF)
 option(MNN_SME2 "Use Arm sme2 instructions" ON)
+option(MNN_METAL_TENSOR "Use Metal4 tensor instructions" ON)
 
 if (MNN_BUILD_MINI)
     set(MNN_SKIPBUILD_GEOMETRY ON CACHE BOOL "<docstring>" FORCE)
@@ -553,6 +554,7 @@ ENDIF()
 IF(MNN_BUILD_DIFFUSION)
   file(GLOB MNN_DIFFUSION_HDRS ${CMAKE_CURRENT_SOURCE_DIR}/transformers/diffusion/engine/include/diffusion/*)
   list(APPEND MNN_EXTRA_HEADERS ${CMAKE_CURRENT_SOURCE_DIR}/transformers/diffusion/engine/include/diffusion/diffusion.hpp)
+  list(APPEND MNN_EXTRA_HEADERS ${CMAKE_CURRENT_SOURCE_DIR}/transformers/diffusion/engine/include/diffusion/sana_llm.hpp)
 ENDIF()
 
 
@@ -940,6 +942,11 @@ if (NOT MNN_BUILD_SHARED_LIBS)
 endif()
 list(APPEND MNN_TARGETS MNN)
 list(REMOVE_ITEM MNN_TARGETS MNN)
+
+# Cache MNN_DEPS and MNN_INCLUDES for external projects
+set(MNN_LIBS ${MNN_DEPS} CACHE INTERNAL "MNN targets")
+set(MNN_INCLUDE_DIRS ${MNN_INCLUDES} CACHE INTERNAL "MNN include directories")
+
 IF(MNN_BUILD_DEMO)
 include(${CMAKE_CURRENT_LIST_DIR}/demo/exec/CMakeLists.txt)
 ENDIF()
