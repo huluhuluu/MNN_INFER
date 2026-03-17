@@ -185,6 +185,11 @@ public:
      * Print statistics to stdout
      */
     void printStats() const;
+
+    /**
+     * Print op info to stdout
+     */
+    void printOpInfo() const;
     
     /**
      * Export results to JSON file

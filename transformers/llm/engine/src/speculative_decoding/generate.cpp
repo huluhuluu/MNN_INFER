@@ -43,17 +43,13 @@ ArGeneration::ArGeneration(Llm* llm, std::shared_ptr<LlmContext> context, std::s
 void ArGeneration::generate(GenerationParams& param) {
     int max_token = param.max_new_tokens;
     int len = 0;
+    auto profiler = mLlm->mProfiler;
+    const bool profiling = profiler && profiler->isEnabled();
     while (len < max_token) {
         if(mContext->status == LlmStatus::USER_CANCEL) {
             break;
         }
         AUTOTIME;
-        
-        // Profiler: Decode token start
-        auto profiler = mLlm->getProfiler();
-        if (profiler && profiler->isEnabled()) {
-            profiler->onDecodeTokenStart(mContext->current_token);
-        }
         
         // Update gen seq
         mContext->current_token = mLlm->sample(param.outputs[0], param.validLogitStart, param.validLogitSize);
@@ -63,6 +59,10 @@ void ArGeneration::generate(GenerationParams& param) {
         if (mLlm->is_stop(mContext->current_token)) {
             if (nullptr != mContext->os) {
                 *mContext->os << mContext->end_with << std::flush;
+            }
+            if(len != 0 && profiling){
+                // Profiler: Decode token end
+                profiler->onDecodeTokenEnd(mContext->current_token);
             }
             break;
         }
@@ -74,6 +74,17 @@ void ArGeneration::generate(GenerationParams& param) {
             *mContext->os << decodeStr;
             *mContext->os << std::flush;
         }
+        if(len != 0 && profiling){
+            // Profiler: Decode token end
+            profiler->onDecodeTokenEnd(mContext->current_token);
+        }
+        
+        if(len + 1 >= max_token){break;}
+        // Profiler: Decode token start
+        if (profiling) {
+            profiler->onDecodeTokenStart(mContext->current_token);
+        }
+
         // Compute Next Logits
         auto outputs = mLlm->forwardVec({mContext->current_token});
         for (auto o : outputs) {
@@ -88,11 +99,6 @@ void ArGeneration::generate(GenerationParams& param) {
         // Update input seq
         mLlm->updateContext(1, 0);
         mContext->decode_us += _t.durationInUs();
-        
-        // Profiler: Decode token end
-        if (profiler && profiler->isEnabled()) {
-            profiler->onDecodeTokenEnd(mContext->current_token);
-        }
         
         len++;
     }

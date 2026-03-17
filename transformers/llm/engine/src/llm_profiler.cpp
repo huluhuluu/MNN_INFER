@@ -109,9 +109,10 @@ void LLMOpProfiler::onPrefillEnd(int promptTokenCount) {
     if (!mEnabled) return;
     mInPrefill = false;
     // Record token time for prefill
-    mPrefillProfile.tokenTotalTime = mTimer.durationInUs() / 1000.0f;  // us -> ms
-    mPrefillProfile.tokenCount = promptTokenCount;
-    
+    mPrefillProfile.tokenTotalTime += mTimer.durationInUs() / 1000.0f;  // us -> ms
+    mPrefillProfile.tokenCount += promptTokenCount;
+    // reset timer for next prefill
+    mTimer.reset(); 
     printf("[LLM Profiler] Prefill phase ended, %d tokens, time %.4f ms, avg time: %.4f ms/token\n", 
               promptTokenCount, 
               mPrefillProfile.tokenTotalTime ,
@@ -462,6 +463,33 @@ void LLMOpProfiler::printStats() const {
         printf("           : %.2f ms (op-level cumulative)\n", mDecodeProfile.totalTime);
     }
     printf("================================================================\n");
+}
+
+void LLMOpProfiler::printOpInfo() const { 
+    printf("\n");
+    printf("================================================================\n");
+    printf("                        LLM Operator Info                       \n");
+    printf("================================================================\n");
+    
+    // Collect all unique op name -> type mappings
+    std::map<std::string, std::string> opNameToType;
+    
+    for (const auto& pair : mPrefillProfile.opRecords) {
+        opNameToType[pair.second.name] = pair.second.type;
+    }
+    for (const auto& pair : mDecodeProfile.opRecords) {
+        opNameToType[pair.second.name] = pair.second.type;
+    }
+    
+    // Print op name and type mapping
+    printf("\n=== Operator Name -> Type (%zu ops) ===\n", opNameToType.size());
+    printf("%-40s -> %-20s\n", "Op Name", "Op Type");
+    printf("------------------------------------------------------------\n");
+    for (const auto& pair : opNameToType) {
+        printf("%-40s -> %-20s\n", pair.first.c_str(), pair.second.c_str());
+    }
+    
+    printf("\n================================================================\n");
 }
 
 bool LLMOpProfiler::exportJSON(const std::string& filepath) const {

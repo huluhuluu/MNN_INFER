@@ -854,7 +854,7 @@ std::vector<int> Llm::generate(MNN::Express::VARP input_embeds, int max_tokens) 
     mContext->prompt_len = seqLen;
     
     // ========== Profiler: Prefill Phase Start ==========
-    if (mProfiler && mProfiler->isEnabled()) {
+    if (mProfiler && mProfiler->isEnabled() && mContext->current_stage == LlmStage::Idle) {
         mContext->current_stage = LlmStage::Prefill;
         mProfiler->onPrefillStart();
     }
@@ -867,15 +867,13 @@ std::vector<int> Llm::generate(MNN::Express::VARP input_embeds, int max_tokens) 
         return {};
     }
     updateContext(seqLen, 0);
-    int ttt = _t.durationInUs();
-    mContext->prefill_us = ttt;
-    printf("Prefill time: %d us\n", ttt);
+    mContext->prefill_us = _t.durationInUs();
+    printf("Prefill time: %ld us\n", mContext->prefill_us);
 
     // ========== Profiler: Prefill Phase End ==========
     if (mProfiler && mProfiler->isEnabled()) {
         collectBackendProfileData();
         mProfiler->onPrefillEnd(mContext->prompt_len);
-        mContext->current_stage = LlmStage::Idle;
     }
     // ========== End Profiler: Prefill Phase End ==========
 
@@ -917,29 +915,26 @@ std::vector<int> Llm::generate(MNN::Express::VARP input_embeds, int max_tokens) 
 #endif
 
     _t.reset();
-    
-    // ========== Profiler: Decode Phase Start ==========
-    if (mProfiler && mProfiler->isEnabled()) {
-        mContext->current_stage = LlmStage::Decode;
-    }
-    // ========== End Profiler: Decode Phase Start ==========
-    
     // call generation function
     if (0 < max_tokens) {
-    mGenerateParam->max_new_tokens = max_tokens;
-    mGenerationStrategy->generate(*mGenerateParam);
+        // ========== Profiler: Decode Phase Start ==========
+        if (mProfiler && mProfiler->isEnabled()) {
+            mContext->current_stage = LlmStage::Decode;
+        }
+        // ========== End Profiler: Decode Phase Start ==========
+
+        mGenerateParam->max_new_tokens = max_tokens;
+        mGenerationStrategy->generate(*mGenerateParam);
+        
+        // ========== Profiler: Decode Phase End ==========
+        if (mProfiler && mProfiler->isEnabled()) {    
+            printf("Decode time: %ld|%ld us\n", mContext->decode_us, _t.durationInUs());
+            collectBackendProfileData();
+            mProfiler->onDecodePhaseEnd();
+            mContext->current_stage = LlmStage::Idle;
+        }
+        // ========== End Profiler: Decode Phase End ==========
     }
-    
-    ttt = _t.durationInUs();
-    printf("Decode time: %d us\n", ttt);
-    // ========== Profiler: Decode Phase End ==========
-    if (mProfiler && mProfiler->isEnabled()) {
-        collectBackendProfileData();
-        mProfiler->onDecodePhaseEnd();
-        mContext->current_stage = LlmStage::Idle;
-    }
-    // ========== End Profiler: Decode Phase End ==========
-    
     return mContext->output_tokens;
 }
 
@@ -1236,6 +1231,14 @@ void Llm::printProfilerStats() const {
     }
 }
 
+void Llm::printOpInfo() const{
+    if (mProfiler) {
+        mProfiler->printOpInfo();
+    } else {
+        MNN_PRINT("[LLM] Profiler not initialized\n");
+    }
+}
+
 bool Llm::exportProfilerJSON(const std::string& filepath) const {
     if (mProfiler) {
         return mProfiler->exportJSON(filepath);
@@ -1280,6 +1283,11 @@ void Llm::setupProfilerCallback() {
     }
 }
 
+void Llm::clearProfilerInfo() {
+    if (mProfiler) {
+        mProfiler->reset();
+    }
+}
 void Llm::collectBackendProfileData() {
     if (!mProfiler || !mProfiler->isEnabled()) return;
     

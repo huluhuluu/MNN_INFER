@@ -209,28 +209,35 @@ std::pair<const void*, size_t> CLRuntime::onGetCache() {
 // ========== Profile Data Interface Implementation ==========
 std::map<std::string, OpProfileInfo> CLRuntime::onGetProfileData() const {
 #ifdef ENABLE_OPENCL_TIME_PROFILER
+    // Ensure all OpenCL commands are completed before collecting profile data
+    mOpenCLRuntime->commandQueue().finish();
+    
     const auto& opEntries = mOpenCLRuntime->getOpProfileEntries();
-    const auto& kernelEvents = mOpenCLRuntime->getEvent();
+    
     // Iterate over each op execution record
-    // Each entry marks a single op execution with its kernel range [startIndex, endIndex)
+    // Each entry marks a single op execution with its kernel events
     for (const auto& opEntry : opEntries) {
-        // statics max(END) - min(SUBMIT)
-        float totalKernelTimeUs = 0.0f;
-        
-        for (size_t i = opEntry.startIndex; i < opEntry.endIndex; ++i) {
-            const auto& event = kernelEvents[i].second;
+        // Calculate real execution time: max(END) - min(START)
+        // This accounts for parallel kernel execution on GPU
+        cl_ulong minStart = CL_ULONG_MAX;
+        cl_ulong maxEnd = 0;
+        for (const auto& eventInfo : opEntry.opEvents) {
+            const auto& event = eventInfo.second;
             cl_int res = event.wait();
             if (res != CL_SUCCESS) {
-                continue;
+                MNN_PRINT("Unsuccess kernel %s\n", eventInfo.first.c_str());
             }
-            auto start = event.getProfilingInfo<CL_PROFILING_COMMAND_SUBMIT>();
+            auto start = event.getProfilingInfo<CL_PROFILING_COMMAND_START>();
             auto end = event.getProfilingInfo<CL_PROFILING_COMMAND_END>();
-            
-            // Calculate each kernel's actual execution time
-            if (end > start) {
-                totalKernelTimeUs += (end - start) / 1000.0f;  // ns -> us
-            }
+            minStart = std::min(start, minStart), maxEnd = std::max(end, maxEnd);
         }
+        // Calculate real execution time in microseconds
+        float totalKernelTimeUs = 0.0f;
+        if (minStart != CL_ULONG_MAX && maxEnd > minStart) {
+            totalKernelTimeUs = (maxEnd - minStart) / 1000.0f;  // ns -> us
+        }
+        
+        // printf("%s %s %f %lu %lu\n", opEntry.opName.c_str(), opEntry.opType.c_str(), totalKernelTimeUs, minStart, maxEnd);
         Runtime::recordOpProfileTime(opEntry.opName, opEntry.opType, totalKernelTimeUs);
     }
     mOpenCLRuntime->clearProfileData();
@@ -240,6 +247,7 @@ std::map<std::string, OpProfileInfo> CLRuntime::onGetProfileData() const {
 
 void CLRuntime::onClearProfileData() {
     mOpenCLRuntime->clearProfileData();
+    Runtime::onClearProfileData();
 }
 
 void CLRuntime::profileStart(const std::vector<MNN::Tensor*>& tensors, const MNN::OperatorInfo* info) const {

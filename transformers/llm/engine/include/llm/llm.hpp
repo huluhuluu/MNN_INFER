@@ -102,6 +102,8 @@ struct LlmContext {
     std::string generate_str;
     // stage for profiling
     LlmStage current_stage = LlmStage::Idle;
+    // llm status
+    LlmStatus status;
 };
 struct GenerationParams;
 class MNN_PUBLIC Llm {
@@ -164,16 +166,19 @@ public:
     // ========== Profiler Interface ==========
     // Enable/disable profiler
     void enableProfiler(bool enabled = true);
-    // Get profiler instance
-    std::shared_ptr<LLMOpProfiler> getProfiler() const { return mProfiler; }
     // Print profiler statistics
     void printProfilerStats() const;
+    // Print op info
+    void printOpInfo() const;
+    // TODO: 
     // Export profiler results to JSON
     bool exportProfilerJSON(const std::string& filepath) const;
     // Get current stage for profiling
     LlmStage getCurrentStage() const;
     // Set special ops for profiler (separate timing)
     void setProfilerSpecialOps(const std::vector<std::string>& specialOps);
+    // clear profiler info
+    void clearProfilerInfo();
     // ========== End Profiler Interface ==========
     
     // Waveform generation
@@ -210,6 +215,7 @@ protected:
     Express::VARP logitsAllIdx, logitsLastIdx;
     int mSeqLenIndex = 0;
 protected:
+    friend class Generation;
     friend class ArGeneration;
     friend class LookaheadGeneration;
     friend class MtpGeneration;

@@ -69,8 +69,7 @@ struct TuneInfo{
 struct OpProfileEntry {
     std::string opName;
     std::string opType;
-    size_t startIndex;  // Start index in kernel entries
-    size_t endIndex;    // End index (exclusive) in kernel entries
+    std::vector<std::pair<std::string, cl::Event> > opEvents;
 };
 
 // Thread-local index for marking op boundaries
@@ -147,7 +146,12 @@ public:
         return mDeviceName;
     }
     void pushEvent(std::pair<std::string, cl::Event> data) {
-        return mEvents.push_back(data);
+        mEvents.push_back(data);
+        #ifdef ENABLE_OPENCL_TIME_PROFILER
+            if (!mOpProfileEntries.empty()) {
+                mOpProfileEntries.back().opEvents.push_back(data);
+            }
+        #endif
     }
     unsigned int getEventTime(cl::Event& event);
     void printEventTime();
@@ -168,24 +172,21 @@ public:
     const std::vector<OpProfileEntry>& getOpProfileEntries() const { return mOpProfileEntries; }
     void clearProfileData() {
         mOpProfileEntries.clear();
-        clearEvent();
     }
     unsigned int getTotalKernelTime() const { return mKernelTime; }
     
     // Mark op boundaries - record execution range
     void profileStart(const std::vector<MNN::Tensor*>& tensors, const MNN::OperatorInfo* info) {
-        gPendingOpStartIndex = mEvents.size();
+        #ifdef ENABLE_OPENCL_TIME_PROFILER
+            // Create an entry recording this op execution with its kernel event
+            OpProfileEntry entry;
+            entry.opName = info->name();
+            entry.opType = info->type();
+            mOpProfileEntries.push_back(entry);
+        #endif
     }
     void profileEnd(const std::vector<MNN::Tensor*>& tensors, const MNN::OperatorInfo* info) {
-#ifdef ENABLE_OPENCL_TIME_PROFILER
-        // Create an entry recording this op execution with its kernel range
-        OpProfileEntry entry;
-        entry.opName = info->name();
-        entry.opType = info->type();
-        entry.startIndex = gPendingOpStartIndex;
-        entry.endIndex = mEvents.size();
-        mOpProfileEntries.push_back(entry);
-#endif
+        // do nothing
     }
     const std::vector<std::pair<std::string, cl::Event>>& getEvent() const {return mEvents;}
     // ========== End Profile Data Interface ==========
