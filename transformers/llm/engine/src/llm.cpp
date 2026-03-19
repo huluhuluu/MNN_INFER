@@ -171,7 +171,7 @@ void Llm::setRuntimeHint(std::shared_ptr<Express::Executor::RuntimeManager> &rtg
     rtg->setHint(MNN::Interpreter::DYNAMIC_QUANT_OPTIONS, mConfig->config_.value("dynamic_option", 0));
 
     // rtg->setHintPtr(Interpreter::KVCACHE_INFO, mMeta.get());
-    
+    // TODO: 
     rtg->setHintPtr(Interpreter::KVCACHE_INFO, mBatchMeta.get());
     if (backend_type_convert(mConfig->backend_type()) != 0) { // not cpu
         std::string cacheFilePath = tmpPath.length() != 0 ? tmpPath : ".";
@@ -834,21 +834,13 @@ std::vector<std::vector<int>> Llm::generate(const std::vector<std::vector<int> >
     int gen_len = 0, bs = input_ids.size();
     // TODO: modify to additional thread
     std::vector<std::vector<int>> ret(bs, std::vector<int>{});
+    
+    std::vector<std::string> ans(bs, "");
     // add all requests
     std::vector<int> reqIds= mScheduler->addRequest(input_ids);
     
     // set batch kvcache
-    // mRuntimeManager->setHintPtr(Interpreter::KVCACHE_INFO, mBatchMeta.get());
-    // TODO: delete
-    auto p = [](VARP v, std::string s){
-        std::cout<<s<<" : ";
-        if(v->getInfo() == nullptr){std::cout<<"nullptr\n";return;}
-        auto shape = v->getInfo()->dim;
-        for(int i: shape){
-            std::cout<<i<<" ";
-        }
-        std::cout<<std::endl;
-    };
+    mRuntimeManager->setHintPtr(Interpreter::KVCACHE_INFO, mBatchMeta.get());
 
     // generation loop
     while (std::shared_ptr<BatchScheduler::Chunk> chunk = mScheduler->schedule()){// chunk prefill
@@ -867,10 +859,10 @@ std::vector<std::vector<int>> Llm::generate(const std::vector<std::vector<int> >
         auto moduleKey = std::make_pair(chunk->culLen, false);
         std::shared_ptr<Module> selectModule = mModule;
         if(mModulePool.find(moduleKey) == mModulePool.end()) {
-            mRuntimeManager->setHintPtr(Interpreter::KVCACHE_INFO, mBatchMeta.get());
             mModulePool[moduleKey].reset(Module::clone(mModule.get()));
         }
         selectModule = mModulePool[moduleKey];
+
         // get all logits 
         // [1, seqLen, hidden]
         std::vector<Express::VARP> res = selectModule->onForward({hidden_states, attention_mask, position_ids, logitsIndex});
@@ -906,8 +898,12 @@ std::vector<std::vector<int>> Llm::generate(const std::vector<std::vector<int> >
             }
             // print token str
             std::cout<<"ReqId: "<<chunk->reqId[i]<<" | token: "<<token<<" | "<<this->tokenizer_decode(token)<<std::endl;
+            ans[i] += this->tokenizer_decode(token);
         }
         mBatchMeta->sync();
+    }
+    for(int i = 0; i < bs; i++){
+        std::cout<<"ReqId: "<<i<<" | "<<ans[i]<<std::endl;
     }
     return ret;
 }
