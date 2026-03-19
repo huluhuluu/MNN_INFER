@@ -170,15 +170,24 @@ void Llm::setRuntimeHint(std::shared_ptr<Express::Executor::RuntimeManager> &rtg
     rtg->setExternalPath(mConfig->npu_model_dir(), MNN::Interpreter::EXTERNAL_NPU_FILE_DIR);
     rtg->setHint(MNN::Interpreter::DYNAMIC_QUANT_OPTIONS, mConfig->config_.value("dynamic_option", 0));
 
-    // rtg->setHintPtr(Interpreter::KVCACHE_INFO, mMeta.get());
-    // TODO: 
-    rtg->setHintPtr(Interpreter::KVCACHE_INFO, mBatchMeta.get());
     if (backend_type_convert(mConfig->backend_type()) != 0) { // not cpu
         std::string cacheFilePath = tmpPath.length() != 0 ? tmpPath : ".";
         rtg->setCache(cacheFilePath + "/mnn_cachefile.bin");
     }
     rtg->setHint(MNN::Interpreter::CPU_SME2_NEON_DIVISION_RATIO, mConfig->config_.value("cpu_sme2_neon_division_ratio", 41));
     rtg->setHint(MNN::Interpreter::CPU_SME_CORES, mConfig->config_.value("cpu_sme_core_num", 2));
+
+    // Set PackedAttention mode for continuous batching
+    bool packedMode = mConfig->packed_attention();
+    rtg->setHint(MNN::Interpreter::PACKED_ATTENTION_MODE, packedMode);
+    if(packedMode){
+        // Batch mode: use BatchKVMeta for CPUPackedAttention
+        rtg->setHintPtr(Interpreter::KVCACHE_INFO, mBatchMeta.get());
+    }
+    else{
+        // Single request mode: use KVMeta for CPUAttention
+        rtg->setHintPtr(Interpreter::KVCACHE_INFO, mMeta.get());
+    }
 }
 
 void Llm::initRuntime() {
@@ -830,16 +839,13 @@ std::vector<int> Llm::generate(const std::vector<int>& input_ids, int max_tokens
     return mContext->output_tokens;
 }
 
-std::vector<std::vector<int>> Llm::generate(const std::vector<std::vector<int> >& input_ids, int max_new_tokens){
+std::vector<std::vector<int>> Llm::generate(const std::vector<std::vector<int> >& input_ids, std::ostream* os, int max_new_tokens){
     int gen_len = 0, bs = input_ids.size();
-    // TODO: modify to additional thread
     std::vector<std::vector<int>> ret(bs, std::vector<int>{});
-    
-    std::vector<std::string> ans(bs, "");
     // add all requests
     std::vector<int> reqIds= mScheduler->addRequest(input_ids);
     
-    // set batch kvcache
+    // set batch kvcache, but actually works in Llm::setRuntimeHint
     mRuntimeManager->setHintPtr(Interpreter::KVCACHE_INFO, mBatchMeta.get());
 
     // generation loop
@@ -855,6 +861,7 @@ std::vector<std::vector<int>> Llm::generate(const std::vector<std::vector<int> >
             mBatchMeta->setKVCacheInfo(chunk->reqId[i], chunk->calLen[i], 0, nullptr, 0);
             mBatchMeta->setKVMetaInfo(req_id, mConfig->layer_nums(), 0, 0, "", KVMeta::NoChange);
         }
+        
         // TODO: static graph doesn't match
         auto moduleKey = std::make_pair(chunk->culLen, false);
         std::shared_ptr<Module> selectModule = mModule;
@@ -880,30 +887,31 @@ std::vector<std::vector<int>> Llm::generate(const std::vector<std::vector<int> >
             // get logits for request i
             Express::VARP logit = MNN::Express::_Gather(logits, _Scalar(sumLen - 1));
             // sample
-            // Express::VARP sampleTokens = MNN::Express::_ArgMax(logit, 0);
-            // int token = sampleTokens->readMap<int>()[0];
             int token  = this->sample(logit);
 
             int id = chunk->reqId[i];
             mScheduler->update(id, token, is_stop(token));
-            if(mScheduler->isFinished(id)){
-                // get result and clear
-                for(int j = 0; j < bs; j++) {
-                    if(reqIds[j] == id) {
-                        ret[j] = mScheduler->getResult(id);
-                        break;
-                    }
-                }
-                mScheduler->releaseReq(id);
-            }
             // print token str
-            std::cout<<"ReqId: "<<chunk->reqId[i]<<" | token: "<<token<<" | "<<this->tokenizer_decode(token)<<std::endl;
-            ans[i] += this->tokenizer_decode(token);
+            // std::cout<<"ReqId: "<<chunk->reqId[i]<<" | token: "<<token<<" | "<<this->tokenizer_decode(token)<<std::endl;
         }
         mBatchMeta->sync();
     }
-    for(int i = 0; i < bs; i++){
-        std::cout<<"ReqId: "<<i<<" | "<<ans[i]<<std::endl;
+    for(int id: reqIds){
+        // save result
+        for(int j = 0; j < bs; j++) {
+            if(reqIds[j] == id) {
+                ret[j] = mScheduler->getResult(id);
+                break;
+            }
+        }
+        if(os!= nullptr){
+            // print res
+            *os<<"\n=============================\nReqId: "<<id<<"\n";
+            for(int token: mScheduler->getResult(id)){
+                *os<<mTokenizer->decode(token);
+            }
+        }
+        mScheduler->releaseReq(id);
     }
     return ret;
 }
@@ -1003,7 +1011,7 @@ void Llm::response(const std::vector<int>& input_ids, std::ostream* os, const ch
 void Llm::response(const std::vector<std::vector<int>>&  input_ids, std::ostream* os, const char* end_with, int max_new_tokens) {
     if (!end_with) { end_with = "\n"; }
     generate_init(os, end_with);
-    generate(input_ids, max_new_tokens);
+    generate(input_ids, os, max_new_tokens);
 }
 
 void Llm::response(MNN::Express::VARP input_embeds, std::ostream* os, const char* end_with, int max_new_tokens) {
@@ -1032,6 +1040,7 @@ void Llm::response(const ChatMessages& chat_prompts, std::ostream* os, const cha
 
 void Llm::response(const std::vector<ChatMessages>& chat_prompts, std::ostream* os, const char* end_with, int max_new_tokens) {
     if (chat_prompts.empty()) {
+        MNN_PRINT("Empty chat prompts\n");
         return;
     }
     std::vector<std::vector<int> > input_ids;
@@ -1043,7 +1052,19 @@ void Llm::response(const std::vector<ChatMessages>& chat_prompts, std::ostream* 
         std::vector<int> input_id = tokenizer_encode(prompt);
         input_ids.push_back(input_id);
     }
-    generate(input_ids);
+    
+    
+    AUTOTIME
+    // check packed mode
+    if(mConfig->packed_attention()){
+        generate(input_ids, os, max_new_tokens);
+    }
+    else{
+        for(auto input: input_ids){
+            generate_init(os, end_with);
+            generate(input, max_new_tokens);
+        }
+    }
 }
 
 

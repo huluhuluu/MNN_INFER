@@ -490,6 +490,9 @@ public:
         return config_.value("attention_fused", true);
     }
 
+    bool packed_attention() const {
+        return config_.value("packed_attention_mode", false);
+    }
     std::string bos() const {
         return config_.value("bos", "");
     }

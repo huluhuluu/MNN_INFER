@@ -1,5 +1,5 @@
 //
-//  CPUAttention.hpp
+//  CPUPackedAttention.hpp
 //  MNN
 //
 //  Created by MNN on 2024/03/19.
@@ -8,8 +8,8 @@
 
 #ifdef MNN_SUPPORT_TRANSFORMER_FUSE
 
-#ifndef CPUATTENTION_HPP
-#define CPUATTENTION_HPP
+#ifndef CPUPACKEDATTENTION_HPP
+#define CPUPACKEDATTENTION_HPP
 
 #include <functional>
 #include "core/Execution.hpp"
@@ -19,10 +19,10 @@
 
 namespace MNN {
 
-class CPUAttention : public Execution {
+class CPUPackedAttention : public Execution {
 public:
-    CPUAttention(Backend *backend, bool kv_cache);
-    virtual ~CPUAttention();
+    CPUPackedAttention(Backend *backend, bool kv_cache);
+    virtual ~CPUPackedAttention();
     virtual ErrorCode onResize(const std::vector<Tensor *> &inputs, const std::vector<Tensor *> &outputs) override;
     virtual ErrorCode onExecute(const std::vector<Tensor *> &inputs, const std::vector<Tensor *> &outputs) override;
     virtual bool onClone(Backend* bn, const Op* op, Execution** dst) override;
@@ -34,11 +34,13 @@ private:
     int eP, lP, hP, mPack; // float matmul packing
     int eP8, lP8, hP8;    // GemmInt8 packing
     int mNumHead, mKvNumHead, mHeadDim;
-    KVMeta* mMeta;
+    BatchKVMeta* mBatchMeta = nullptr;
 
     // common
     std::shared_ptr<Tensor> mPackQ, mPackQKV, mRunningMax, mRunningSum, mTempQKBlock, mTempOut, mExpfDiffMax;
-    std::shared_ptr<CPUKVCacheManager> mKVCacheManager = nullptr;
+    Backend * mBackend;
+    MNN::KVCacheManager::KVCacheConfig kvconfig;
+    std::shared_ptr<BatchKVCacheManager> mKVCacheManagers;
     bool mUseFlashAttention = true;
 
     // quant Query/Key/Value
@@ -58,6 +60,6 @@ private:
 
 } // namespace MNN
 
-#endif // CPUATTENTION_HPP
+#endif // CPUPACKEDATTENTION_HPP
 
 #endif // MNN_SUPPORT_TRANSFORMER_FUSE

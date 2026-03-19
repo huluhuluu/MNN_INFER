@@ -264,7 +264,12 @@ public:
         CPU_SME2_NEON_DIVISION_RATIO = 17,
 
         // Set SME cores, default is 2, if supports sme
-        CPU_SME_CORES = 18
+        CPU_SME_CORES = 18,
+
+        // Enable PackedAttention mode for continuous batching
+        // 0: use CPUAttention (single request mode)
+        // 1: use CPUPackedAttention (batch mode)
+        PACKED_ATTENTION_MODE = 19
     };
 
     enum ExternalPathType {

@@ -121,6 +121,9 @@ void Session::ModeGroup::setHint(Interpreter::HintMode hint, int value) {
         case Interpreter::CPU_SME_CORES:
             runtimeHint.smeCores = value;
             break;
+        case Interpreter::PACKED_ATTENTION_MODE:
+            runtimeHint.packedAttentionMode = value;
+            break;
         default:
             break;
     }

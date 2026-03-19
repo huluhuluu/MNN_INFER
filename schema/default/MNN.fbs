@@ -207,6 +207,7 @@ enum OpType : int {
     If    = 601,
     LayerNorm = 603,
     GridSample = 604,
+    PackedAttention = 605,
 }
 
 table Plugin {
@@ -228,6 +229,10 @@ table StringVec {
 }
 
 table AttentionParam {
+    kv_cache: bool = true;
+}
+
+table PackedAttentionParam {
     kv_cache: bool = true;
 }
 
@@ -421,6 +426,7 @@ union OpParameter {
     FmhaV2Param,
     FmhcaParam,
     AttentionParam,
+    PackedAttentionParam,
     StftParam
 }
 

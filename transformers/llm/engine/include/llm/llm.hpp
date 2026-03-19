@@ -164,7 +164,7 @@ public:
     void response(const std::vector<std::vector<int>>& input_ids, std::ostream* os = &std::cout, const char* end_with = nullptr, int max_new_tokens = -1);
     void response(const std::vector<ChatMessages>& chat_prompts, std::ostream* os = &std::cout, const char* end_with = nullptr, int max_new_tokens = -1);
     
-    std::vector<std::vector<int>> generate(const std::vector<std::vector<int> >& input_ids, int max_new_tokens = -1);
+    std::vector<std::vector<int>> generate(const std::vector<std::vector<int> >& input_ids, std::ostream* os= &std::cout, int max_new_tokens = -1);
 protected:
     void initRuntime();
     void setRuntimeHint(std::shared_ptr<Express::Executor::RuntimeManager> &rtg);
