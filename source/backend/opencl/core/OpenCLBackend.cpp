@@ -250,8 +250,8 @@ void CLRuntime::onClearProfileData() {
     Runtime::onClearProfileData();
 }
 
-void CLRuntime::profileStart(const std::vector<MNN::Tensor*>& tensors, const MNN::OperatorInfo* info) const {
-    mOpenCLRuntime->profileStart(tensors, info);
+void CLRuntime::profileBegin(const std::vector<MNN::Tensor*>& tensors, const MNN::OperatorInfo* info) const {
+    mOpenCLRuntime->profileBegin(tensors, info);
 }
 
 void CLRuntime::profileEnd(const std::vector<MNN::Tensor*>& tensors, const MNN::OperatorInfo* info) const {

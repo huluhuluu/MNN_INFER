@@ -29,7 +29,7 @@ struct OpProfileInfo {
     std::string type;       // Op type
     float timeMs = 0.0f;    // Time in milliseconds
     int callCount = 0;      // Number of calls
-
+    
     OpProfileInfo() = default;  // Default constructor required by std::map::operator[]
     OpProfileInfo(std::string name, std::string type): name(name), type(type){};
 };
@@ -412,7 +412,7 @@ public:
      * @brief Mark the start of an op for profiling (for backends that need batch processing)
      * Called before op execution to record current position
      */
-    virtual void profileStart(const std::vector<MNN::Tensor*>& tensors, const MNN::OperatorInfo* info) const {
+    virtual void profileBegin(const std::vector<MNN::Tensor*>& tensors, const MNN::OperatorInfo* info) const {
         // Default: do nothing, CPU backend uses recordOpProfileTime directly
     }
     
@@ -448,6 +448,7 @@ public:
         }
         // static op info
         OpProfileInfo& info = mProfileInfo[opName];
+        info.type = opType;
         info.timeMs += (timeUs / 1000.0f);
         info.callCount += 1;
     }

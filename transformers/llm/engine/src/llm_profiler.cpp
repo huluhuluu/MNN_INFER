@@ -119,19 +119,17 @@ void LLMOpProfiler::onPrefillEnd(int promptTokenCount) {
               promptTokenCount==0 ? 0 : mPrefillProfile.tokenTotalTime  / promptTokenCount);
 }
 
-void LLMOpProfiler::onDecodeTokenStart(int tokenId) {
+void LLMOpProfiler::onDecodeTokenBegin() {
     if (!mEnabled) return;
-    mCurrentDecodeToken = tokenId;
     mTimer.reset();  // Use separate timer for token-level timing
 }
 
-void LLMOpProfiler::onDecodeTokenEnd(int tokenId) {
-    if (!mEnabled) return;
+void LLMOpProfiler::onDecodeTokenEnd(int count) {
+    if (!mEnabled || count <= 0) return;
     float tokenTime = mTimer.durationInUs() / 1000.0f;  // us -> ms
     mDecodeTokenTimes.push_back(tokenTime);
-    mDecodeProfile.tokenCount++;
+    mDecodeProfile.tokenCount+=count;
 }
-
 void LLMOpProfiler::onDecodePhaseStart(){
     if (!mEnabled) return;
     mInPrefill = false;
@@ -199,7 +197,7 @@ bool LLMOpProfiler::beforeOp(const std::vector<MNN::Tensor*>& tensors, const MNN
         // CPU backend: timer already started, timing recorded in afterOp
     } else if (actualRuntime) {
         // GPU/NPU backends: mark op start for kernel tracking
-        actualRuntime->profileStart(tensors, info);
+        actualRuntime->profileBegin(tensors, info);
     }
     
     return true;
@@ -586,7 +584,6 @@ void LLMOpProfiler::reset() {
     mDecodeProfile.reset();
     mDecodeTokenTimes.clear();
     mInPrefill = true;
-    mCurrentDecodeToken = -1;
 }
 
 } // namespace Transformer

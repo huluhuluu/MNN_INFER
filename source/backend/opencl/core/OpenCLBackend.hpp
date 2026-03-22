@@ -68,7 +68,7 @@ public:
     // ========== Profile Data Interface ==========
     std::map<std::string, OpProfileInfo> onGetProfileData() const override;
     void onClearProfileData() override;
-    void profileStart(const std::vector<MNN::Tensor*>& tensors, const MNN::OperatorInfo* info) const override;
+    void profileBegin(const std::vector<MNN::Tensor*>& tensors, const MNN::OperatorInfo* info) const override;
     void profileEnd(const std::vector<MNN::Tensor*>& tensors, const MNN::OperatorInfo* info) const override;
     // ========== End Profile Data Interface ==========
 

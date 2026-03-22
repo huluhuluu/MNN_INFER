@@ -318,6 +318,8 @@ bool Llm::load() {
     
     // Initialize profiler
     mProfiler = std::make_shared<LLMOpProfiler>();
+    mDraftProfiler = std::make_shared<LLMOpProfiler>();  // For Eagle draft model
+    mActiveProfiler = mProfiler.get();  // Default to target model profiler
     
     // create generation strategy
     mGenerationStrategy = GenerationStrategyFactory::create(this, mContext, mConfig, mInSpec);
@@ -920,6 +922,10 @@ std::vector<int> Llm::generate(MNN::Express::VARP input_embeds, int max_tokens) 
         // ========== Profiler: Decode Phase Start ==========
         if (mProfiler && mProfiler->isEnabled()) {
             mContext->current_stage = LlmStage::Decode;
+            mProfiler->onDecodePhaseStart();
+            if(mDraftProfiler != nullptr){
+                mDraftProfiler->onDecodePhaseStart();
+            }
         }
         // ========== End Profiler: Decode Phase Start ==========
 
@@ -929,9 +935,13 @@ std::vector<int> Llm::generate(MNN::Express::VARP input_embeds, int max_tokens) 
         // ========== Profiler: Decode Phase End ==========
         if (mProfiler && mProfiler->isEnabled()) {    
             printf("Decode time: %ld|%ld us\n", mContext->decode_us, _t.durationInUs());
-            collectBackendProfileData();
+            setActiveProfiler(mProfiler.get());
             mProfiler->onDecodePhaseEnd();
             mContext->current_stage = LlmStage::Idle;
+            if(mDraftProfiler != nullptr){
+                setActiveProfiler(mDraftProfiler.get());
+                mDraftProfiler->onDecodePhaseEnd();
+            }
         }
         // ========== End Profiler: Decode Phase End ==========
     }
@@ -1224,27 +1234,33 @@ void Llm::enableProfiler(bool enabled) {
 }
 
 void Llm::printProfilerStats() const {
+    // Print target model profiler
     if (mProfiler) {
+        MNN_PRINT("\n========== Target Model Profiler ==========\n");
         mProfiler->printStats();
     } else {
-        MNN_PRINT("[LLM] Profiler not initialized\n");
+        MNN_PRINT("[LLM] Target profiler not initialized\n");
+    }
+    
+    // Print draft model profiler (for Eagle speculative decoding)
+    if (mDraftProfiler && mDraftProfiler->getDecodeProfile().tokenCount > 0) {
+        MNN_PRINT("\n========== Draft Model Profiler (Eagle) ==========\n");
+        mDraftProfiler->printStats();
     }
 }
 
 void Llm::printOpInfo() const{
     if (mProfiler) {
+        MNN_PRINT("\n----- Target Model -----\n");
         mProfiler->printOpInfo();
     } else {
-        MNN_PRINT("[LLM] Profiler not initialized\n");
+        MNN_PRINT("[LLM] Target profiler not initialized\n");
     }
-}
-
-bool Llm::exportProfilerJSON(const std::string& filepath) const {
-    if (mProfiler) {
-        return mProfiler->exportJSON(filepath);
+    
+    if (mDraftProfiler && mDraftProfiler->getDecodeProfile().tokenCount > 0) {
+        MNN_PRINT("\n----- Draft Model (Eagle) -----\n");
+        mDraftProfiler->printOpInfo();
     }
-    MNN_ERROR("[LLM] Profiler not initialized\n");
-    return false;
 }
 
 LlmStage Llm::getCurrentStage() const {
@@ -1258,9 +1274,9 @@ void Llm::setProfilerSpecialOps(const std::vector<std::string>& specialOps) {
 }
 
 void Llm::setupProfilerCallback() {
-    if (!mProfiler || !mProfiler->isEnabled()) return;
+    if (!mActiveProfiler || !mActiveProfiler->isEnabled()) return;
     
-    auto profiler = mProfiler;
+    auto profiler = mActiveProfiler;
     
     // Setup callback for CPU backend timing
     MNN::TensorCallBackWithInfo beforeOp = [profiler](
@@ -1287,9 +1303,13 @@ void Llm::clearProfilerInfo() {
     if (mProfiler) {
         mProfiler->reset();
     }
+    if (mDraftProfiler) {
+        mDraftProfiler->reset();
+    }
+    mActiveProfiler = mProfiler.get();
 }
 void Llm::collectBackendProfileData() {
-    if (!mProfiler || !mProfiler->isEnabled()) return;
+    if (!mActiveProfiler || !mActiveProfiler->isEnabled()) return;
     
     auto executor = Express::ExecutorScope::Current();
     if (!executor) return;
@@ -1354,7 +1374,7 @@ void Llm::collectBackendProfileData() {
         }
         
         // Collect into profiler
-        mProfiler->collectBackendProfile(data);
+        mActiveProfiler->collectBackendProfile(data);
         
         // Clear backend profile data for next phase
         runtime->onClearProfileData();

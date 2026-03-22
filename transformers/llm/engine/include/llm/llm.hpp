@@ -170,15 +170,23 @@ public:
     void printProfilerStats() const;
     // Print op info
     void printOpInfo() const;
-    // TODO: 
-    // Export profiler results to JSON
-    bool exportProfilerJSON(const std::string& filepath) const;
     // Get current stage for profiling
     LlmStage getCurrentStage() const;
     // Set special ops for profiler (separate timing)
     void setProfilerSpecialOps(const std::vector<std::string>& specialOps);
     // clear profiler info
     void clearProfilerInfo();
+    // Get profiler instance (for speculative decoding)
+    LLMOpProfiler* getProfiler() { return mProfiler.get(); }
+    // Get draft profiler instance (for Eagle)
+    LLMOpProfiler* getDraftProfiler() { return mDraftProfiler.get(); }
+    // Set active profiler for current execution (switch between target/draft)
+    void setActiveProfiler(LLMOpProfiler* profiler) { 
+        collectBackendProfileData();
+        mActiveProfiler = profiler; 
+    }
+    // Get active profiler
+    LLMOpProfiler* getActiveProfiler() { return mActiveProfiler; }
     // ========== End Profiler Interface ==========
     
     // Waveform generation
@@ -215,7 +223,6 @@ protected:
     Express::VARP logitsAllIdx, logitsLastIdx;
     int mSeqLenIndex = 0;
 protected:
-    friend class Generation;
     friend class ArGeneration;
     friend class LookaheadGeneration;
     friend class MtpGeneration;
@@ -228,6 +235,8 @@ private:
     void updateContext(int seq_len, int gen_len);
     // Profiler
     std::shared_ptr<LLMOpProfiler> mProfiler;
+    std::shared_ptr<LLMOpProfiler> mDraftProfiler;  // For Eagle draft model
+    LLMOpProfiler* mActiveProfiler = nullptr;       // Current active profiler
 
 private:
     bool mInSpec = false;

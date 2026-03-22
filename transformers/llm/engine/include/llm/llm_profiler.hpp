@@ -140,13 +140,13 @@ public:
     /**
      * Called when decode phase starts (per token)
      */
-    void onDecodeTokenStart(int tokenId);
+    void onDecodeTokenBegin();
     
     /**
      * Called when decode phase ends (per token)
      */
-    void onDecodeTokenEnd(int tokenId);
-    
+    void onDecodeTokenEnd(int count = 1);
+
     
     /**
      * Called when entire decode phase start
@@ -225,7 +225,6 @@ private:
     Config mConfig;
     bool mEnabled = true;
     bool mInPrefill = true;
-    int mCurrentDecodeToken = -1;
     
     // Profile data for each phase
     PhaseProfile mPrefillProfile;

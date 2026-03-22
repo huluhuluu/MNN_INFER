@@ -176,7 +176,7 @@ public:
     unsigned int getTotalKernelTime() const { return mKernelTime; }
     
     // Mark op boundaries - record execution range
-    void profileStart(const std::vector<MNN::Tensor*>& tensors, const MNN::OperatorInfo* info) {
+    void profileBegin(const std::vector<MNN::Tensor*>& tensors, const MNN::OperatorInfo* info) {
         #ifdef ENABLE_OPENCL_TIME_PROFILER
             // Create an entry recording this op execution with its kernel event
             OpProfileEntry entry;

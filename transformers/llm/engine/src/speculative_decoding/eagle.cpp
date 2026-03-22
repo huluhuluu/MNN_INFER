@@ -7,6 +7,7 @@
 
 #include "generate.hpp"
 #include "tokentree.hpp"
+#include "llm/llm_profiler.hpp"
 #include <numeric>
 #include <algorithm>
 
@@ -319,7 +320,17 @@ void EagleGeneration::generate(GenerationParams& param) {
     inputEmbeds     = _Concat({pre_embeds[1], cur_embed}, 0);
     // eagle generate
     MNN::Timer _gt;
+    // get profiler
+    LLMOpProfiler* draftProfiler = mLlm->getDraftProfiler();
+    LLMOpProfiler* targetProfiler = mLlm->getProfiler();
+
+    // Switch to draft profiler
+    mLlm->setActiveProfiler(draftProfiler);
+    mLlm->setupProfilerCallback();
+    draftProfiler->onDecodeTokenBegin();
     auto draftInfo  = topkGenerate(inputIds, hiddenStates, inputEmbeds);
+    draftProfiler->onDecodeTokenEnd();
+
     eagleGenerateTime += _gt.durationInUs();
     std::vector<int> accpetLens;
     auto newTokens = 0, steps = 0;
@@ -329,6 +340,10 @@ void EagleGeneration::generate(GenerationParams& param) {
         }
         steps++;
         MNN::Timer _dt;
+        // Switch to target profiler
+        mLlm->setActiveProfiler(targetProfiler);
+        mLlm->setupProfilerCallback();
+        targetProfiler->onDecodeTokenBegin();
         auto decodingInfo = treeDecoding(draftInfo);
         for (auto o : decodingInfo) {
             if(nullptr == o->readMap<float>()) {
@@ -342,6 +357,10 @@ void EagleGeneration::generate(GenerationParams& param) {
         
         treeDecodingTime += _dt.durationInUs();
         auto acceptInfo = evaluatePosterior(draftInfo, decodingInfo[0]);
+        
+        // Record accepted tokens
+        targetProfiler->onDecodeTokenEnd(acceptInfo.acceptTokens.size());
+
         newTokens += acceptInfo.acceptTokens.size();
         accpetLens.push_back(acceptInfo.acceptTokens.size());
         {
@@ -357,7 +376,12 @@ void EagleGeneration::generate(GenerationParams& param) {
             break;
         }
         MNN::Timer _gt;
+        // Switch to draft profiler
+        mLlm->setActiveProfiler(draftProfiler);
+        mLlm->setupProfilerCallback();
+        draftProfiler->onDecodeTokenBegin();
         draftInfo = updateDraft(acceptInfo, decodingInfo[1]);
+        draftProfiler->onDecodeTokenEnd();
         eagleGenerateTime += _gt.durationInUs();
     }
     mContext->decode_us += _t.durationInUs();

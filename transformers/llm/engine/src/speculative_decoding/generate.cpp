@@ -43,7 +43,7 @@ ArGeneration::ArGeneration(Llm* llm, std::shared_ptr<LlmContext> context, std::s
 void ArGeneration::generate(GenerationParams& param) {
     int max_token = param.max_new_tokens;
     int len = 0;
-    auto profiler = mLlm->mProfiler;
+    auto profiler = mLlm->getProfiler();
     const bool profiling = profiler && profiler->isEnabled();
     while (len < max_token) {
         if(mContext->status == LlmStatus::USER_CANCEL) {
@@ -62,7 +62,7 @@ void ArGeneration::generate(GenerationParams& param) {
             }
             if(len != 0 && profiling){
                 // Profiler: Decode token end
-                profiler->onDecodeTokenEnd(mContext->current_token);
+                profiler->onDecodeTokenEnd();
             }
             break;
         }
@@ -76,13 +76,13 @@ void ArGeneration::generate(GenerationParams& param) {
         }
         if(len != 0 && profiling){
             // Profiler: Decode token end
-            profiler->onDecodeTokenEnd(mContext->current_token);
+            profiler->onDecodeTokenEnd();
         }
         
         if(len + 1 >= max_token){break;}
         // Profiler: Decode token start
         if (profiling) {
-            profiler->onDecodeTokenStart(mContext->current_token);
+            profiler->onDecodeTokenBegin();
         }
 
         // Compute Next Logits
