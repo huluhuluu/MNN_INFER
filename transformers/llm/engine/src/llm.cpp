@@ -1236,29 +1236,29 @@ void Llm::enableProfiler(bool enabled) {
 void Llm::printProfilerStats() const {
     // Print target model profiler
     if (mProfiler) {
-        MNN_PRINT("\n========== Target Model Profiler ==========\n");
+        printf("\n========== Target Model Profiler ==========\n");
         mProfiler->printStats();
     } else {
-        MNN_PRINT("[LLM] Target profiler not initialized\n");
+        printf("[LLM] Target profiler not initialized\n");
     }
     
     // Print draft model profiler (for Eagle speculative decoding)
     if (mDraftProfiler && mDraftProfiler->getDecodeProfile().tokenCount > 0) {
-        MNN_PRINT("\n========== Draft Model Profiler (Eagle) ==========\n");
+        printf("\n========== Draft Model Profiler (Eagle) ==========\n");
         mDraftProfiler->printStats();
     }
 }
 
 void Llm::printOpInfo() const{
     if (mProfiler) {
-        MNN_PRINT("\n----- Target Model -----\n");
+        printf("\n----- Target Model -----\n");
         mProfiler->printOpInfo();
     } else {
-        MNN_PRINT("[LLM] Target profiler not initialized\n");
+        printf("[LLM] Target profiler not initialized\n");
     }
     
     if (mDraftProfiler && mDraftProfiler->getDecodeProfile().tokenCount > 0) {
-        MNN_PRINT("\n----- Draft Model (Eagle) -----\n");
+        printf("\n----- Draft Model (Eagle) -----\n");
         mDraftProfiler->printOpInfo();
     }
 }

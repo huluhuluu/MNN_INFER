@@ -20,6 +20,37 @@
 namespace MNN {
 namespace Transformer {
 
+// ========== PhaseProfile Methods ==========
+
+std::map<std::string, OpRecord> PhaseProfile::getOpTypeStats() const {
+    std::map<std::string, OpRecord> stats;
+    
+    for (const auto& pair : opRecords) {
+        const OpRecord& record = pair.second;
+        
+        // For special ops, use opName as key (treat as unique type)
+        std::string key = record.isSpecial ? 
+            (record.name + "@" + record.backend) : 
+            (record.type + "@" + record.backend);
+        
+        if (stats.find(key) == stats.end()) {
+            stats[key] = OpRecord();
+            stats[key].name = record.type;  // Use type as name for aggregated record
+            stats[key].type = record.type;
+            stats[key].backend = record.backend;
+            stats[key].isSpecial = record.isSpecial;
+        }
+        
+        OpRecord& s = stats[key];
+        s.totalTime += record.totalTime;
+        s.callCount += record.callCount;
+    }
+    
+    return stats;
+}
+
+// ========== LLMOpProfiler Methods ==========
+
 LLMOpProfiler::LLMOpProfiler() {
 }
 
@@ -53,15 +84,6 @@ bool LLMOpProfiler::matchPattern(const std::string& opName, const std::string& p
     
     // Check if pattern contains wildcard
     if (pattern.find('*') != std::string::npos) {
-        std::string regexPattern;
-        for (char c : pattern) {
-            if (c == '*') {
-                regexPattern += ".*";
-            } else {
-                regexPattern += "\\" + std::string(1, c);
-            }
-        }
-        // Use simple wildcard matching instead of regex to avoid exceptions
         // Convert wildcard pattern to prefix/suffix matching
         bool prefixMatch = false;
         bool suffixMatch = false;
@@ -93,6 +115,32 @@ bool LLMOpProfiler::matchPattern(const std::string& opName, const std::string& p
     }
     
     return false;
+}
+
+std::string LLMOpProfiler::forwardTypeToString(MNNForwardType type) {
+    switch (type) {
+        case MNN_FORWARD_CPU: return "CPU";
+        case MNN_FORWARD_CPU_EXTENSION: return "CPU";
+        case MNN_FORWARD_METAL: return "Metal";
+        case MNN_FORWARD_CUDA: return "CUDA";
+        case MNN_FORWARD_OPENCL: return "OpenCL";
+        case MNN_FORWARD_OPENGL: return "OpenGL";
+        case MNN_FORWARD_VULKAN: return "Vulkan";
+        case MNN_FORWARD_NN: return "QNN";
+        default: return "Other";
+    }
+}
+
+std::string LLMOpProfiler::shapeToString(const Express::INTS& shape) {
+    if (shape.empty()) return "[]";
+    std::ostringstream oss;
+    oss << "[";
+    for (size_t i = 0; i < shape.size(); ++i) {
+        if (i > 0) oss << ", ";
+        oss << shape[i];
+    }
+    oss << "]";
+    return oss.str();
 }
 
 // ========== Phase Control ==========
@@ -130,13 +178,15 @@ void LLMOpProfiler::onDecodeTokenEnd(int count) {
     mDecodeTokenTimes.push_back(tokenTime);
     mDecodeProfile.tokenCount+=count;
 }
-void LLMOpProfiler::onDecodePhaseStart(){
+
+void LLMOpProfiler::onDecodePhaseStart() {
     if (!mEnabled) return;
     mInPrefill = false;
     mDecodeProfile.reset();
     mDecodeTokenTimes.clear();
     printf("[LLM Profiler] Decode phase started\n");
 }
+
 void LLMOpProfiler::onDecodePhaseEnd() {
     if (!mEnabled) return;
     if (!mDecodeTokenTimes.empty()) {
@@ -158,8 +208,6 @@ void LLMOpProfiler::onDecodePhaseEnd() {
 bool LLMOpProfiler::beforeOp(const std::vector<MNN::Tensor*>& tensors, const MNN::OperatorInfo* info) {
     if (!mEnabled) return true;
     
-    mCurrentOpName = info->name();
-    mCurrentOpType = info->type();
     mOpTimer.reset();
     
     // Get actual backend from tensor (set during _allocMemory based on execution->backend())
@@ -174,6 +222,7 @@ bool LLMOpProfiler::beforeOp(const std::vector<MNN::Tensor*>& tensors, const MNN
             }
         }
     }
+    std::string backendName = forwardTypeToString(actualBackend);
     
     // Get Runtime for the actual backend
     auto executor = MNN::Express::ExecutorScope::Current();
@@ -190,14 +239,31 @@ bool LLMOpProfiler::beforeOp(const std::vector<MNN::Tensor*>& tensors, const MNN
     }
 
     // Backend-specific handling
-    // Note: onMarkOpStart() is a virtual function in Runtime base class
-    // - CPU Runtime: default implementation does nothing
-    // - OpenCL Runtime: overridden to mark kernel entries
     if (actualBackend == MNN_FORWARD_CPU || actualBackend == MNN_FORWARD_CPU_EXTENSION) {
         // CPU backend: timer already started, timing recorded in afterOp
     } else if (actualRuntime) {
         // GPU/NPU backends: mark op start for kernel tracking
         actualRuntime->profileBegin(tensors, info);
+    }
+    
+    // Record input shapes to opRecords (only if not already recorded)
+    PhaseProfile& profile = mInPrefill ? mPrefillProfile : mDecodeProfile;
+    std::string opKey = info->name() + "@" + backendName;
+    
+    // Create op record if not exists
+    if (profile.opRecords.find(opKey) == profile.opRecords.end()) {
+        profile.opRecords[opKey] = OpRecord();
+        profile.opRecords[opKey].name = info->name();
+        profile.opRecords[opKey].type = info->type();
+        profile.opRecords[opKey].backend = backendName;
+        profile.opRecords[opKey].isSpecial = isSpecialOp(info->name());
+        
+        // Store input shapes (only once per phase)
+        for (auto* tensor : tensors) {
+            if (tensor) {
+                profile.opRecords[opKey].inputShapes.push_back(tensor->shape());
+            }
+        }
     }
     
     return true;
@@ -206,8 +272,7 @@ bool LLMOpProfiler::beforeOp(const std::vector<MNN::Tensor*>& tensors, const MNN
 void LLMOpProfiler::afterOp(const std::vector<MNN::Tensor*>& tensors, const MNN::OperatorInfo* info) {
     if (!mEnabled) return;
     
-    // Get actual backend from tensor (set during _allocMemory based on execution->backend())
-    // This correctly handles fallback scenarios where OpenCL ops fall back to CPU
+    // Get actual backend from tensor
     MNNForwardType actualBackend = MNN_FORWARD_CPU;
     if (!tensors.empty()) {
         auto describe = TensorUtils::getDescribeOrigin(tensors[0]);
@@ -218,6 +283,7 @@ void LLMOpProfiler::afterOp(const std::vector<MNN::Tensor*>& tensors, const MNN:
             }
         }
     }
+    std::string backendName = forwardTypeToString(actualBackend);
 
     // Get Runtime for the actual backend
     auto executor = MNN::Express::ExecutorScope::Current();
@@ -234,12 +300,8 @@ void LLMOpProfiler::afterOp(const std::vector<MNN::Tensor*>& tensors, const MNN:
     }
     
     // Backend-specific handling
-    // Note: onMarkOpEnd() is a virtual function in Runtime base class
-    // - CPU Runtime: default implementation does nothing
-    // - OpenCL Runtime: overridden to set op name/type for kernel entries
     if (actualBackend == MNN_FORWARD_CPU || actualBackend == MNN_FORWARD_CPU_EXTENSION) {
         // CPU backend: record synchronous timing
-        // recordOpProfileTime expects time in microseconds (us)
         uint64_t opTimeUs = mOpTimer.durationInUs();
         if (actualRuntime) {
             actualRuntime->recordOpProfileTime(info->name(), info->type(), opTimeUs);
@@ -247,6 +309,20 @@ void LLMOpProfiler::afterOp(const std::vector<MNN::Tensor*>& tensors, const MNN:
     } else if (actualRuntime) {
         // GPU/NPU backends: mark op end for kernel tracking
         actualRuntime->profileEnd(tensors, info);
+    }
+    
+    // Get op record (created in beforeOp) and record output shapes (only once)
+    PhaseProfile& profile = mInPrefill ? mPrefillProfile : mDecodeProfile;
+    std::string opKey = info->name() + "@" + backendName;
+    OpRecord& record = profile.opRecords[opKey];
+    
+    // Store output shapes (only once per phase, if not already recorded)
+    if (record.outputShapes.empty()) {
+        for (auto* tensor : tensors) {
+            if (tensor) {
+                record.outputShapes.push_back(tensor->shape());
+            }
+        }
     }
 }
 
@@ -257,16 +333,10 @@ void LLMOpProfiler::collectBackendProfile(const BackendProfileData& data) {
     
     PhaseProfile& profile = mInPrefill ? mPrefillProfile : mDecodeProfile;
     
-    // Get backend name (the actual backend this data comes from)
+    // Get backend name
     std::string backendName = data.backendName;
     if (backendName.empty()) {
-        switch (data.backendType) {
-            case MNN_FORWARD_CPU: backendName = "CPU"; break;
-            case MNN_FORWARD_CPU_EXTENSION: backendName = "CPU"; break;
-            case MNN_FORWARD_OPENCL: backendName = "OpenCL"; break;
-            case MNN_FORWARD_NN: backendName = "QNN"; break;
-            default: backendName = "Other"; break;
-        }
+        backendName = forwardTypeToString(data.backendType);
     }
     
     for (const auto& opInfoPair : data.opInfos) {
@@ -274,31 +344,26 @@ void LLMOpProfiler::collectBackendProfile(const BackendProfileData& data) {
         const BackendOpInfo& opInfo = opInfoPair.second;
         float timeMs = opInfo.timeMs;
         std::string opType = opInfo.type.empty() ? "Unknown" : opInfo.type;
-        bool special = isSpecialOp(opName);
         
-        // For special ops, use opName as type (treat as unique type)
-        if (special) {
-            opType = opName;  // Special ops become their own type
+        // Key: opName@backend
+        std::string opKey = opName + "@" + backendName;
+        
+        // Create or update op record
+        if (profile.opRecords.find(opKey) == profile.opRecords.end()) {
+            profile.opRecords[opKey] = OpRecord();
+            profile.opRecords[opKey].name = opName;
+            profile.opRecords[opKey].type = opType;
+            profile.opRecords[opKey].backend = backendName;
+            profile.opRecords[opKey].isSpecial = isSpecialOp(opName);
         }
         
-        // Use "opType@backend" as key for type-based grouping
-        std::string typeKey = opType + "@" + backendName;
-        
-        // Store in opTypeRecords (keyed by type@backend)
-        if (profile.opTypeRecords.find(typeKey) == profile.opTypeRecords.end()) {
-            profile.opTypeRecords[typeKey] = OpRecord();
-        }
-        auto& typeRecord = profile.opTypeRecords[typeKey];
-        typeRecord.name = opType;
-        typeRecord.type = opType;
-        typeRecord.backend = backendName;
-        typeRecord.totalTime += timeMs;
-        typeRecord.callCount += opInfo.callCount;
-        typeRecord.isSpecial = special;
+        OpRecord& record = profile.opRecords[opKey];
+        record.totalTime += timeMs;
+        record.callCount += opInfo.callCount;
+        // Note: shapes are not available from backend profile data
         
         // Track per-backend total times
         profile.backendTotalTimes[backendName] += timeMs;
-        
         profile.totalTime += timeMs;
     }
 }
@@ -367,14 +432,17 @@ void LLMOpProfiler::printStats() const {
         }
         printf("\n");
         
+        // Get aggregated type stats
+        auto typeStats = profile.getOpTypeStats();
+        
         // Separate special ops and normal ops by type
         std::vector<std::pair<std::string, OpRecord>> normalTypes;
         std::vector<std::pair<std::string, OpRecord>> specialTypes;
-        for (const auto& keyRecordPair : profile.opTypeRecords) {
-            if (keyRecordPair.second.isSpecial) {
-                specialTypes.push_back(keyRecordPair);
+        for (const auto& pair : typeStats) {
+            if (pair.second.isSpecial) {
+                specialTypes.push_back(pair);
             } else {
-                normalTypes.push_back(keyRecordPair);
+                normalTypes.push_back(pair);
             }
         }
         
@@ -394,13 +462,13 @@ void LLMOpProfiler::printStats() const {
                   "OpType", "Backend", "Time(ms)", "Avg(ms)", "Calls", "Percent");
         printf("--------------------------------------------------------------------------\n");
         
-        for (const auto& keyRecordPair : normalTypes) {
-            const OpRecord& record = keyRecordPair.second;
-            float percent = profile.totalTime > 0 ? (record.totalTime / profile.totalTime * 100.0f) : 0.0f;
-            const char* backend = record.backend.empty() ? "-" : record.backend.c_str();
-            float avg = record.avgTime();
+        for (const auto& pair : normalTypes) {
+            const OpRecord& stats = pair.second;
+            float percent = profile.totalTime > 0 ? (stats.totalTime / profile.totalTime * 100.0f) : 0.0f;
+            const char* backend = stats.backend.empty() ? "-" : stats.backend.c_str();
+            float avg = stats.avgTime();
             printf("%-24s %8s %12.2f %12.2f %10d %7.1f%%\n", 
-                      record.name.c_str(), backend, record.totalTime, avg, record.callCount, percent);
+                      stats.type.c_str(), backend, stats.totalTime, avg, stats.callCount, percent);
         }
         
         // Print special OpTypes separately
@@ -410,13 +478,13 @@ void LLMOpProfiler::printStats() const {
                       "OpType", "Backend", "Time(ms)", "Avg(ms)", "Calls", "Percent");
             printf("--------------------------------------------------------------------------\n");
             
-            for (const auto& keyRecordPair : specialTypes) {
-                const OpRecord& record = keyRecordPair.second;
-                float percent = profile.totalTime > 0 ? (record.totalTime / profile.totalTime * 100.0f) : 0.0f;
-                const char* backend = record.backend.empty() ? "-" : record.backend.c_str();
-                float avg = record.avgTime();
+            for (const auto& pair : specialTypes) {
+                const OpRecord& stats = pair.second;
+                float percent = profile.totalTime > 0 ? (stats.totalTime / profile.totalTime * 100.0f) : 0.0f;
+                const char* backend = stats.backend.empty() ? "-" : stats.backend.c_str();
+                float avg = stats.avgTime();
                 printf("%-24s %8s %12.2f %12.2f %10d %7.1f%%\n", 
-                          record.name.c_str(), backend, record.totalTime, avg, record.callCount, percent);
+                          stats.type.c_str(), backend, stats.totalTime, avg, stats.callCount, percent);
             }
         }
     };
@@ -469,114 +537,49 @@ void LLMOpProfiler::printOpInfo() const {
     printf("                        LLM Operator Info                       \n");
     printf("================================================================\n");
     
-    // Collect all unique op name -> type mappings
-    std::map<std::string, std::string> opNameToType;
+    // Collect all unique ops from prefill and decode
+    std::map<std::string, OpRecord> allOps;
     
     for (const auto& pair : mPrefillProfile.opRecords) {
-        opNameToType[pair.second.name] = pair.second.type;
+        if (allOps.find(pair.first) == allOps.end()) {
+            allOps[pair.first] = pair.second;
+        }
     }
     for (const auto& pair : mDecodeProfile.opRecords) {
-        opNameToType[pair.second.name] = pair.second.type;
+        if (allOps.find(pair.first) == allOps.end()) {
+            allOps[pair.first] = pair.second;
+        }
     }
     
-    // Print op name and type mapping
-    printf("\n=== Operator Name -> Type (%zu ops) ===\n", opNameToType.size());
-    printf("%-40s -> %-20s\n", "Op Name", "Op Type");
-    printf("------------------------------------------------------------\n");
-    for (const auto& pair : opNameToType) {
-        printf("%-40s -> %-20s\n", pair.first.c_str(), pair.second.c_str());
+    // Print op name, type, and full shapes
+    printf("\n=== Operator Info (%zu ops) ===\n", allOps.size());
+    for (const auto& pair : allOps) {
+        const OpRecord& record = pair.second;
+        
+        printf("%s [%s]\n", record.name.c_str(), record.type.c_str());
+        
+        // Format input shapes
+        if (!record.inputShapes.empty()) {
+            printf("  In:  ");
+            for (size_t i = 0; i < record.inputShapes.size(); ++i) {
+                if (i > 0) printf(", ");
+                printf("%s", shapeToString(record.inputShapes[i]).c_str());
+            }
+            printf("\n");
+        }
+        
+        // Format output shapes
+        if (!record.outputShapes.empty()) {
+            printf("  Out: ");
+            for (size_t i = 0; i < record.outputShapes.size(); ++i) {
+                if (i > 0) printf(", ");
+                printf("%s", shapeToString(record.outputShapes[i]).c_str());
+            }
+            printf("\n");
+        }
     }
     
     printf("\n================================================================\n");
-}
-
-bool LLMOpProfiler::exportJSON(const std::string& filepath) const {
-    std::ofstream file(filepath);
-    if (!file.is_open()) {
-        MNN_ERROR("Failed to open file for JSON export: %s\n", filepath.c_str());
-        return false;
-    }
-    
-    file << "{\n";
-    
-    // Backend breakdown - derived from stored data
-    file << "  \"backends\": {\n";
-    bool firstBackend = true;
-    // Combine prefill and decode backend times
-    std::map<std::string, float> allBackendTimes;
-    for (const auto& pair : mPrefillProfile.backendTotalTimes) {
-        allBackendTimes[pair.first] += pair.second;
-    }
-    for (const auto& pair : mDecodeProfile.backendTotalTimes) {
-        allBackendTimes[pair.first] += pair.second;
-    }
-    for (const auto& pair : allBackendTimes) {
-        if (!firstBackend) file << ",\n";
-        firstBackend = false;
-        file << "    \"" << pair.first << "\": " << pair.second;
-    }
-    file << "\n  },\n";
-    
-    // Prefill phase
-    file << "  \"prefill\": {\n";
-    file << "    \"total_time_ms\": " << mPrefillProfile.totalTime << ",\n";
-    file << "    \"backend_times\": {\n";
-    firstBackend = true;
-    for (const auto& pair : mPrefillProfile.backendTotalTimes) {
-        if (!firstBackend) file << ",\n";
-        firstBackend = false;
-        file << "      \"" << pair.first << "\": " << pair.second;
-    }
-    file << "\n    },\n";
-    file << "    \"ops\": [\n";
-    bool first = true;
-    for (const auto& nameRecordPair : mPrefillProfile.opRecords) {
-        if (!first) file << ",\n";
-        first = false;
-        const OpRecord& record = nameRecordPair.second;
-        file << "      {\"name\": \"" << record.name << "\", "
-             << "\"backend\": \"" << record.backend << "\", "
-             << "\"time_ms\": " << record.totalTime << ", "
-             << "\"avg_ms\": " << record.avgTime() << ", "
-             << "\"calls\": " << record.callCount << ", "
-             << "\"special\": " << (record.isSpecial ? "true" : "false") << "}";
-    }
-    file << "\n    ]\n";
-    file << "  },\n";
-    
-    // Decode phase
-    file << "  \"decode\": {\n";
-    file << "    \"total_time_ms\": " << mDecodeProfile.totalTime << ",\n";
-    file << "    \"token_count\": " << mDecodeProfile.tokenCount << ",\n";
-    file << "    \"backend_times\": {\n";
-    firstBackend = true;
-    for (const auto& pair : mDecodeProfile.backendTotalTimes) {
-        if (!firstBackend) file << ",\n";
-        firstBackend = false;
-        file << "      \"" << pair.first << "\": " << pair.second;
-    }
-    file << "\n    },\n";
-    file << "    \"ops\": [\n";
-    first = true;
-    for (const auto& nameRecordPair : mDecodeProfile.opRecords) {
-        if (!first) file << ",\n";
-        first = false;
-        const OpRecord& record = nameRecordPair.second;
-        file << "      {\"name\": \"" << record.name << "\", "
-             << "\"backend\": \"" << record.backend << "\", "
-             << "\"time_ms\": " << record.totalTime << ", "
-             << "\"avg_ms\": " << record.avgTime() << ", "
-             << "\"calls\": " << record.callCount << ", "
-             << "\"special\": " << (record.isSpecial ? "true" : "false") << "}";
-    }
-    file << "\n    ]\n";
-    file << "  }\n";
-    
-    file << "}\n";
-    file.close();
-    
-    printf("[LLM Profiler] Results exported to: %s\n", filepath.c_str());
-    return true;
 }
 
 void LLMOpProfiler::reset() {

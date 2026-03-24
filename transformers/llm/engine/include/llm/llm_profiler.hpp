@@ -30,13 +30,17 @@ class Llm;
  * Key format: "opName@backend" to support multi-backend execution
  */
 struct OpRecord {
-    std::string name;           // Op name (without backend suffix)
+    std::string name;           // Op name
     std::string type;           // Op type
     std::string backend;        // Backend name (CPU, OpenCL, QNN)
     float totalTime = 0.0f;     // Total time in ms
     int callCount = 0;          // Number of calls
     float flops = 0.0f;         // Computation amount
     bool isSpecial = false;     // Special op: listed separately in output, not merged with same-name ops
+    
+    // Shape info (recorded once per phase)
+    std::vector<Express::INTS> inputShapes;   // [input_tensor] -> shape
+    std::vector<Express::INTS> outputShapes;  // [output_tensor] -> shape
     
     float avgTime() const {
         return callCount > 0 ? totalTime / callCount : 0.0f;
@@ -47,9 +51,8 @@ struct OpRecord {
  * Profile data for a single phase (Prefill or Decode)
  */
 struct PhaseProfile {
-    // Key format: "opName@backend" - supports same op on different backends
+    // Key: opName@backend - stores per-op records
     std::map<std::string, OpRecord> opRecords;
-    std::map<std::string, OpRecord> opTypeRecords;       // By op type (aggregated)
     
     // Per-backend total times (from op-level profiling)
     std::map<std::string, float> backendTotalTimes;      // backend -> total time
@@ -60,12 +63,14 @@ struct PhaseProfile {
     
     void reset() {
         opRecords.clear();
-        opTypeRecords.clear();
         backendTotalTimes.clear();
         totalTime = 0.0f;
         tokenTotalTime = 0.0f;
         tokenCount = 0;
     }
+    
+    // Aggregate op records by type, returns type@backend -> OpRecord
+    std::map<std::string, OpRecord> getOpTypeStats() const;
 };
 
 /**
@@ -153,7 +158,6 @@ public:
      */
     void onDecodePhaseStart();
     
-
     /**
      * Called when entire decode phase ends
      */
@@ -171,7 +175,7 @@ public:
      */
     void afterOp(const std::vector<MNN::Tensor*>& tensors, const MNN::OperatorInfo* info);
     
-    // ========== Backend Profile Data Collection ==========
+    // ========== Backend Profile Data Collection =///
     
     /**
      * Collect profile data from backend (OpenCL/QNN)
@@ -187,14 +191,9 @@ public:
     void printStats() const;
 
     /**
-     * Print op info to stdout
+     * Print op info to stdout (name, type, shapes)
      */
     void printOpInfo() const;
-    
-    /**
-     * Export results to JSON file
-     */
-    bool exportJSON(const std::string& filepath) const;
     
     /**
      * Get prefill phase profile
@@ -221,6 +220,12 @@ private:
     // Check if op name matches pattern (supports wildcards)
     bool matchPattern(const std::string& opName, const std::string& pattern) const;
     
+    // Helper: MNNForwardType to string
+    static std::string forwardTypeToString(MNNForwardType type);
+    
+    // Helper to get tensor shape as string
+    static std::string shapeToString(const Express::INTS& shape);
+    
 private:
     Config mConfig;
     bool mEnabled = true;
@@ -232,8 +237,6 @@ private:
     
     // Timing for CPU callback (op-level)
     MNN::Timer mOpTimer;
-    std::string mCurrentOpName;
-    std::string mCurrentOpType;
     
     // Timing for token-level(separate from op-level)
     MNN::Timer mTimer;
