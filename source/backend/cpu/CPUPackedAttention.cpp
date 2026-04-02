@@ -10,6 +10,7 @@
 
 #include <limits>
 #include "CPUPackedAttention.hpp"
+#include "CPUAttention.hpp"
 #include "CPUBackend.hpp"
 #include "compute/CommonOptFunction.h"
 #include "core/Macro.h"
@@ -780,7 +781,14 @@ public:
     virtual Execution* onCreate(const std::vector<Tensor*>& inputs, const std::vector<Tensor*>& outputs,
                                 const MNN::Op* op, Backend* backend) const override {
         auto param = op->main_as_PackedAttentionParam();
-        return new CPUPackedAttention(backend, param->kv_cache());
+        auto cpuBackend = static_cast<CPUBackend*>(backend);
+        // Check if PackedAttention mode is enabled via RuntimeHint
+        bool usePacked = cpuBackend->getRuntime()->hint().packedAttentionMode > 0;
+        if (usePacked) {
+            return new CPUPackedAttention(backend, param->kv_cache());
+        }
+        // fall back to CPUAttention
+        return new CPUAttention(backend, param->kv_cache());
     }
 };
 

@@ -9,6 +9,7 @@
 #ifdef MNN_SUPPORT_TRANSFORMER_FUSE
 
 #include "backend/opencl/execution/buffer/AttentionBufExecution.hpp"
+#include "backend/opencl/execution/buffer/PackedAttentionBufExecution.hpp"
 #include <fstream>
 namespace MNN {
 namespace OpenCL {
@@ -1823,6 +1824,14 @@ public:
             TensorUtils::setTensorSupportPack(outputs[i], false);
         }
         auto param = op->main_as_AttentionParam();
+        auto openCLBackend = static_cast<OpenCLBackend *>(backend);
+        
+        // Check if packed mode is enabled
+        bool usePacked = openCLBackend->getRuntime()->hint().packedAttentionMode > 0;
+        
+        if (usePacked) {
+            return new PackedAttentionBufExecution(op, backend, param->kv_cache());
+        }
         return new AttentionBufExecution(op, backend, param->kv_cache());
     }
 };
