@@ -134,11 +134,14 @@ ErrorCode CPUPackedAttention::onResize(const std::vector<Tensor*>& inputs, const
         backend()->onAcquireBuffer(mPackQ.get(), Backend::DYNAMIC);
 
         mSumQ = bufferAlloc->alloc(mThreadNum * ROUND_UP(maxReqLen, eP8) * mBlockNum * sizeof(int32_t));
-        mQueryScale = bufferAlloc->alloc(mNumHead * maxReqLen * mBlockNum * QUANT_INFO_BYTES);
-        mQueryZeroPoint = bufferAlloc->alloc(mNumHead * maxReqLen * mBlockNum * QUANT_INFO_BYTES);
-        mQueryQuantZero = bufferAlloc->alloc(mNumHead * maxReqLen * mBlockNum * QUANT_INFO_BYTES);
-        mQueryQuantScale = bufferAlloc->alloc(mNumHead * maxReqLen * mBlockNum * QUANT_INFO_BYTES);
-        mQuantQuery = bufferAlloc->alloc(maxReqLen * mNumHead * mHeadDim);
+        // mQueryScale/mQueryZeroPoint layout: [numHead, allReqLen]
+        // Use query->length(1) to get actual input length (sum of all request lengths)
+        int maxAllReqLen = query->length(1);
+        mQueryScale = bufferAlloc->alloc(mNumHead * maxAllReqLen * mBlockNum * QUANT_INFO_BYTES);
+        mQueryZeroPoint = bufferAlloc->alloc(mNumHead * maxAllReqLen * mBlockNum * QUANT_INFO_BYTES);
+        mQueryQuantZero = bufferAlloc->alloc(mNumHead * maxAllReqLen * mBlockNum * QUANT_INFO_BYTES);
+        mQueryQuantScale = bufferAlloc->alloc(mNumHead * maxAllReqLen * mBlockNum * QUANT_INFO_BYTES);
+        mQuantQuery = bufferAlloc->alloc(maxAllReqLen * mNumHead * UP_DIV(mHeadDim, gcore->pack) * gcore->pack);
 
         if (mBlockNum > 1) {
             mAccumBuffer = bufferAlloc->alloc(eP8 * hP8 * mThreadNum * QUANT_INFO_BYTES);
@@ -237,7 +240,7 @@ ErrorCode CPUPackedAttention::onExecute(const std::vector<Tensor*>& inputs, cons
     auto key   = inputs[1];
     auto value = inputs[2];
     const int8_t* mask = nullptr;
-    
+
     // KVcache settings
     int sumLen=0, maxKvSeqLen = 0, maxReqLen = 0, allReqLen = query->length(1), bs = mBatchMeta->calId.size();
     mKVCacheManagers->remove(mBatchMeta);
@@ -335,6 +338,13 @@ ErrorCode CPUPackedAttention::onExecute(const std::vector<Tensor*>& inputs, cons
         }
         memset(mGemmBias.get(), 0, ROUND_UP(ALIMAX(mBlockKV, mHeadDim), hP8) * QUANT_INFO_BYTES);
 
+        // Pre-compute cumulative request lengths for finding the correct request index
+        std::vector<int> reqLenAccum(bs + 1, 0);
+        for (int r = 0; r < bs; ++r) {
+            int rid = mBatchMeta->calId[r];
+            reqLenAccum[r + 1] = reqLenAccum[r] + mBatchMeta->mMetas[rid]->add;
+        }
+
         auto queryPtr = query->host<int8_t>();
         int divPart = UP_DIV(allReqLen * mNumHead, mThreadNum);
         MNN_CONCURRENCY_BEGIN (tId, mThreadNum) {
@@ -343,10 +353,19 @@ ErrorCode CPUPackedAttention::onExecute(const std::vector<Tensor*>& inputs, cons
             if (remainLu > 0) {
                 remainLu = ALIMIN(divPart, remainLu);
                 for (int i = tId * divPart; i < tId * divPart + remainLu; ++i) {
+                    // Find the request index for this sequence position
+                    int seqIdx = i / mNumHead;
+                    int reqIdx = 0;
+                    for (int r = 0; r < bs; ++r) {
+                        if (seqIdx < reqLenAccum[r + 1]) {
+                            reqIdx = r;
+                            break;
+                        }
+                    }
 
                     // address
                     auto srcFloatPtr = (float*)(queryPtr + i * mHeadDim * mBytes);
-                    auto dstInt8Ptr = (int8_t*)(mQuantQuery.ptr() + i * mHeadDim);
+                    auto dstInt8Ptr = (int8_t*)(mQuantQuery.ptr() + i * UP_DIV(mHeadDim, gcore->pack) * gcore->pack);
                     auto quantScalePtr = (float*)(mQueryQuantScale.ptr() + i * QUANT_INFO_BYTES);
                     auto quantZeroPtr = (float*)(mQueryQuantZero.ptr() + i * QUANT_INFO_BYTES);
 
@@ -358,8 +377,8 @@ ErrorCode CPUPackedAttention::onExecute(const std::vector<Tensor*>& inputs, cons
 
                     // compute the quant/dequant scale/bias
                     gcore->MNNAsyQuantInfo(scalePtr, zeroPtr, quantScalePtr, quantZeroPtr, nullptr, nullptr, srcFloatPtr, info);
-                    scalePtr[0] *= mScales[i];
-                    zeroPtr[0] *= mScales[i];
+                    scalePtr[0] *= mScales[reqIdx];
+                    zeroPtr[0] *= mScales[reqIdx];
 
                     // quantize the float query to int8_t query
                     mQuantFunc(srcFloatPtr, dstInt8Ptr, UP_DIV(mHeadDim, gcore->pack), quantScalePtr, -128, 127, quantZeroPtr, 0);
@@ -470,17 +489,19 @@ ErrorCode CPUPackedAttention::onExecute(const std::vector<Tensor*>& inputs, cons
             infoFloatV[1] = reqLen; // eReal
             infoFloatV[3] = 1;      // stride
             int32_t elFloatV[4] = {reqLen, ROUND_UP(kvSeqLen, lP), 0, 0};
-            
-            // pack quan Q
+
+            // pack quan Q (for each head, pack the query data)
             if (mQuantKey) {
                 int outterSeqLen = UP_DIV(reqLen, eP8);
                 int outterHeadDim = UP_DIV(mHeadDim, lP8);
-                size_t outputOffset = 0;
+                int alignedHeadDim = UP_DIV(mHeadDim, gcore->pack) * gcore->pack;
 
-                const int8_t* src_base_ptr = (const int8_t*)mQuantQuery.ptr() + reqLenBias * mNumHead * mHeadDim;
+                const int8_t* src_base_ptr = (const int8_t*)mQuantQuery.ptr() + reqLenBias * mNumHead * alignedHeadDim;
                 int8_t* dst_base_ptr = mPackQ->host<int8_t>();
 
                 for (int h = headIndex; h < headIndex + headsToCompute; h++) {
+                    size_t outputOffset = h * mPackQ->stride(0);  // Each head starts at its own offset
+
                     for (int seqBlock = 0; seqBlock < outterSeqLen; ++seqBlock) {
                         int seqBase = seqBlock * eP8;
                         int eunit = std::min(eP8, reqLen - seqBase);
@@ -499,14 +520,14 @@ ErrorCode CPUPackedAttention::onExecute(const std::vector<Tensor*>& inputs, cons
                                                 outputOffset +
                                                 (size_t)dimBlock * (eunit * lP8);
 
-                            const size_t src_row_stride = (size_t)mNumHead * mHeadDim;
+                            const size_t src_row_stride = (size_t)mNumHead * alignedHeadDim;
 
                             for (int seqLocal = 0; seqLocal < eunit; ++seqLocal) {
                                 int innerSeq = seqBase + seqLocal;
 
                                 const int8_t* src_row_ptr = src_base_ptr +
                                                             (size_t)innerSeq * src_row_stride +
-                                                            (size_t)h * mHeadDim +
+                                                            (size_t)h * alignedHeadDim +
                                                             dimBase;
 
                                 int8_t* dst_row_ptr = dst_block_ptr + seqLocal * lP8;
@@ -522,7 +543,7 @@ ErrorCode CPUPackedAttention::onExecute(const std::vector<Tensor*>& inputs, cons
                         }
                         outputOffset += currentSeqBlockSize;
                     }
-                } // Finish quantize Q
+                } // Finish pack Q for this request
 
                 if (mQuantValue) {
                     auto scalePtr = (float*)(mQKScale.ptr());
@@ -582,8 +603,9 @@ ErrorCode CPUPackedAttention::onExecute(const std::vector<Tensor*>& inputs, cons
                 } else {
                     qReordered = mPackQ->host<int8_t>() + h * mPackQ->stride(0);
                     qSumAddr = (float*)(mSumQ.ptr() + tId * ROUND_UP(reqLen, eP8) * mBlockNum * QUANT_INFO_BYTES);
-                    qScale = (float*)(mQueryScale.ptr() + h * reqLen * mBlockNum * QUANT_INFO_BYTES);
-                    qBias = (float*)(mQueryZeroPoint.ptr() + h * reqLen * mBlockNum * QUANT_INFO_BYTES);
+                    // qScale/qBias layout is [numHead, allReqLen], so need to use allReqLen and add reqLenBias
+                    qScale = (float*)(mQueryScale.ptr() + (h * allReqLen + reqLenBias) * mBlockNum * QUANT_INFO_BYTES);
+                    qBias = (float*)(mQueryZeroPoint.ptr() + (h * allReqLen + reqLenBias) * mBlockNum * QUANT_INFO_BYTES);
                     gcore->MNNSumByAxisLForMatmul_A(qSumAddr, qReordered, qScale, reqLen, sumParams4QxK);
                 }
 
@@ -629,10 +651,10 @@ ErrorCode CPUPackedAttention::onExecute(const std::vector<Tensor*>& inputs, cons
                     }
                     // 2. softmax scores
                     // qk: [kv_seq_len/mPack, seq_len, mPack] -> [seq_len/eP, kv_seq_len/lP, eP, lP]
-                    {   
+                    {
                         if(mBytes == 2) {
                             if (!mQuantKey || sinksPtr != nullptr) {
-                                _maskQK<FLOAT16_T>((float*)qkPacked, &mScales[idx], reqLen, subKvSeqLen, mPack, kvSeqLen, i * mBlockKV,sinksPtr, mask + maskBias * mBytes, mQuantKey);
+                                _maskQK<FLOAT16_T>((float*)qkPacked, &mScales[idx], reqLen, subKvSeqLen, mPack, kvSeqLen, i * mBlockKV, sinksPtr, mask + maskBias * mBytes, mQuantKey);
                             }
                         } else {
                             if (!mQuantKey || sinksPtr != nullptr) {
