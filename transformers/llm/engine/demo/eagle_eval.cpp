@@ -27,7 +27,7 @@ struct EvalConfig {
     std::string outputFile;      // Output results file (optional)
     std::string backend;         // Override backend (optional)
     std::string precision;       // Override precision (optional)
-    int maxNewTokens = 64;       // Max tokens per sample
+    int maxNewTokens = 512;       // Max tokens per sample
     bool verbose = false;
 };
 
@@ -154,9 +154,9 @@ private:
             MNN::Timer timer;
             timer.reset();
             
-            // mLlm->response(prompt, nullptr, nullptr, mConfig.maxNewTokens);
+            mLlm->response(prompt, nullptr, nullptr, mConfig.maxNewTokens);
             // show output
-            mLlm->response(prompt,  &std::cout, nullptr, mConfig.maxNewTokens);
+            // mLlm->response(prompt,  &std::cout, nullptr, mConfig.maxNewTokens);
             
             float timeMs = timer.durationInUs() / 1000.0f;
             
@@ -203,6 +203,7 @@ private:
         std::cout << "Compression Ratio:      " << ctx->compressionRatio() << " tokens/step\n";
         std::cout << "Avg Draft Time:         " << ctx->avgDraftTimeMs() << " ms/step\n";
         std::cout << "Avg Target Time:        " << ctx->avgTargetTimeMs() << " ms/step\n";
+        std::cout << "Theoretical Speedup:    " << ctx->theoreticalSpeedup() << "x\n";
         
         std::cout << "\n================================================\n";
     }
@@ -226,7 +227,8 @@ private:
         file << std::fixed << std::setprecision(4);
         file << "  \"avg_accept_length\": " << ctx->avgAcceptLen() << ",\n";
         file << "  \"accept_rate\": " << ctx->acceptRate() * 100.0f << ",\n";
-        file << "  \"compression_ratio\": " << ctx->compressionRatio() << "\n";
+        file << "  \"compression_ratio\": " << ctx->compressionRatio() << ",\n";
+        file << "  \"theoretical_speedup\": " << ctx->theoreticalSpeedup() << "\n";
         file << "}\n";
         
         std::cout << "Results saved to: " << mConfig.outputFile << "\n";

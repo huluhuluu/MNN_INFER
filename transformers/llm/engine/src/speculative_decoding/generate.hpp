@@ -52,6 +52,31 @@ struct EagleContext {
     float avgTargetTimeMs() const {
         return steps == 0 ? 0.0f : target_time_us / 1000.0f / steps;
     }
+    
+    /**
+     * Calculate theoretical speedup compared to non-speculative decoding.
+     * 
+     * Formula:
+     *   - Without speculation: total_time = accepted * T_target_per_token
+     *   - With speculation: total_time = draft_time + target_time
+     *   - Speedup = (accepted * T_target_per_step / avg_accept_len) / (draft_time + target_time)
+     * 
+     * @return theoretical speedup ratio (>1 means faster)
+     */
+    float theoreticalSpeedup() const {
+        if (draft_time_us == 0 && target_time_us == 0) return 0.0f;
+        if (accepted == 0 || steps == 0) return 0.0f;
+        
+        // Total time with speculative decoding
+        float total_time_us = static_cast<float>(draft_time_us + target_time_us);
+        
+        // Baseline: if we only use target model, we need 'accepted' forward passes
+        // Each forward pass takes target_time_us / steps (average per step)
+        float target_time_per_step_us = static_cast<float>(target_time_us) / steps;
+        float baseline_time_us = accepted * target_time_per_step_us;
+        
+        return baseline_time_us / total_time_us;
+    }
 };
 
 // ==================== Generation Params ====================

@@ -345,7 +345,7 @@ void EagleGeneration::generate(GenerationParams& param) {
         if(mContext->status == LlmStatus::USER_CANCEL) {
             break;
         }
-        steps++, mEagleContext.steps = steps;
+        steps++, mEagleContext.steps += 1;
         MNN::Timer _dt;
 
         if(profiling) {
@@ -410,7 +410,7 @@ void EagleGeneration::generate(GenerationParams& param) {
         mContext->status = LlmStatus::MAX_TOKENS_FINISHED;
     }
     
-// #if EAGLE_DEBUG
+#if EAGLE_DEBUG
     printf("\n### Tree Decoding Time: %f s, Eagle Generate Time: %f s\n", (float)treeDecodingTime / 1000000.0, (float)eagleGenerateTime / 1000000.0);
     printf("\n### Tree Decoding Avg Time: %f ms, steps: %d\n", (float)treeDecodingTime / 1000.0 / steps, steps);
     printf("\n### Compression Ratio: %f\n", (float)newTokens / steps);
@@ -418,7 +418,7 @@ void EagleGeneration::generate(GenerationParams& param) {
         printf("%d, ", acceptLen);
     }
     printf("\n");
-// #endif
+#endif
     return;
 }
 

@@ -43,6 +43,9 @@ void KVMeta::sync() {
         revertNumber += reserve[2*i+1];
     }
     previous = previous - remove + add + revertNumber;
+    if (reserve && reserve != reserveHost.data()) {
+        delete[] reserve;
+    }
     n_reserve = 0;
     reserve = nullptr;
     remove = 0;

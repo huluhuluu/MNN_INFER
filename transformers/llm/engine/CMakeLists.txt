@@ -25,6 +25,7 @@ endif()
 
 # include dir
 include_directories(${CMAKE_CURRENT_LIST_DIR}/include/)
+include_directories(${CMAKE_CURRENT_LIST_DIR}/src/)
 
 # source files
 FILE(GLOB_RECURSE SRCS ${CMAKE_CURRENT_LIST_DIR}/src/*)
@@ -81,11 +82,13 @@ if(MNN_LLM_BUILD_DEMO)
     add_executable(embedding_demo ${CMAKE_CURRENT_LIST_DIR}/demo/embedding_demo.cpp)
     add_executable(reranker_demo ${CMAKE_CURRENT_LIST_DIR}/demo/reranker_demo.cpp)
     add_executable(rollback_demo ${CMAKE_CURRENT_LIST_DIR}/demo/rollback_demo.cpp)
+    add_executable(eagle_eval ${CMAKE_CURRENT_LIST_DIR}/demo/eagle_eval.cpp)
     include(${CMAKE_CURRENT_LIST_DIR}/tools/CMakeLists.txt)
     target_link_libraries(llm_demo ${LLM_DEPS})
     target_link_libraries(embedding_demo ${LLM_DEPS})
     target_link_libraries(reranker_demo ${LLM_DEPS})
     target_link_libraries(rollback_demo ${LLM_DEPS})
+    target_link_libraries(eagle_eval ${LLM_DEPS})
 endif()
 
 if (BUILD_MLS)
