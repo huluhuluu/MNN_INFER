@@ -35,7 +35,8 @@ std::map<std::string, OpRecord> PhaseProfile::getOpTypeStats() const {
         
         if (stats.find(key) == stats.end()) {
             stats[key] = OpRecord();
-            stats[key].name = record.type;  // Use type as name for aggregated record
+            // For special ops, keep original name; for normal ops, use type as name
+            stats[key].name = record.isSpecial ? record.name : record.type;
             stats[key].type = record.type;
             stats[key].backend = record.backend;
             stats[key].isSpecial = record.isSpecial;
@@ -150,7 +151,7 @@ void LLMOpProfiler::onPrefillStart() {
     mInPrefill = true;
     mPrefillProfile.reset();
     mTimer.reset(); 
-    printf("[LLM Profiler] Prefill phase started\n");
+    // printf("[LLM Profiler] Prefill phase started\n");
 }
 
 void LLMOpProfiler::onPrefillEnd(int promptTokenCount) {
@@ -161,10 +162,10 @@ void LLMOpProfiler::onPrefillEnd(int promptTokenCount) {
     mPrefillProfile.tokenCount += promptTokenCount;
     // reset timer for next prefill
     mTimer.reset(); 
-    printf("[LLM Profiler] Prefill phase ended, %d tokens, time %.4f ms, avg time: %.4f ms/token\n", 
-              promptTokenCount, 
-              mPrefillProfile.tokenTotalTime ,
-              promptTokenCount==0 ? 0 : mPrefillProfile.tokenTotalTime  / promptTokenCount);
+    // printf("[LLM Profiler] Prefill phase ended, %d tokens, time %.4f ms, avg time: %.4f ms/token\n", 
+            //   promptTokenCount, 
+            //   mPrefillProfile.tokenTotalTime ,
+            //   promptTokenCount==0 ? 0 : mPrefillProfile.tokenTotalTime  / promptTokenCount);
 }
 
 void LLMOpProfiler::onDecodeTokenBegin() {
@@ -184,7 +185,7 @@ void LLMOpProfiler::onDecodePhaseStart() {
     mInPrefill = false;
     mDecodeProfile.reset();
     mDecodeTokenTimes.clear();
-    printf("[LLM Profiler] Decode phase started\n");
+    // printf("[LLM Profiler] Decode phase started\n");
 }
 
 void LLMOpProfiler::onDecodePhaseEnd() {
@@ -197,10 +198,10 @@ void LLMOpProfiler::onDecodePhaseEnd() {
         avgTime /= mDecodeTokenTimes.size();
         mDecodeProfile.tokenTotalTime = avgTime * mDecodeTokenTimes.size();
     }
-    printf("[LLM Profiler] Decode phase ended, %d tokens, time %.4f ms, avg time: %.4f ms/token\n", 
-              mDecodeProfile.tokenCount, 
-              mDecodeTokenTimes.empty() ? 0 : mDecodeProfile.tokenTotalTime,
-              mDecodeTokenTimes.empty() ? 0 : mDecodeProfile.tokenTotalTime / mDecodeTokenTimes.size());
+    // printf("[LLM Profiler] Decode phase ended, %d tokens, time %.4f ms, avg time: %.4f ms/token\n", 
+            //   mDecodeProfile.tokenCount, 
+            //   mDecodeTokenTimes.empty() ? 0 : mDecodeProfile.tokenTotalTime,
+            //   mDecodeTokenTimes.empty() ? 0 : mDecodeProfile.tokenTotalTime / mDecodeTokenTimes.size());
 }
 
 // ========== CPU Backend Callbacks ==========
@@ -371,6 +372,13 @@ void LLMOpProfiler::collectBackendProfile(const BackendProfileData& data) {
 // ========== Results ==========
 
 void LLMOpProfiler::printStats() const {
+    // Check if profiler is enabled
+    if (!mEnabled) {
+        printf("\n[LLM Profiler] Profiler is not enabled.\n");
+        printf("Hint: Call llm->enableProfiler(true) before running inference.\n\n");
+        return;
+    }
+    
     printf("\n");
     printf("================================================================\n");
     printf("              LLM Operator Profiling Report                    \n");
@@ -473,18 +481,18 @@ void LLMOpProfiler::printStats() const {
         
         // Print special OpTypes separately
         if (!specialTypes.empty()) {
-            printf("\n--- Special Ops (as unique OpType) ---\n");
-            printf("%-24s %8s %12s %12s %10s %8s\n", 
-                      "OpType", "Backend", "Time(ms)", "Avg(ms)", "Calls", "Percent");
-            printf("--------------------------------------------------------------------------\n");
+            printf("\n--- Special Ops ---\n");
+            printf("%-48s %12s %10s\n", "OpName [OpType]", "Time(ms)", "Calls");
+            printf("----------------------------------------------------------------\n");
             
             for (const auto& pair : specialTypes) {
                 const OpRecord& stats = pair.second;
                 float percent = profile.totalTime > 0 ? (stats.totalTime / profile.totalTime * 100.0f) : 0.0f;
-                const char* backend = stats.backend.empty() ? "-" : stats.backend.c_str();
                 float avg = stats.avgTime();
-                printf("%-24s %8s %12.2f %12.2f %10d %7.1f%%\n", 
-                          stats.type.c_str(), backend, stats.totalTime, avg, stats.callCount, percent);
+                // Format: opname [optype] (backend) time avg calls percent
+                printf("%-48s %12.2f %10d %7.1f%%\n", 
+                          (stats.name + " [" + stats.type + "]").c_str(), 
+                          stats.totalTime, stats.callCount, percent);
             }
         }
     };
@@ -532,6 +540,13 @@ void LLMOpProfiler::printStats() const {
 }
 
 void LLMOpProfiler::printOpInfo() const { 
+    // Check if profiler is enabled
+    if (!mEnabled) {
+        printf("\n[LLM Profiler] Profiler is not enabled.\n");
+        printf("Hint: Call llm->enableProfiler(true) before running inference.\n\n");
+        return;
+    }
+    
     printf("\n");
     printf("================================================================\n");
     printf("                        LLM Operator Info                       \n");

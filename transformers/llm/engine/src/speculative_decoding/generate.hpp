@@ -16,6 +16,46 @@
 
 namespace MNN {
 namespace Transformer {
+// ==================== Eagle Context ====================
+// Statistics for Eagle speculative decoding
+struct EagleContext {
+    uint draft = 0;              // total draft tokens generated
+    uint accepted = 0;           // total accepted tokens
+    uint steps = 0;                    // total decoding steps
+    uint64_t draft_time_us = 0;        // total draft model time (microseconds)
+    uint64_t target_time_us = 0;       // total target model time (microseconds)
+    
+    void reset() {
+        draft = 0;
+        accepted = 0;
+        steps = 0;
+        draft_time_us = 0;
+        target_time_us = 0;
+    }
+    
+    float avgAcceptLen() const {
+        return accepted==0 ? 0.0f : accepted / (steps * 1.0f); 
+    }
+    
+    float acceptRate() const {
+        return accepted==0 ? 0.0f : accepted / (draft * 1.0f);
+    }
+    
+    float compressionRatio() const {
+        return accepted==0 ? 0.0f : draft / (accepted * 1.0f);
+    }
+    
+    float avgDraftTimeMs() const {
+        return steps == 0 ? 0.0f : draft_time_us / 1000.0f / steps;
+    }
+    
+    float avgTargetTimeMs() const {
+        return steps == 0 ? 0.0f : target_time_us / 1000.0f / steps;
+    }
+};
+
+// ==================== Generation Params ====================
+
 struct GenerationParams {
     int max_new_tokens;
     std::vector<int> input_ids;
@@ -83,7 +123,12 @@ public:
     virtual ~EagleGeneration() = default;
     virtual void load(Module::Config module_config) override;
     virtual void generate(GenerationParams& param) override;
-private:
+    
+    // Eagle context interface
+    EagleContext* getEagleContext() { return &mEagleContext; }
+    const EagleContext* getEagleContext() const { return &mEagleContext; }
+    void resetEagleContext() { mEagleContext.reset(); }
+private: // For eagle_eval access
     struct DraftInfo {
         std::vector<int> draftTokens;
         std::vector<std::vector<int>> retrieveIndices;
@@ -106,6 +151,8 @@ private:
     bool processTokens(const std::vector<int>& accpetTokens);
     void setPosition(int position);
     std::string tokenStr(int token);
+    
+    EagleContext mEagleContext;
     std::vector<std::shared_ptr<MNN::Express::Module>> mEagleModules;
     std::shared_ptr<KVMeta> mEagleMeta;
     MNN::Express::VARP mD2t, mTreePosition;

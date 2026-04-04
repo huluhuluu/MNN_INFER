@@ -318,7 +318,7 @@ bool Llm::load() {
     
     // Initialize profiler
     mProfiler = std::make_shared<LLMOpProfiler>();
-    mDraftProfiler = std::make_shared<LLMOpProfiler>();  // For Eagle draft model
+    mDraftProfiler = mConfig->speculative_type() != "eagle"? nullptr: std::make_shared<LLMOpProfiler>(); 
     mActiveProfiler = mProfiler.get();  // Default to target model profiler
     
     // create generation strategy
@@ -1225,39 +1225,49 @@ bool Llm::is_stop(int token_id) {
 // ========== Profiler Implementation ==========
 
 void Llm::enableProfiler(bool enabled) {
-    if (mProfiler) {
-        mProfiler->setEnabled(enabled);
+    if(mDraftProfiler && mConfig->speculative_type() == "eagle") {
+        mDraftProfiler->setEnabled(enabled);
         if (enabled) {
+            setActiveProfiler(mDraftProfiler.get());
             setupProfilerCallback();
         }
     }
+    if (mProfiler) {
+        mProfiler->setEnabled(enabled);
+        if (enabled) {
+            setActiveProfiler(mProfiler.get());
+            setupProfilerCallback();
+        }
+    }
+    
 }
 
 void Llm::printProfilerStats() const {
     // Print target model profiler
-    if (mProfiler) {
+    if (mProfiler && mProfiler->isEnabled()) {
         printf("\n========== Target Model Profiler ==========\n");
         mProfiler->printStats();
     } else {
         printf("[LLM] Target profiler not initialized\n");
+        printf("[Hint] Call llm->enableProfiler(true) before running inference.\n\n");
     }
     
     // Print draft model profiler (for Eagle speculative decoding)
-    if (mDraftProfiler && mDraftProfiler->getDecodeProfile().tokenCount > 0) {
+    if (mDraftProfiler && mDraftProfiler->isEnabled() && mConfig->speculative_type() == "eagle") {
         printf("\n========== Draft Model Profiler (Eagle) ==========\n");
         mDraftProfiler->printStats();
     }
 }
 
 void Llm::printOpInfo() const{
-    if (mProfiler) {
+    if (mProfiler && mProfiler->isEnabled()) {
         printf("\n----- Target Model -----\n");
         mProfiler->printOpInfo();
     } else {
         printf("[LLM] Target profiler not initialized\n");
     }
     
-    if (mDraftProfiler && mDraftProfiler->getDecodeProfile().tokenCount > 0) {
+    if (mDraftProfiler && mDraftProfiler->isEnabled()) {
         printf("\n----- Draft Model (Eagle) -----\n");
         mDraftProfiler->printOpInfo();
     }
@@ -1268,8 +1278,11 @@ LlmStage Llm::getCurrentStage() const {
 }
 
 void Llm::setProfilerSpecialOps(const std::vector<std::string>& specialOps) {
-    if (mProfiler) {
+    if (mProfiler && mProfiler->isEnabled()) {
         mProfiler->setSpecialOps(specialOps);
+    }
+    if(mDraftProfiler && mDraftProfiler->isEnabled()) {
+        mDraftProfiler->setSpecialOps(specialOps);
     }
 }
 
@@ -1306,7 +1319,6 @@ void Llm::clearProfilerInfo() {
     if (mDraftProfiler) {
         mDraftProfiler->reset();
     }
-    mActiveProfiler = mProfiler.get();
 }
 void Llm::collectBackendProfileData() {
     if (!mActiveProfiler || !mActiveProfiler->isEnabled()) return;
@@ -1378,6 +1390,33 @@ void Llm::collectBackendProfileData() {
         
         // Clear backend profile data for next phase
         runtime->onClearProfileData();
+    }
+}
+
+// ========== Eagle Context Interface ==========
+EagleContext* Llm::getEagleContext() {
+    if (!mInSpec || !mGenerationStrategy) {
+        return nullptr;
+    }
+    auto eagleGen = static_cast<EagleGeneration*>(mGenerationStrategy.get());
+    return eagleGen ? eagleGen->getEagleContext() : nullptr;
+}
+
+const EagleContext* Llm::getEagleContext() const {
+    if (!mInSpec || !mGenerationStrategy) {
+        return nullptr;
+    }
+    // Cast to EagleGeneration using static_cast (MNN uses -fno-rtti)
+    // We assume mGenerationStrategy is EagleGeneration when mInSpec is true
+    auto eagleGen = static_cast<EagleGeneration*>(mGenerationStrategy.get());
+    return eagleGen ? eagleGen->getEagleContext() : nullptr;
+}
+
+
+void Llm::resetEagleContext() {
+    auto ctx = getEagleContext();
+    if (ctx) {
+        ctx->reset();
     }
 }
 

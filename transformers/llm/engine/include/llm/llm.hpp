@@ -34,7 +34,8 @@ class Prompt;
 class Generation;
 class EagleGeneration;
 struct TimePerformance;
-class LLMOpProfiler;  // Forward declaration for profiler
+class LLMOpProfiler;
+struct EagleContext;
 
 using ChatMessage = std::pair<std::string, std::string>; // <role, content>
 using ChatMessages = std::vector<ChatMessage>;
@@ -188,6 +189,23 @@ public:
     // Get active profiler
     LLMOpProfiler* getActiveProfiler() { return mActiveProfiler; }
     // ========== End Profiler Interface ==========
+    
+    // ========== Benchmark Interface ==========
+    // Check if speculative decoding is enabled
+    bool isInSpeculative() const { return mInSpec; }
+    
+    // Get draft length for speculative decoding
+    int getDraftLength() const { return mDraftLength; }
+    
+    // Get generation strategy (for accessing EagleGeneration)
+    std::shared_ptr<Generation> getGenerationStrategy() { return mGenerationStrategy; }
+    
+    // Get Eagle context (for statistics)
+    // Note: Returns nullptr if Eagle is not enabled
+    EagleContext* getEagleContext();
+    const EagleContext* getEagleContext() const;
+    void resetEagleContext();
+    // ========== End Benchmark Interface ==========
     
     // Waveform generation
     virtual void setWavformCallback(std::function<bool(const float*, size_t, bool)> callback) {}

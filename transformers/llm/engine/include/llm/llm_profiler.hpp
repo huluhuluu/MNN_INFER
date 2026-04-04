@@ -228,7 +228,7 @@ private:
     
 private:
     Config mConfig;
-    bool mEnabled = true;
+    bool mEnabled = false;
     bool mInPrefill = true;
     
     // Profile data for each phase

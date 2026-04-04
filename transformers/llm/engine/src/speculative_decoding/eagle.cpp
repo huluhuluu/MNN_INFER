@@ -7,6 +7,7 @@
 
 #include "generate.hpp"
 #include "tokentree.hpp"
+#include "llm/llm.hpp"
 #include "llm/llm_profiler.hpp"
 #include <numeric>
 #include <algorithm>
@@ -323,14 +324,20 @@ void EagleGeneration::generate(GenerationParams& param) {
     // get profiler
     LLMOpProfiler* draftProfiler = mLlm->getDraftProfiler();
     LLMOpProfiler* targetProfiler = mLlm->getProfiler();
-
-    // Switch to draft profiler
-    mLlm->setActiveProfiler(draftProfiler);
-    mLlm->setupProfilerCallback();
-    draftProfiler->onDecodeTokenBegin();
+    const bool profiling = draftProfiler && draftProfiler->isEnabled() && targetProfiler && targetProfiler->isEnabled();
+    
+    if(profiling) {
+        // Switch to draft profiler
+        mLlm->setActiveProfiler(draftProfiler);
+        mLlm->setupProfilerCallback();
+        draftProfiler->onDecodeTokenBegin();
+    }
     auto draftInfo  = topkGenerate(inputIds, hiddenStates, inputEmbeds);
-    draftProfiler->onDecodeTokenEnd();
-
+    if(profiling) {
+        draftProfiler->onDecodeTokenEnd(draftInfo.draftTokens.size());
+    }
+    // Update draft model time us
+    mEagleContext.draft_time_us += _gt.durationInUs(), mEagleContext.draft += draftInfo.draftTokens.size();
     eagleGenerateTime += _gt.durationInUs();
     std::vector<int> accpetLens;
     auto newTokens = 0, steps = 0;
@@ -338,12 +345,16 @@ void EagleGeneration::generate(GenerationParams& param) {
         if(mContext->status == LlmStatus::USER_CANCEL) {
             break;
         }
-        steps++;
+        steps++, mEagleContext.steps = steps;
         MNN::Timer _dt;
-        // Switch to target profiler
-        mLlm->setActiveProfiler(targetProfiler);
-        mLlm->setupProfilerCallback();
-        targetProfiler->onDecodeTokenBegin();
+
+        if(profiling) {
+            // Switch to target profiler
+            mLlm->setActiveProfiler(targetProfiler);
+            mLlm->setupProfilerCallback();
+            targetProfiler->onDecodeTokenBegin();
+        }
+        // tree decoding
         auto decodingInfo = treeDecoding(draftInfo);
         for (auto o : decodingInfo) {
             if(nullptr == o->readMap<float>()) {
@@ -358,9 +369,13 @@ void EagleGeneration::generate(GenerationParams& param) {
         treeDecodingTime += _dt.durationInUs();
         auto acceptInfo = evaluatePosterior(draftInfo, decodingInfo[0]);
         
-        // Record accepted tokens
-        targetProfiler->onDecodeTokenEnd(acceptInfo.acceptTokens.size());
-
+        // Update target model time us
+        mEagleContext.target_time_us += _dt.durationInUs();
+        mEagleContext.accepted += acceptInfo.acceptTokens.size();
+        if(profiling) {
+            // Record accepted tokens
+            targetProfiler->onDecodeTokenEnd(acceptInfo.acceptTokens.size());
+        }
         newTokens += acceptInfo.acceptTokens.size();
         accpetLens.push_back(acceptInfo.acceptTokens.size());
         {
@@ -376,19 +391,26 @@ void EagleGeneration::generate(GenerationParams& param) {
             break;
         }
         MNN::Timer _gt;
-        // Switch to draft profiler
-        mLlm->setActiveProfiler(draftProfiler);
-        mLlm->setupProfilerCallback();
-        draftProfiler->onDecodeTokenBegin();
+        if(profiling) {
+            // Switch to draft profiler
+            mLlm->setActiveProfiler(draftProfiler);
+            mLlm->setupProfilerCallback();
+            draftProfiler->onDecodeTokenBegin();
+        }
+        // Draft model generate next several tokens
         draftInfo = updateDraft(acceptInfo, decodingInfo[1]);
-        draftProfiler->onDecodeTokenEnd();
+        if(profiling) {
+            draftProfiler->onDecodeTokenEnd(draftInfo.draftTokens.size());
+        }
+        mEagleContext.draft_time_us += _gt.durationInUs(), mEagleContext.draft += draftInfo.draftTokens.size();
         eagleGenerateTime += _gt.durationInUs();
     }
     mContext->decode_us += _t.durationInUs();
     if(newTokens >= param.max_new_tokens) {
         mContext->status = LlmStatus::MAX_TOKENS_FINISHED;
     }
-#if EAGLE_DEBUG
+    
+// #if EAGLE_DEBUG
     printf("\n### Tree Decoding Time: %f s, Eagle Generate Time: %f s\n", (float)treeDecodingTime / 1000000.0, (float)eagleGenerateTime / 1000000.0);
     printf("\n### Tree Decoding Avg Time: %f ms, steps: %d\n", (float)treeDecodingTime / 1000.0 / steps, steps);
     printf("\n### Compression Ratio: %f\n", (float)newTokens / steps);
@@ -396,7 +418,7 @@ void EagleGeneration::generate(GenerationParams& param) {
         printf("%d, ", acceptLen);
     }
     printf("\n");
-#endif
+// #endif
     return;
 }
 
