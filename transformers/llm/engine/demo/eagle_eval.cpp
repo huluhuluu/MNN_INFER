@@ -164,16 +164,20 @@ private:
             auto context = mLlm->getContext();
             const EagleContext* eagleCtx = mLlm->getEagleContext();
             
-            if (mConfig.verbose) {
+            {
+                // Print progress and current stats
                 int steps = eagleCtx ? eagleCtx->steps : 0;
                 float avgAccept = eagleCtx ? eagleCtx->avgAcceptLen() : 0;
-                std::cout << "[" << std::setw(4) << sampleCount << "] "
-                          << "tokens=" << std::setw(3) << context->gen_seq_len
-                          << ", steps=" << std::setw(3) << steps
-                          << ", avg_accept=" << std::fixed << std::setprecision(2) << avgAccept
-                          << ", time=" << std::setprecision(1) << timeMs << "ms\n";
-            } else if (sampleCount % (mTestPrompts.size()/20 + 1) == 0) {
-                std::cout << "Progress: " << sampleCount << "/" << mTestPrompts.size() << "\n";
+                double percent = 100.0 * sampleCount / mTestPrompts.size();
+                std::ostringstream oss;
+                oss << "\r[" << std::setw(4) << sampleCount << "/" << mTestPrompts.size() << "] "
+                    << "(" << std::setw(3) << static_cast<int>(percent) << "%) "
+                    << "| tokens=" << std::setw(4) << context->gen_seq_len
+                    << ", steps=" << std::setw(3) << steps
+                    << ", avg_accept=" << std::fixed << std::setprecision(2) << avgAccept
+                    << ", time=" << std::setprecision(1) << timeMs << "ms";
+
+                std::cout << oss.str() << "\033[K" << std::flush;
             }
         }
         

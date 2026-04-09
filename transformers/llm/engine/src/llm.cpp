@@ -873,10 +873,10 @@ std::vector<int> Llm::generate(MNN::Express::VARP input_embeds, int max_tokens) 
     }
     updateContext(seqLen, 0);
     mContext->prefill_us = _t.durationInUs();
-    printf("Prefill time: %ld us\n", mContext->prefill_us);
 
     // ========== Profiler: Prefill Phase End ==========
     if (mProfiler && mProfiler->isEnabled()) {
+        printf("Prefill time: %ld us\n", mContext->prefill_us);
         collectBackendProfileData();
         mProfiler->onPrefillEnd(mContext->prompt_len);
     }
