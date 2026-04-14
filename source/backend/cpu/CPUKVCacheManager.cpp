@@ -685,7 +685,6 @@ void CPUKVCacheManager::ProcessKey(const Tensor* key, int seqLen, int kvHead, in
 
         T* keyMax = reinterpret_cast<T*>(addrOfKeyMax(kvHead));
         int32_t params[] = {mKvNumHead, seqLen, mHeadDim, mConfig.mBlockNum, eP8, lP8, hP8, mPastLength, kvHead};
-        // TODO: verify
         mQuantKeyFunc(keyDst, key->host<float>() + bias, sumDst, (float*)keyMax, params);
     }
     else { // target: [maxlen/hP, headdim/lP, hP, lP]

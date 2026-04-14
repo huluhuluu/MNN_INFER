@@ -122,6 +122,8 @@ bool BatchKVCacheManager::remove(BatchKVMeta* meta){
             mBatchKVCacheManager.erase(iter);
         }
     }
+    // pipe mode: `remove info` comes from llm.cpp and received/cleard by KVCacheManager.cpp
+    meta->remove.clear();
     return true;
 }
 

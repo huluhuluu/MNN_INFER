@@ -56,6 +56,27 @@ private:
 
     std::function<void(const float*, int8_t*, size_t, const float*, ssize_t, ssize_t, const float*, ssize_t)> mQuantFunc;
     decltype(CoreInt8Functions::Int8GemmKernel) mInt8GemmKernel;
+
+    // set up KV cache manager for each batch, and calculate max request length for current batch
+    void setKVCache(int& maxReqLen) {
+        // remove unused cache manager for current batch
+        mKVCacheManagers->remove(mBatchMeta);
+        for(int id: mBatchMeta->calId){
+            maxReqLen = std::max(maxReqLen, (int)mBatchMeta->mMetas[id]->add);
+            if(mKVCacheManagers->getCacheManager(id) == nullptr){
+                MNN::KVCacheManager::KVCacheConfig config;
+                config.mKVCacheDir = kvconfig.mKVCacheDir;
+                config.mPrefixCacheDir = kvconfig.mPrefixCacheDir;
+                config.mExpandChunk = kvconfig.mExpandChunk;
+                config.mBlockNum = kvconfig.mBlockNum;
+                config.mKvAlignNum   = kvconfig.mKvAlignNum;
+                config.prefixName =  "req" + std::to_string(id) + "_";
+                mKVCacheManagers->addCacheManager(id, new CPUKVCacheManager(mBackend, config));
+                static_cast<CPUKVCacheManager*>(mKVCacheManagers->getCacheManager(id))->setAttenQuantKeyValue(mUseFlashAttention, mQuantKey, mQuantValue);
+                mKVCacheManagers->getCacheManager(id)->onResize(mKvNumHead, mHeadDim);
+            }
+        }
+    }
 };
 
 } // namespace MNN

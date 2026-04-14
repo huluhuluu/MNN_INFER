@@ -161,6 +161,7 @@ public:
     virtual void setWavformCallback(std::function<bool(const float*, size_t, bool)> callback) {}
     virtual void generateWavform() {}
     
+    void response(const std::vector<std::string>& user_content, std::ostream* os = &std::cout, const char* end_with = nullptr, int max_new_tokens = -1);
     void response(const std::vector<std::vector<int>>& input_ids, std::ostream* os = &std::cout, const char* end_with = nullptr, int max_new_tokens = -1);
     void response(const std::vector<ChatMessages>& chat_prompts, std::ostream* os = &std::cout, const char* end_with = nullptr, int max_new_tokens = -1);
     

@@ -75,6 +75,11 @@ struct BatchKVMeta{
         mMeta->file_name = file_name;
         mMeta->file_flag = file_flag;
     }
+
+    void reset() {
+
+    }
+
     ~BatchKVMeta() {
         for (auto& kv : mMetas) {
             if (kv.second) {
@@ -82,6 +87,8 @@ struct BatchKVMeta{
             }
         }
         mMetas.clear();
+        remove.clear();
+        calId.clear();
     }
 };
 

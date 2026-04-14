@@ -31,7 +31,7 @@
 namespace MNN {
 
 template <typename T>
-static void _maskQK(float * qkPacked, const float* scale, size_t seqLen, size_t subKvSeqLen, int pack, int maskStride, int kvoffset, const float* sinksPtr, const int8_t* maskPtr, bool quantKey) {
+static void _maskQK(float * qkPacked, const float* scale, size_t seqLen, size_t subKvSeqLen, int pack, int kvSeqLen, int kvoffset, const float* sinksPtr, const int8_t* maskPtr, bool quantKey, bool isLowerTriangular) {
     auto source = (T*)qkPacked;
     if (quantKey == false) {
         auto elementSize = seqLen * ROUND_UP(subKvSeqLen, pack);
@@ -41,22 +41,32 @@ static void _maskQK(float * qkPacked, const float* scale, size_t seqLen, size_t 
         }
     }
 
-    // mask: [seq, kvseq]
-    // data: [UP_DIV(kvseq, pack), seq, pack]
-    if (sinksPtr != nullptr) {
-        auto mask = (T*)maskPtr;
-        for (int i = 0; i < UP_DIV(subKvSeqLen, pack); ++i) {
-            for (int j = 0; j < seqLen; ++j) {
-                for (int k = 0; k < pack; ++k) {
-                    if (kvoffset + i * pack + k > maskStride - 1) {
-                        break;
-                    }
-                    source[i * seqLen * pack + j * pack + k] = source[i * seqLen * pack + j * pack + k] + mask[j * maskStride + kvoffset + i * pack + k];
+    if (isLowerTriangular || maskPtr == nullptr) {
+        return;
+    }
+
+    auto mask = (T*)maskPtr;
+    auto gapLen = kvSeqLen - seqLen;
+    auto maskStride = static_cast<int>(seqLen);
+    for (int i = 0; i < UP_DIV(subKvSeqLen, pack); ++i) {
+        for (int j = 0; j < seqLen; ++j) {
+            for (int k = 0; k < pack; ++k) {
+                int currentKvSeqIndx = kvoffset + i * pack + k;
+                if (currentKvSeqIndx >= kvSeqLen) {
+                    break;
                 }
+                if (currentKvSeqIndx < gapLen) {
+                    continue;
+                }
+                int maskIndex = currentKvSeqIndx - gapLen;
+                if (maskIndex >= maskStride) {
+                    break;
+                }
+                source[i * seqLen * pack + j * pack + k] =
+                    source[i * seqLen * pack + j * pack + k] + mask[j * maskStride + maskIndex];
             }
         }
     }
-
 }
 
 ErrorCode CPUPackedAttention::onResize(const std::vector<Tensor*>& inputs, const std::vector<Tensor*>& outputs) {
@@ -82,22 +92,7 @@ ErrorCode CPUPackedAttention::onResize(const std::vector<Tensor*>& inputs, const
     mKvNumHead = key->length(2);
 
     int maxReqLen = 0;
-    mKVCacheManagers->remove(mBatchMeta);
-    for(int id: mBatchMeta->calId){
-        maxReqLen = std::max(maxReqLen, (int)mBatchMeta->mMetas[id]->add);
-        if(mKVCacheManagers->getCacheManager(id) == nullptr){
-            MNN::KVCacheManager::KVCacheConfig config;
-            config.mKVCacheDir = kvconfig.mKVCacheDir;
-            config.mPrefixCacheDir = kvconfig.mPrefixCacheDir;
-            config.mExpandChunk = kvconfig.mExpandChunk;
-            config.mBlockNum = kvconfig.mBlockNum;
-            config.mKvAlignNum   = kvconfig.mKvAlignNum;
-            config.prefixName =  "req" + std::to_string(id) + "_";
-            mKVCacheManagers->addCacheManager(id, new CPUKVCacheManager(mBackend, config));
-        }
-        static_cast<CPUKVCacheManager*>(mKVCacheManagers->getCacheManager(id))->setAttenQuantKeyValue(mUseFlashAttention, mQuantKey, mQuantValue);
-        mKVCacheManagers->getCacheManager(id)->onResize(mKvNumHead, mHeadDim);
-    }
+    CPUPackedAttention::setKVCache(maxReqLen);
 
     // Common buffer allocated
     auto bufferAlloc = static_cast<CPUBackend*>(backend())->getBufferAllocator();
@@ -243,13 +238,15 @@ ErrorCode CPUPackedAttention::onExecute(const std::vector<Tensor*>& inputs, cons
 
     // KVcache settings
     int sumLen=0, maxKvSeqLen = 0, maxReqLen = 0, allReqLen = query->length(1), bs = mBatchMeta->calId.size();
-    mKVCacheManagers->remove(mBatchMeta);
+    CPUPackedAttention::setKVCache(maxReqLen);
     for(int id: mBatchMeta->calId){
         CPUKVCacheManager* mKVCacheManager = static_cast<CPUKVCacheManager*>(mKVCacheManagers->getCacheManager(id));
+        if (mKVCacheManager == nullptr) {
+            MNN_ERROR("CPUPackedAttention::onExecute: KVCacheManager for id=%d is nullptr! calId has %zu elements.\n", id, mBatchMeta->calId.size());
+        }
         KVMeta* mMeta = mBatchMeta->mMetas[id];
         
         int reqLen = (int)mMeta->add;
-        maxReqLen = std::max(maxReqLen, reqLen);
         // Update KV Cache
         if (mKVCache && mMeta != nullptr) {
             if (mMeta->previous == mMeta->remove) {
@@ -298,7 +295,9 @@ ErrorCode CPUPackedAttention::onExecute(const std::vector<Tensor*>& inputs, cons
         int reqLenBias = 0;
         for(int i=0; i<bs; ++i){
             int id = mBatchMeta->calId[i];
-            gcore->MNNCountMaxMinValue(query->host<float>() + reqLenBias, (float*)(&minValue), (float*)(&maxValue), mBatchMeta->mMetas[id]->add);
+            auto reqLen = static_cast<int>(mBatchMeta->mMetas[id]->add);
+            auto reqOffset = reqLenBias * mNumHead * mHeadDim;
+            gcore->MNNCountMaxMinValue(query->host<float>() + reqOffset, (float*)(&minValue), (float*)(&maxValue), reqLen * mNumHead * mHeadDim);
             float maxV = maxValue;
             float minV = minValue;
             float absMax = ALIMAX(fabsf(maxV), fabsf(minV));
@@ -489,6 +488,21 @@ ErrorCode CPUPackedAttention::onExecute(const std::vector<Tensor*>& inputs, cons
             infoFloatV[1] = reqLen; // eReal
             infoFloatV[3] = 1;      // stride
             int32_t elFloatV[4] = {reqLen, ROUND_UP(kvSeqLen, lP), 0, 0};
+            bool isLowerTriangular = (mask == nullptr);
+            if (mask != nullptr && inputs[3]->shape().empty()) {
+                if (mBytes == 2) {
+                    auto maskPtr = inputs[3]->host<FLOAT16_T>();
+                    if (maskPtr[0] < 1e-6) {
+                        isLowerTriangular = true;
+                    }
+                } else {
+                    auto maskPtr = inputs[3]->host<float>();
+                    if (maskPtr[0] < 1e-6f) {
+                        isLowerTriangular = true;
+                    }
+                }
+            }
+            bool useMaskInSoftmax = (isLowerTriangular && sinksPtr == nullptr);
 
             // pack quan Q (for each head, pack the query data)
             if (mQuantKey) {
@@ -652,22 +666,20 @@ ErrorCode CPUPackedAttention::onExecute(const std::vector<Tensor*>& inputs, cons
                     // 2. softmax scores
                     // qk: [kv_seq_len/mPack, seq_len, mPack] -> [seq_len/eP, kv_seq_len/lP, eP, lP]
                     {
-                        if(mBytes == 2) {
-                            if (!mQuantKey || sinksPtr != nullptr) {
-                                _maskQK<FLOAT16_T>((float*)qkPacked, &mScales[idx], reqLen, subKvSeqLen, mPack, kvSeqLen, i * mBlockKV, sinksPtr, mask + maskBias * mBytes, mQuantKey);
+                        if (mBytes == 2) {
+                            if (!mQuantKey || !isLowerTriangular || sinksPtr != nullptr) {
+                                _maskQK<FLOAT16_T>((float*)qkPacked, &mScales[idx], reqLen, subKvSeqLen, mPack, kvSeqLen, i * mBlockKV, sinksPtr, mask + maskBias * mBytes, mQuantKey, isLowerTriangular);
                             }
                         } else {
-                            if (!mQuantKey || sinksPtr != nullptr) {
-                                _maskQK<float>((float*)qkPacked, &mScales[idx], reqLen, subKvSeqLen, mPack, kvSeqLen, i * mBlockKV, sinksPtr, mask + maskBias * mBytes, mQuantKey);
+                            if (!mQuantKey || !isLowerTriangular || sinksPtr != nullptr) {
+                                _maskQK<float>((float*)qkPacked, &mScales[idx], reqLen, subKvSeqLen, mPack, kvSeqLen, i * mBlockKV, sinksPtr, mask + maskBias * mBytes, mQuantKey, isLowerTriangular);
                             }
                         }
-
-                        bool useMask = (sinksPtr == nullptr);
-                        gcore->MNNSoftmax(qkSoftmax, (float*)qkPacked, runningMax, runningSum, diffScale, reqLen, subKvSeqLen, i * mBlockKV, kvValidOffset, mPack, useMask);
+                        gcore->MNNSoftmax(qkSoftmax, (float*)qkPacked, runningMax, runningSum, diffScale, reqLen, subKvSeqLen, i * mBlockKV, kvValidOffset, mPack, useMaskInSoftmax);
                     }
                     // 3. qk @ v
                     auto qkStride0 = ROUND_UP(subKvSeqLen, lP) * eP * mBytes;
-                    auto rowStart = (i * mBlockKV < kvValidOffset)? 0 : (i * mBlockKV - kvValidOffset);
+                    auto rowStart = (!isLowerTriangular || i * mBlockKV < kvValidOffset) ? 0 : (i * mBlockKV - kvValidOffset);
 
                     if (mQuantValue == false) {
                         auto valuePtr = valueAddr + i * vstride0 * mBytes;

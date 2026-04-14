@@ -23,22 +23,35 @@ struct BatchKVMeta;
 class BatchScheduler {
 public:
     enum RequestState {
-        PREFILL,
-        DECODE,
-        ERROR,
-        FINISH,
-        PENDING // TODO:
+        PREFILL = 1,
+        DECODE = 2,
+        ERROR = 4,
+        FINISH = 8,
+        PENDING = 16 // TODO:
     };
+    static const bool judgeState(int code, RequestState state) {
+        return (code & state) != 0;
+    }
     struct Request {
         int id;
-        std::vector<int> tokens;       // history tokens
-        int proc_len = 0;              // processed length
-        int gen_len = 0;               // generated length
-        bool finished = false;         // request state
-        Request(int i, const std::vector<int>& t) : id(i), tokens(t) {
-            proc_len = 0; 
-            gen_len = 0; 
+        // tokens (aligned with LlmContext)
+        std::vector<int> history_tokens;  // all tokens (history + current prompt + generated)
+        std::vector<int> output_tokens;   // current generated tokens (for easy result access)
+        // length tracking (aligned with LlmContext)
+        int prompt_len = 0;    // current prompt length
+        int gen_seq_len = 0;   // current generated length
+        int all_seq_len = 0;   // KV cache length (already processed)
+        // pending prompt for multi-turn chat
+        std::vector<int> pending_prompt;
+        bool has_pending = false;
+        // state
+        bool finished = false;
+        
+        Request(int i, const std::vector<int>& t) : id(i), history_tokens(t), prompt_len(t.size()) {
+            gen_seq_len = 0;
+            all_seq_len = 0;
             finished = false;
+            has_pending = false;
         }
     };
 
@@ -57,14 +70,19 @@ public:
     int addRequest(const std::vector<int>& prompt);
     std::vector<int> addRequest(const std::vector<std::vector<int>>& prompts);
 
+    // append new prompt to existing request (for multi-turn chat)
+    bool appendPrompt(int req_id, const std::vector<int>& new_prompt);
+
     // schedule logic
-    std::shared_ptr<Chunk> schedule(int blockSize = -1);
+    // blockSize: chunk size for prefill, -1 means use default
+    // bs: batch size limit for number of requests per schedule, -1 means no limit (FIFO)
+    std::shared_ptr<Chunk> schedule(int blockSize = -1, int bs = -1);
 
     // update generated token
-    bool update(int req_id, int new_token, bool is_stop_token);
+    bool update(int req_id, int new_token, int cal_len, bool is_stop_token);
 
     // prefill or decode
-    RequestState state(int req_id) const;
+    int state(int req_id) const;
 
     bool hasValidWork() const;
 
@@ -73,8 +91,10 @@ public:
     
     // remove finished request
     bool releaseReq(int req_id);
+    bool releaseKVCache(int req_id);
     bool isFinished(int req_id) const;
 
+    void setMaxNewTokens(int max_new_tokens) { mMaxNewTokens = max_new_tokens; }
 private:
     std::vector<std::shared_ptr<Request>> mRequests;
     std::map<int, int> mReqIdToIndex; // requestId:vectorIndex

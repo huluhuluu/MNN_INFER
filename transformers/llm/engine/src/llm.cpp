@@ -60,7 +60,6 @@ void BatchKVMeta::sync() {
     for (auto& meta : mMetas) {
         meta.second->sync();
     }
-    // TODO: remove kvcache problem
     calId.clear();
 }
 static MNNForwardType backend_type_convert(const std::string& type_str) {
@@ -709,7 +708,12 @@ void Llm::reset() {
     mContext->pixels_mp = 0.0f;
     mContext->audio_us = 0;
     mContext->audio_input_s = 0.0f;
-    mMeta->remove = mMeta->previous;
+    if(mMeta){
+        mMeta->remove = mMeta->previous;
+    }
+    if(mBatchMeta){
+        mBatchMeta->reset();
+    }
 }
 
 void Llm::generate_init(std::ostream* os, const char* end_with) {
@@ -842,14 +846,24 @@ std::vector<int> Llm::generate(const std::vector<int>& input_ids, int max_tokens
 std::vector<std::vector<int>> Llm::generate(const std::vector<std::vector<int> >& input_ids, std::ostream* os, int max_new_tokens){
     int gen_len = 0, bs = input_ids.size();
     std::vector<std::vector<int>> ret(bs, std::vector<int>{});
+    
+    // Reset context for batch generation
+    mContext->prompt_len = 0;
+    mContext->gen_seq_len = 0;
+    mContext->all_seq_len = 0;
+    
     // add all requests
     std::vector<int> reqIds= mScheduler->addRequest(input_ids);
     
+    if(max_new_tokens > 0) {
+        mScheduler->setMaxNewTokens(max_new_tokens);
+    }
     // set batch kvcache, but actually works in Llm::setRuntimeHint
     mRuntimeManager->setHintPtr(Interpreter::KVCACHE_INFO, mBatchMeta.get());
 
     // generation loop
-    while (std::shared_ptr<BatchScheduler::Chunk> chunk = mScheduler->schedule()){// chunk prefill
+    // TODO: 
+    while (std::shared_ptr<BatchScheduler::Chunk> chunk = mScheduler->schedule(-1, 4)){// chunk prefill
         // prepare inputs
         Express::VARP hidden_states = this->embedding(chunk->inputs, chunk->calLen, chunk->culLen);
         Express::VARP attention_mask = this->gen_attention_mask(chunk->calLen);
@@ -879,10 +893,20 @@ std::vector<std::vector<int>> Llm::generate(const std::vector<std::vector<int> >
         int sumLen = 0;
         for (int i = 0; i < chunk->pos.size(); ++i) {
             sumLen += chunk->calLen[i];
-            // skip prefill
-            if(mScheduler->state(chunk->reqId[i]) != BatchScheduler::RequestState::DECODE) {
+            
+            // Use calLen > 1 to detect prefill (schedule already updated all_seq_len)
+            if(chunk->calLen[i] > 1) {
+                updateContext(chunk->calLen[i], 0);  // prefill: update all_seq_len
+                mContext->prompt_len += chunk->calLen[i];
+            }
+
+            auto state = mScheduler->state(chunk->reqId[i]);
+            // skip prefill - only sample when in decode phase
+            if (!BatchScheduler::judgeState(state, BatchScheduler::RequestState::DECODE)) {
                 continue;
             }
+            
+            updateContext(1, 1);  // decode: update all_seq_len and gen_seq_len
 
             // get logits for request i
             Express::VARP logit = MNN::Express::_Gather(logits, _Scalar(sumLen - 1));
@@ -890,9 +914,13 @@ std::vector<std::vector<int>> Llm::generate(const std::vector<std::vector<int> >
             int token  = this->sample(logit);
 
             int id = chunk->reqId[i];
-            mScheduler->update(id, token, is_stop(token));
+            mScheduler->update(id, token, chunk->calLen[i], is_stop(token));
+            // remove finished request
+            if(mScheduler->isFinished(id)) {
+                mScheduler->releaseKVCache(id);
+            }
             // print token str
-            // std::cout<<"ReqId: "<<chunk->reqId[i]<<" | token: "<<token<<" | "<<this->tokenizer_decode(token)<<std::endl;
+            // std::cout<<"ReqId: "<<id<<" | token: "<<token<<" | "<<this->tokenizer_decode(token)<<std::endl;
         }
         mBatchMeta->sync();
     }
@@ -1008,6 +1036,21 @@ void Llm::response(const std::vector<int>& input_ids, std::ostream* os, const ch
     generate(input_ids, max_new_tokens);
 }
 
+void Llm::response(const std::vector<std::string>& user_content, std::ostream* os, const char* end_with, int max_new_tokens) {
+    auto prompt = user_content;
+    if (mConfig->use_template()) {
+        for(auto& content: prompt){
+            content = mPrompt->applyTemplate(content, true);
+        }
+    }
+    std::vector<std::vector<int> > input_ids;
+    for(const auto& content: prompt){
+        std::vector<int> input_id = tokenizer_encode(content);
+        input_ids.push_back(input_id);
+    }
+    response(input_ids, os, end_with, max_new_tokens);
+}
+
 void Llm::response(const std::vector<std::vector<int>>&  input_ids, std::ostream* os, const char* end_with, int max_new_tokens) {
     if (!end_with) { end_with = "\n"; }
     generate_init(os, end_with);
@@ -1054,7 +1097,8 @@ void Llm::response(const std::vector<ChatMessages>& chat_prompts, std::ostream* 
     }
     
     
-    AUTOTIME
+    Timer _t;
+    _t.reset();
     // check packed mode
     if(mConfig->packed_attention()){
         generate(input_ids, os, max_new_tokens);
@@ -1065,6 +1109,7 @@ void Llm::response(const std::vector<ChatMessages>& chat_prompts, std::ostream* 
             generate(input, max_new_tokens);
         }
     }
+    printf("[Llm] Response total time: %.2f ms\n", _t.durationInUs() / 1000.0);
 }
 
 
@@ -1275,6 +1320,13 @@ VARP Llm::gen_attention_mask(const std::vector<int>& calLen){
     if (mConfig->attention_mask() == "float") {
         // TODO: full and sliding mix, using normal mask
         if (mConfig->attention_type() == "mix") {
+        }
+
+        if (mConfig->backend_type() == "cpu") {
+            attentionMask = _Input({}, NCHW, halide_type_of<float>());
+            auto ptr = attentionMask->writeMap<float>();
+            ptr[0] = 0.0f;
+            return attentionMask;
         }
 
         // Use square mask just for new generation token, save memory of attention mask

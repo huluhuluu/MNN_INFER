@@ -1827,6 +1827,8 @@ public:
         auto openCLBackend = static_cast<OpenCLBackend *>(backend);
         
         // Check if packed mode is enabled
+        // Note: OpenCL PackedAttention is currently disabled due to data layout issues
+        // For batched inference, please use CPU backend
         bool usePacked = openCLBackend->getRuntime()->hint().packedAttentionMode > 0;
         
         if (usePacked) {
