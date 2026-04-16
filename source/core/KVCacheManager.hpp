@@ -93,16 +93,19 @@ public:
 // TODO: mutithrea read and write
 class BatchKVCacheManager : public NonCopyable{
 public:
-    bool remove(BatchKVMeta* meta);
+    bool release(int req_id);
     KVCacheManager* getCacheManager(int req_id);
     bool addCacheManager(int req_id, KVCacheManager* cacheManager);
     
     void onClear(){
-        for (auto& iter : mBatchKVCacheManager) {
-            iter.second->onClear();
-            delete iter.second;
+        std::vector<int> reqIds;
+        reqIds.reserve(mBatchKVCacheManager.size());
+        for (const auto& iter : mBatchKVCacheManager) {
+            reqIds.push_back(iter.first);
         }
-        mBatchKVCacheManager.clear();
+        for (int reqId : reqIds) {
+            release(reqId);
+        }
     }
     BatchKVCacheManager() {
         // do nothing

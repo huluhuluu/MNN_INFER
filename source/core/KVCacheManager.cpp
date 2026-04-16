@@ -109,21 +109,14 @@ void KVCacheManager::unmapKVCache(size_t keySize, size_t valueSize)
     }
 }
 
-bool BatchKVCacheManager::remove(BatchKVMeta* meta){
-    if(meta == nullptr){
+bool BatchKVCacheManager::release(int req_id) {
+    auto iter = mBatchKVCacheManager.find(req_id);
+    if (iter == mBatchKVCacheManager.end()) {
         return false;
     }
-    // remove request's kvmeta
-    for(int id: meta->remove){
-        auto iter = mBatchKVCacheManager.find(id);
-        if(iter != mBatchKVCacheManager.end()){
-            delete iter->second;
-            iter->second = nullptr;
-            mBatchKVCacheManager.erase(iter);
-        }
-    }
-    // pipe mode: `remove info` comes from llm.cpp and received/cleard by KVCacheManager.cpp
-    meta->remove.clear();
+    delete iter->second;
+    iter->second = nullptr;
+    mBatchKVCacheManager.erase(iter);
     return true;
 }
 
