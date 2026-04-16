@@ -8,6 +8,9 @@
 
 #ifndef OpCommonUtils_hpp
 #define OpCommonUtils_hpp
+#include <functional>
+#include <map>
+#include <vector>
 #include <MNN/Tensor.hpp>
 #include "TensorUtils.hpp"
 #include "FileLoader.hpp"
@@ -46,12 +49,32 @@ struct KVMeta {
         return sum;
     }
 };
-struct BatchKVMeta{
-    std::map<int, KVMeta*> mMetas;
-    std::vector<int> remove;
+struct BatchKVMeta {
+    using ResetCallback = std::function<void()>;
+    using ReleaseCallback = std::function<void(int)>;
 
-    // calculated request id for next compute
-    std::vector<int> calId; 
+    std::map<int, KVMeta*> mMetas;
+    std::vector<int> calId; // calculated request id for next compute
+
+    // Mirror of engine BatchKVMeta for backend->getMetaPtr() casts.
+    // Keep member order aligned with transformers/llm/engine/src/kvmeta.hpp.
+    void registerResetCallback(const void* owner, ResetCallback callback) {
+        if (owner == nullptr || !callback) {
+            return;
+        }
+        mResetCallbacks[owner] = std::move(callback);
+    }
+
+    void registerReleaseCallback(const void* owner, ReleaseCallback callback) {
+        if (owner == nullptr || !callback) {
+            return;
+        }
+        mReleaseCallbacks[owner] = std::move(callback);
+    }
+
+private:
+    std::map<const void*, ResetCallback> mResetCallbacks;
+    std::map<const void*, ReleaseCallback> mReleaseCallbacks;
 };
 
 #endif

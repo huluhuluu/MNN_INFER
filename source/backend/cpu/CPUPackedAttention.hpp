@@ -12,6 +12,7 @@
 #define CPUPACKEDATTENTION_HPP
 
 #include <functional>
+#include <memory>
 #include "core/Execution.hpp"
 #include "core/OpCommonUtils.hpp"
 #include "CPUKVCacheManager.hpp"
@@ -21,7 +22,7 @@ namespace MNN {
 
 class CPUPackedAttention : public Execution {
 public:
-    CPUPackedAttention(Backend *backend, bool kv_cache);
+    CPUPackedAttention(Backend *backend, bool kv_cache, std::shared_ptr<BatchKVCacheManager> cacheManagers = nullptr);
     virtual ~CPUPackedAttention();
     virtual ErrorCode onResize(const std::vector<Tensor *> &inputs, const std::vector<Tensor *> &outputs) override;
     virtual ErrorCode onExecute(const std::vector<Tensor *> &inputs, const std::vector<Tensor *> &outputs) override;
@@ -57,10 +58,11 @@ private:
     std::function<void(const float*, int8_t*, size_t, const float*, ssize_t, ssize_t, const float*, ssize_t)> mQuantFunc;
     decltype(CoreInt8Functions::Int8GemmKernel) mInt8GemmKernel;
 
+    void registerResetCallback();
+    void registerReleaseCallback();
+
     // set up KV cache manager for each batch, and calculate max request length for current batch
     void setKVCache(int& maxReqLen) {
-        // remove unused cache manager for current batch
-        mKVCacheManagers->remove(mBatchMeta);
         for(int id: mBatchMeta->calId){
             maxReqLen = std::max(maxReqLen, (int)mBatchMeta->mMetas[id]->add);
             if(mKVCacheManagers->getCacheManager(id) == nullptr){

@@ -782,17 +782,41 @@ ErrorCode CPUPackedAttention::onExecute(const std::vector<Tensor*>& inputs, cons
     return NO_ERROR;
 }
 
+void CPUPackedAttention::registerResetCallback() {
+    if (mBatchMeta == nullptr || mKVCacheManagers == nullptr) {
+        return;
+    }
+    std::weak_ptr<BatchKVCacheManager> weakManagers = mKVCacheManagers;
+    mBatchMeta->registerResetCallback(mKVCacheManagers.get(), [weakManagers]() {
+        auto managers = weakManagers.lock();
+        if (managers != nullptr) {
+            managers->onClear();
+        }
+    });
+}
+
+void CPUPackedAttention::registerReleaseCallback() {
+    if (mBatchMeta == nullptr || mKVCacheManagers == nullptr) {
+        return;
+    }
+    std::weak_ptr<BatchKVCacheManager> weakManagers = mKVCacheManagers;
+    mBatchMeta->registerReleaseCallback(mKVCacheManagers.get(), [weakManagers](int reqId) {
+        auto managers = weakManagers.lock();
+        if (managers != nullptr) {
+            managers->release(reqId);
+        }
+    });
+}
+
 bool CPUPackedAttention::onClone(Backend* bn, const Op* op, Execution** dst) {
     if (nullptr == dst) {
         return true;
     }
-    auto tmp = new CPUPackedAttention(bn, mKVCache);
-    tmp->mKVCacheManagers = mKVCacheManagers;
-    *dst = tmp;
+    *dst = new CPUPackedAttention(bn, mKVCache, mKVCacheManagers);
     return true;
 }
 
-CPUPackedAttention::CPUPackedAttention(Backend *backend, bool kv_cache) : Execution(backend), mKVCache(kv_cache) {
+CPUPackedAttention::CPUPackedAttention(Backend *backend, bool kv_cache, std::shared_ptr<BatchKVCacheManager> cacheManagers) : Execution(backend), mKVCache(kv_cache) {
     mBatchMeta = (BatchKVMeta*)(backend->getMetaPtr());
     mPackQ.reset(Tensor::createDevice<float>({1, 1, 1, 1}));
     mPackQKV.reset(Tensor::createDevice<float>({1, 1, 1, 1}));
@@ -803,7 +827,9 @@ CPUPackedAttention::CPUPackedAttention(Backend *backend, bool kv_cache) : Execut
     kvconfig.mBlockNum = 1;
 
     mBackend = backend;
-    mKVCacheManagers = std::make_shared<BatchKVCacheManager>();
+    mKVCacheManagers = cacheManagers ? cacheManagers : std::make_shared<BatchKVCacheManager>();
+    registerResetCallback();
+    registerReleaseCallback();
 }
 
 CPUPackedAttention::~CPUPackedAttention() {

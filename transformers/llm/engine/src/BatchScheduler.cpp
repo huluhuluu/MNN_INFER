@@ -209,7 +209,7 @@ bool BatchScheduler::releaseKVCache(int req_id){
     if (ind < 0 || ind >= mRequests.size() || !mRequests[ind]->finished) return false;
 
     // release kv meta
-    mBatchKVMeta->remove.push_back(req_id);
+    mBatchKVMeta->releaseKV(req_id);
     return true;
 }
 
