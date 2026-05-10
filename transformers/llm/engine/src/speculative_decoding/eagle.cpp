@@ -330,15 +330,18 @@ void EagleGeneration::generate(GenerationParams& param) {
         // Switch to draft profiler
         mLlm->setActiveProfiler(draftProfiler);
         mLlm->setupProfilerCallback();
-        draftProfiler->onDecodeTokenBegin();
+        draftProfiler->onPrefillStart();
     }
     auto draftInfo  = topkGenerate(inputIds, hiddenStates, inputEmbeds);
     if(profiling) {
-        draftProfiler->onDecodeTokenEnd(draftInfo.draftTokens.size());
+        mLlm->collectBackendProfileData();
+        draftProfiler->onPrefillEnd(inputIds.size() + inputEmbeds->getInfo()->dim[0]);
     }
-    // Update draft model time us
-    mEagleContext.draft_time_us += _gt.durationInUs(), mEagleContext.draft += draftInfo.draftTokens.size();
-    eagleGenerateTime += _gt.durationInUs();
+    const auto draftPrefillUs = _gt.durationInUs();
+    mEagleContext.draft_time_us += draftPrefillUs;
+    mEagleContext.draft_prefill_time_us += draftPrefillUs;
+    mEagleContext.draft += draftInfo.draftTokens.size();
+    eagleGenerateTime += draftPrefillUs;
     std::vector<int> accpetLens;
     auto newTokens = 0, steps = 0;
     while (true) {
@@ -365,12 +368,12 @@ void EagleGeneration::generate(GenerationParams& param) {
         if(decodingInfo.empty()) {
             break;
         }
-        
-        treeDecodingTime += _dt.durationInUs();
+
+        const auto targetVerifyUs = _dt.durationInUs();
+        treeDecodingTime += targetVerifyUs;
         auto acceptInfo = evaluatePosterior(draftInfo, decodingInfo[0]);
         
-        // Update target model time us
-        mEagleContext.target_time_us += _dt.durationInUs();
+        mEagleContext.target_time_us += targetVerifyUs;
         mEagleContext.accepted += acceptInfo.acceptTokens.size();
         if(profiling) {
             // Record accepted tokens
@@ -402,8 +405,11 @@ void EagleGeneration::generate(GenerationParams& param) {
         if(profiling) {
             draftProfiler->onDecodeTokenEnd(draftInfo.draftTokens.size());
         }
-        mEagleContext.draft_time_us += _gt.durationInUs(), mEagleContext.draft += draftInfo.draftTokens.size();
-        eagleGenerateTime += _gt.durationInUs();
+        const auto draftDecodeUs = _gt.durationInUs();
+        mEagleContext.draft_time_us += draftDecodeUs;
+        mEagleContext.draft_decode_time_us += draftDecodeUs;
+        mEagleContext.draft += draftInfo.draftTokens.size();
+        eagleGenerateTime += draftDecodeUs;
     }
     mContext->decode_us += _t.durationInUs();
     if(newTokens >= param.max_new_tokens) {

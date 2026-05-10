@@ -861,6 +861,8 @@ std::vector<int> Llm::generate(MNN::Express::VARP input_embeds, int max_tokens) 
     // ========== Profiler: Prefill Phase Start ==========
     if (mProfiler && mProfiler->isEnabled() && mContext->current_stage == LlmStage::Idle) {
         mContext->current_stage = LlmStage::Prefill;
+        setActiveProfiler(mProfiler.get());
+        setupProfilerCallback();
         mProfiler->onPrefillStart();
     }
     // ========== End Profiler: Prefill Phase Start ==========

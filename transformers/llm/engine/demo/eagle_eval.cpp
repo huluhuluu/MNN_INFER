@@ -75,6 +75,7 @@ private:
     EvalConfig mConfig;
     std::unique_ptr<Llm> mLlm;
     std::vector<std::string> mTestPrompts;
+    int64_t mTotalPromptLen = 0;
     
     bool loadTestData() {
         std::ifstream file(mConfig.dataFile);
@@ -143,6 +144,7 @@ private:
         
         // Reset once at the beginning - LLM's EagleContext will accumulate all samples
         mLlm->resetEagleContext();
+        mTotalPromptLen = 0;
         
         int sampleCount = 0;
         for (const auto& prompt : mTestPrompts) {
@@ -163,6 +165,7 @@ private:
             // Get current stats (accumulated so far)
             auto context = mLlm->getContext();
             const EagleContext* eagleCtx = mLlm->getEagleContext();
+            mTotalPromptLen += context->prompt_len;
             
             {
                 // Print progress and current stats
@@ -193,6 +196,7 @@ private:
         
         std::cout << "--- Statistics ---\n";
         std::cout << "Total samples:          " << totalSamples << "\n";
+        std::cout << "Total prompt len:       " << mTotalPromptLen << "\n";
         std::cout << "Total decoding steps:   " << ctx->steps << "\n";
         std::cout << "Total draft tokens:     " << ctx->draft << "\n";
         std::cout << "Total accepted tokens:  " << ctx->accepted << "\n";
@@ -223,6 +227,7 @@ private:
         
         file << "{\n";
         file << "  \"samples\": " << totalSamples << ",\n";
+        file << "  \"total_prompt_len\": " << mTotalPromptLen << ",\n";
         file << "  \"total_steps\": " << ctx->steps << ",\n";
         file << "  \"total_draft_tokens\": " << ctx->draft << ",\n";
         file << "  \"total_accepted_tokens\": " << ctx->accepted << ",\n";

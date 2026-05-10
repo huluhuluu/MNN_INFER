@@ -23,6 +23,8 @@ struct EagleContext {
     uint accepted = 0;           // total accepted tokens
     uint steps = 0;                    // total decoding steps
     uint64_t draft_time_us = 0;        // total draft model time (microseconds)
+    uint64_t draft_prefill_time_us = 0; // initial draft tree build time (microseconds)
+    uint64_t draft_decode_time_us = 0;  // iterative draft update time (microseconds)
     uint64_t target_time_us = 0;       // total target model time (microseconds)
     
     void reset() {
@@ -30,6 +32,8 @@ struct EagleContext {
         accepted = 0;
         steps = 0;
         draft_time_us = 0;
+        draft_prefill_time_us = 0;
+        draft_decode_time_us = 0;
         target_time_us = 0;
     }
     
