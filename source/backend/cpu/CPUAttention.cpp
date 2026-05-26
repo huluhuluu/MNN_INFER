@@ -334,7 +334,7 @@ ErrorCode CPUAttention::onExecute(const std::vector<Tensor*>& inputs, const std:
     int insertLen = seqLen;
 
     if (mKVCache && mMeta != nullptr) {
-        if (mMeta->previous == mMeta->remove) {
+        if (mMeta->previous == mMeta->remove && mMeta->n_reserve == 0) {
             mKVCacheManager->onClear();
             mKVCacheManager->onAlloc(mMeta, seqLen);
         } else {

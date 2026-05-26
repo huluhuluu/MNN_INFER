@@ -172,6 +172,8 @@ private: // For eagle_eval access
     MNN::Express::VARPS eagleForwardRaw(const MNN::Express::VARPS& inputs);
     MNN::Express::VARPS eagleForward(const std::vector<int>& inputEmbeds, MNN::Express::VARP hiddenStates, bool allLogits = false);
     MNN::Express::VARPS eagleForward(MNN::Express::VARP inputEmbeds, MNN::Express::VARP hiddenStates, bool allLogits = false);
+    void applySlidingWindowKVCache(size_t add);
+    MNN::Express::VARP genAttentionMask(int seqLen);
     DraftInfo topkGenerate(const std::vector<int>& inputIds, MNN::Express::VARP hiddenStates, MNN::Express::VARP inputEmbeds = nullptr);
     VARPS treeDecoding(const DraftInfo& draftInfo);
     AcceptInfo evaluatePosterior(const DraftInfo& drafInfo, VARP logits);

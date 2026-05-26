@@ -80,9 +80,82 @@ void EagleGeneration::setPosition(int position) {
     }
 }
 
+void EagleGeneration::applySlidingWindowKVCache(size_t add) {
+    if (mEagleMeta == nullptr) {
+        return;
+    }
+    auto slidingWindow = mLlm->mConfig->eagle_sliding_window();
+    auto remove = std::min(mEagleMeta->remove, mEagleMeta->previous);
+    if (slidingWindow <= 0 || mEagleMeta->n_reserve > 0 || mEagleMeta->file_flag == KVMeta::PendingRead) {
+        mEagleMeta->remove = remove;
+        mEagleMeta->add = add;
+        return;
+    }
+    auto previous = mEagleMeta->previous;
+    auto stablePrevious = previous - remove;
+    auto keep = add >= (size_t)slidingWindow ? 0 : (size_t)slidingWindow - add;
+    if (stablePrevious <= keep) {
+        mEagleMeta->remove = remove;
+        mEagleMeta->add = add;
+        return;
+    }
+    if (keep == 0) {
+        mEagleMeta->remove = previous;
+        mEagleMeta->reserve = nullptr;
+        mEagleMeta->n_reserve = 0;
+        mEagleMeta->add = add;
+        return;
+    }
+    mEagleMeta->reserveHost.resize(2);
+    mEagleMeta->reserveHost[0] = (int)(stablePrevious - keep);
+    mEagleMeta->reserveHost[1] = (int)keep;
+    mEagleMeta->remove = previous;
+    mEagleMeta->reserve = mEagleMeta->reserveHost.data();
+    mEagleMeta->n_reserve = 1;
+    mEagleMeta->add = add;
+}
+
+MNN::Express::VARP EagleGeneration::genAttentionMask(int seqLen) {
+    if (mLlm->mConfig->attention_mask() == "float") {
+        if (mLlm->mConfig->backend_type() == "cpu") {
+            auto attentionMask = _Input({}, NCHW, halide_type_of<float>());
+            attentionMask->writeMap<float>()[0] = 0.0f;
+            return attentionMask;
+        }
+        auto kvSeqLen = (int)mLlm->pendingKVCacheLength(seqLen, mEagleMeta);
+        auto pastKvLen = kvSeqLen - seqLen;
+        auto logicalPastStart = mEaglePastLen - pastKvLen;
+        auto attentionMask = _Input({1, 1, seqLen, kvSeqLen}, NCHW, halide_type_of<float>());
+        auto ptr = attentionMask->writeMap<float>();
+        for (int i = 0; i < seqLen; ++i) {
+            auto queryPos = mEaglePastLen + i;
+            for (int j = 0; j < kvSeqLen; ++j) {
+                auto keyPos = j < pastKvLen ? logicalPastStart + j : mEaglePastLen + j - pastKvLen;
+                ptr[i * kvSeqLen + j] = keyPos > queryPos ? std::numeric_limits<float>::lowest() : 0.0f;
+            }
+        }
+        return attentionMask;
+    }
+    auto kvSeqLen = (int)mLlm->pendingKVCacheLength(seqLen, mEagleMeta);
+    auto pastKvLen = kvSeqLen - seqLen;
+    auto logicalPastStart = mEaglePastLen - pastKvLen;
+    auto attentionMask = _Input({1, 1, seqLen, kvSeqLen}, NCHW, halide_type_of<int>());
+    auto ptr = attentionMask->writeMap<int>();
+    for (int i = 0; i < seqLen; ++i) {
+        auto queryPos = mEaglePastLen + i;
+        for (int j = 0; j < kvSeqLen; ++j) {
+            auto keyPos = j < pastKvLen ? logicalPastStart + j : mEaglePastLen + j - pastKvLen;
+            ptr[i * kvSeqLen + j] = keyPos <= queryPos;
+        }
+    }
+    return attentionMask;
+}
+
 std::vector<MNN::Express::VARP> EagleGeneration::eagleForwardRaw(const std::vector<MNN::Express::VARP>& inputs) {
     int seq_len     = inputs[0]->getInfo()->dim[0];
-    mEagleMeta->add = seq_len;
+    if (mEagleMeta->add != (size_t)seq_len) {
+        applySlidingWindowKVCache(seq_len);
+    }
 #if EAGLE_DEBUG
     printf("pos: "); for (auto i = 0; i < seq_len; i++) printf("%d, ", inputs[3]->readMap<int>()[i]); printf("\n");
 #endif
@@ -93,7 +166,8 @@ std::vector<MNN::Express::VARP> EagleGeneration::eagleForwardRaw(const std::vect
 
 std::vector<VARP> EagleGeneration::eagleForward(Express::VARP input_embeds, VARP hidden_states, bool all_logits) {
     int seq_len         = input_embeds->getInfo()->dim[0];
-    auto attention_mask = mLlm->gen_attention_mask(seq_len);
+    applySlidingWindowKVCache(seq_len);
+    auto attention_mask = genAttentionMask(seq_len);
     auto position_ids = _Input({1, seq_len}, NCHW, halide_type_of<int>());
     for (int i = 0; i < seq_len; i++) {
         position_ids->writeMap<int>()[i] = mEaglePastLen + i;
@@ -146,8 +220,12 @@ EagleGeneration::DraftInfo EagleGeneration::topkGenerate(const std::vector<int>&
     for (int d = 0; d < mDepth - 1; d++) {
         setPosition(seqLen + d);
         inputEmbeds   = mLlm->embedding(tokenTree.getIds());
-        auto attentionMask = getMask(tokenTree.getMask(), seqLen);
         mEagleMeta->remove = 0;
+        auto treeMask = tokenTree.getMask();
+        applySlidingWindowKVCache(inputEmbeds->getInfo()->dim[0]);
+        auto kvSeqLen = (int)mLlm->pendingKVCacheLength(inputEmbeds->getInfo()->dim[0], mEagleMeta);
+        auto historyLen = std::max(0, kvSeqLen - (int)treeMask[0].size());
+        auto attentionMask = getMask(treeMask, historyLen);
         outputs = eagleForwardRaw({inputEmbeds, inputHidden, attentionMask, mTreePosition, mLlm->logitsAllIdx});
         lastP   = outputs[0];
         inputHidden  = outputs[1];
