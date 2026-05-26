@@ -185,10 +185,13 @@ protected:
     friend class EagleGeneration;
     std::vector<Express::VARP> forwardVec(const std::vector<int>& input_ids);
     std::vector<Express::VARP> forwardVec(MNN::Express::VARP input_embeds);
+    size_t pendingKVCacheLength(size_t add, const std::shared_ptr<KVMeta>& meta) const;
 private:
     std::shared_ptr<Generation> mGenerationStrategy;
     void setSpeculativeConfig();
     void updateContext(int seq_len, int gen_len);
+    void applySlidingWindowKVCache(size_t add);
+    size_t pendingKVCacheLength(size_t add) const;
 private:
     bool mInSpec = false;
     int mDraftLength = 4;

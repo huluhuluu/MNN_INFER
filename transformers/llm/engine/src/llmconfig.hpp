@@ -640,6 +640,9 @@ public:
     std::string eagle_d2t() const {
         return base_dir_ + config_.value("eagle_d2t", "eagle_d2t.mnn");
     }
+    int eagle_sliding_window() const {
+        return config_.value("eagle_sliding_window", 0);
+    }
     int eagle_depth() const {
         return config_.value("eagle_depth", 3);
     }

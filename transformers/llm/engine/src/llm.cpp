@@ -445,6 +445,60 @@ void Llm::setKVCacheInfo(size_t add, size_t remove, int* reserve, int n_reserve)
     mMeta->add = add;
 }
 
+static size_t _kvMetaReserveSize(const KVMeta* meta) {
+    if (meta == nullptr || meta->reserve == nullptr || meta->n_reserve <= 0) {
+        return 0;
+    }
+    size_t size = 0;
+    for (int i = 0; i < meta->n_reserve; ++i) {
+        auto reserveSize = meta->reserve[2 * i + 1];
+        if (reserveSize > 0) {
+            size += reserveSize;
+        }
+    }
+    return size;
+}
+
+void Llm::applySlidingWindowKVCache(size_t add) {
+    if (mMeta == nullptr) {
+        return;
+    }
+    auto slidingWindow = mConfig->sliding_window();
+    if (slidingWindow <= 0) {
+        mMeta->add = add;
+        return;
+    }
+    if (mMeta->remove > 0 || mMeta->n_reserve > 0 || mMeta->file_flag == KVMeta::PendingRead) {
+        mMeta->add = add;
+        return;
+    }
+    auto keep = add >= (size_t)slidingWindow ? 0 : (size_t)slidingWindow - add;
+    if (mMeta->previous <= keep) {
+        setKVCacheInfo(add, 0);
+        return;
+    }
+    if (keep == 0) {
+        setKVCacheInfo(add, mMeta->previous);
+        return;
+    }
+    mMeta->reserveHost.resize(2);
+    mMeta->reserveHost[0] = (int)(mMeta->previous - keep);
+    mMeta->reserveHost[1] = (int)keep;
+    setKVCacheInfo(add, mMeta->previous, mMeta->reserveHost.data(), 1);
+}
+
+size_t Llm::pendingKVCacheLength(size_t add, const std::shared_ptr<KVMeta>& meta) const {
+    if (meta == nullptr) {
+        return mContext->all_seq_len + add;
+    }
+    auto remove = ALIMIN(meta->remove, meta->previous);
+    return meta->previous - remove + _kvMetaReserveSize(meta.get()) + add;
+}
+
+size_t Llm::pendingKVCacheLength(size_t add) const {
+    return pendingKVCacheLength(add, mMeta);
+}
+
 std::vector<Express::VARP> Llm::forwardRaw(Express::VARP hiddenState, Express::VARP mask, Express::VARP inputPos, Express::VARPS extraArgs) {
     Express::VARP logitsIndex;
     bool inDecode = mContext->gen_seq_len > 0;
@@ -572,7 +626,7 @@ std::vector<VARP> Llm::forwardVec(const std::vector<int>& input_ids) {
 std::vector<VARP> Llm::forwardVec(MNN::Express::VARP input_embeds) {
     int seq_len         = input_embeds->getInfo()->dim[mSeqLenIndex];
     if (0 == mBlockSize) {
-        mMeta->add = seq_len;
+        applySlidingWindowKVCache(seq_len);
         auto attention_mask = gen_attention_mask(seq_len);
         auto position_ids = gen_position_ids(seq_len);
         auto res = forwardRaw(input_embeds, attention_mask, position_ids);
@@ -603,7 +657,7 @@ std::vector<VARP> Llm::forwardVec(MNN::Express::VARP input_embeds) {
     int addSize = blockSize;
     for (int i=0; i<blockNumber; ++i) {
         logits.clear();
-        mMeta->add = blockSize;
+        applySlidingWindowKVCache(blockSize);
         auto embed = embeddings[i];
         auto attention_mask = gen_attention_mask(blockSize);
         auto position_ids = gen_position_ids(blockSize);
@@ -616,7 +670,7 @@ std::vector<VARP> Llm::forwardVec(MNN::Express::VARP input_embeds) {
     bool hasPad = false;
     if (blockRemain != 0) {
         logits.clear();
-        mMeta->add = blockRemain;
+        applySlidingWindowKVCache(blockRemain);
         addSize = blockRemain;
         int forwardSize = blockRemain;
         input_embeds = embeddings[embeddings.size()-1];
@@ -1021,19 +1075,24 @@ std::string Llm::tokenizer_decode(int id) {
 }
 
 VARP Llm::gen_attention_mask(int seq_len) {
-    int kv_seq_len = mContext->all_seq_len + seq_len;
+    auto add = mMeta != nullptr && mMeta->add > 0 ? mMeta->add : (size_t)seq_len;
+    auto pad = seq_len > add ? (size_t)seq_len - add : 0;
+    int kv_seq_len = (int)(pendingKVCacheLength(add) + pad);
     if (mConfig->attention_mask() == "float") {
         // full and sliding mix, using normal mask
         if (mConfig->attention_type() == "mix") {
             const int sliding_window = mConfig->sliding_window();
+            const int past_kv_len = kv_seq_len - seq_len;
+            const int logical_past_start = mContext->all_seq_len - past_kv_len;
             // mix attention mask
             attentionMask = _Input({2, 1, 1, seq_len, kv_seq_len}, NCHW, halide_type_of<float>());
             auto full_attn_ptr = attentionMask->writeMap<float>();
             // full attn mask
             for (int i = 0; i < seq_len; i++) {
-                const int query_pos = i + (kv_seq_len - seq_len);
+                const int query_pos = i + mContext->all_seq_len;
                 for (int j = 0; j < kv_seq_len; j++) {
-                    if (j > query_pos) {
+                    const int key_pos = j < past_kv_len ? logical_past_start + j : mContext->all_seq_len + j - past_kv_len;
+                    if (key_pos > query_pos) {
                         full_attn_ptr[kv_seq_len * i + j] = std::numeric_limits<float>::lowest();
                     } else {
                         full_attn_ptr[kv_seq_len * i + j] = 0.0f;
@@ -1042,11 +1101,10 @@ VARP Llm::gen_attention_mask(int seq_len) {
             }
             // sliding attn mask
             auto sliding_attn_ptr = full_attn_ptr + seq_len * kv_seq_len;
-            const int query_pos_offset = kv_seq_len - seq_len;
             for (int i = 0; i < seq_len; i++) {
-                const int query_pos = i + query_pos_offset;
+                const int query_pos = i + mContext->all_seq_len;
                 for (int j = 0; j < kv_seq_len; j++) {
-                    const int key_pos = j;
+                    const int key_pos = j < past_kv_len ? logical_past_start + j : mContext->all_seq_len + j - past_kv_len;
                     bool is_allowed = (key_pos <= query_pos) && (key_pos > query_pos - sliding_window);
                     if (is_allowed) {
                         sliding_attn_ptr[kv_seq_len * i + j] = 0.0f;
