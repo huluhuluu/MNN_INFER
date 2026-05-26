@@ -1119,9 +1119,6 @@ VARP Llm::gen_attention_mask(int seq_len) {
             if(seq_len == 1) {
                 return mAttentionMaskVarVec[0];
             }
-            if (mAttentionMaskVarVec.size() > 1 && seq_len == mDraftLength) {
-                return mAttentionMaskVarVec[1];
-            }
         }
 
         // Mask: lower triangular
@@ -1195,14 +1192,6 @@ VARP Llm::gen_position_ids(int seq_len) {
             ptr[0] = is_glm2 ? mContext->gen_seq_len : mContext->all_seq_len;
             return mPositionIdsVarVec[0];
         }
-        if(mPositionIdsVarVec.size() > 1 && seq_len == mDraftLength) {
-            auto ptr = mPositionIdsVarVec[1]->writeMap<int>();
-            for (int i = 0; i < seq_len; i++) {
-                ptr[i] = i + mContext->all_seq_len;
-            }
-            return mPositionIdsVarVec[1];
-        }
-
         positionIds = _Input({seq_len}, NCHW, halide_type_of<int>());
         auto ptr = positionIds->writeMap<int>();
         if (seq_len == 1) {

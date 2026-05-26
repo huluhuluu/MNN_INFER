@@ -368,11 +368,10 @@ void EagleGeneration::generate(GenerationParams& param) {
         if(decodingInfo.empty()) {
             break;
         }
-
-        const auto targetVerifyUs = _dt.durationInUs();
-        treeDecodingTime += targetVerifyUs;
         auto acceptInfo = evaluatePosterior(draftInfo, decodingInfo[0]);
         
+        const auto targetVerifyUs = _dt.durationInUs();
+        treeDecodingTime += targetVerifyUs;
         mEagleContext.target_time_us += targetVerifyUs;
         mEagleContext.accepted += acceptInfo.acceptTokens.size();
         if(profiling) {

@@ -21,7 +21,7 @@ namespace Transformer {
 struct EagleContext {
     uint draft = 0;              // total draft tokens generated
     uint accepted = 0;           // total accepted tokens
-    uint steps = 0;                    // total decoding steps
+    uint steps = 0;                    // total target verify calls
     uint64_t draft_time_us = 0;        // total draft model time (microseconds)
     uint64_t draft_prefill_time_us = 0; // initial draft tree build time (microseconds)
     uint64_t draft_decode_time_us = 0;  // iterative draft update time (microseconds)

@@ -63,28 +63,28 @@ struct Stats {
 
 struct RunMetrics {
     double targetPrefillMs = 0.0;
-    double decodeTotalMs = 0.0;
-    double targetVerifyMs = 0.0;
+    double targetDecodePerCallMs = 0.0;
     double draftPrefillMs = 0.0;
-    double draftDecodeMs = 0.0;
+    double draftDecodePerCallMs = 0.0;
     int outputTokens = 0;
     int acceptedTokens = 0;
     int draftTokens = 0;
-    int steps = 0;
+    int targetDecodeCalls = 0;
+    int draftDecodeCalls = 0;
     bool valid = false;
 };
 
 struct PromptResult {
     int promptLength = 0;
     Stats targetPrefill;
-    Stats decodeTotal;
-    Stats targetVerify;
+    Stats targetDecodePerCall;
     Stats draftPrefill;
-    Stats draftDecode;
+    Stats draftDecodePerCall;
     Stats outputTokens;
     Stats acceptedTokens;
     Stats draftTokens;
-    Stats steps;
+    Stats targetDecodeCalls;
+    Stats draftDecodeCalls;
 };
 
 std::vector<int> parseLengths(const std::string& arg) {
@@ -246,11 +246,10 @@ private:
         if (!mConfig.precision.empty()) {
             std::cout << "Precision override: " << mConfig.precision << "\n";
         }
-        std::cout << "Metrics: target_prefill=base model prompt prefill, "
-                  << "decode_total=whole speculative decode loop,\n"
-                  << "         target_verify=target treeDecoding, "
-                  << "draft_prefill=first draft topkGenerate, "
-                  << "draft_decode=subsequent draft updateDraft\n";
+        std::cout << "Metrics: target_prefill=base model prompt prefill,\n"
+                  << "         target_decode_per_call=target treeDecoding average per call,\n"
+                  << "         draft_prefill=first draft topkGenerate,\n"
+                  << "         draft_decode_per_call=updateDraft average per call (steps - 1)\n";
         std::cout << "\n";
     }
 
@@ -268,14 +267,18 @@ private:
         }
 
         metrics.targetPrefillMs = context->prefill_us / 1000.0;
-        metrics.decodeTotalMs = context->decode_us / 1000.0;
         metrics.outputTokens = context->gen_seq_len;
-        metrics.targetVerifyMs = eagleContext->target_time_us / 1000.0;
         metrics.draftPrefillMs = eagleContext->draft_prefill_time_us / 1000.0;
-        metrics.draftDecodeMs = eagleContext->draft_decode_time_us / 1000.0;
         metrics.acceptedTokens = static_cast<int>(eagleContext->accepted);
         metrics.draftTokens = static_cast<int>(eagleContext->draft);
-        metrics.steps = static_cast<int>(eagleContext->steps);
+        metrics.targetDecodeCalls = static_cast<int>(eagleContext->steps);
+        metrics.draftDecodeCalls = std::max(metrics.targetDecodeCalls - 1, 0);
+        metrics.targetDecodePerCallMs = metrics.targetDecodeCalls > 0
+            ? (eagleContext->target_time_us / 1000.0) / metrics.targetDecodeCalls
+            : 0.0;
+        metrics.draftDecodePerCallMs = metrics.draftDecodeCalls > 0
+            ? (eagleContext->draft_decode_time_us / 1000.0) / metrics.draftDecodeCalls
+            : 0.0;
         metrics.valid = metrics.outputTokens > 0;
         return metrics;
     }
@@ -292,27 +295,29 @@ private:
             }
             std::cout << "  warmup " << (i + 1) << "/" << mConfig.warmupIterations
                       << ": target_prefill=" << formatMs(metrics.targetPrefillMs)
-                      << ", decode_total=" << formatMs(metrics.decodeTotalMs) << "\n";
+                      << ", target_decode_per_call=" << formatMs(metrics.targetDecodePerCallMs)
+                      << ", draft_prefill=" << formatMs(metrics.draftPrefillMs)
+                      << ", draft_decode_per_call=" << formatMs(metrics.draftDecodePerCallMs) << "\n";
         }
 
         std::vector<double> targetPrefillSamples;
-        std::vector<double> decodeTotalSamples;
-        std::vector<double> targetVerifySamples;
+        std::vector<double> targetDecodePerCallSamples;
         std::vector<double> draftPrefillSamples;
-        std::vector<double> draftDecodeSamples;
+        std::vector<double> draftDecodePerCallSamples;
         std::vector<double> outputTokenSamples;
         std::vector<double> acceptedSamples;
         std::vector<double> draftTokenSamples;
-        std::vector<double> stepSamples;
+        std::vector<double> targetDecodeCallSamples;
+        std::vector<double> draftDecodeCallSamples;
         targetPrefillSamples.reserve(mConfig.repeatIterations);
-        decodeTotalSamples.reserve(mConfig.repeatIterations);
-        targetVerifySamples.reserve(mConfig.repeatIterations);
+        targetDecodePerCallSamples.reserve(mConfig.repeatIterations);
         draftPrefillSamples.reserve(mConfig.repeatIterations);
-        draftDecodeSamples.reserve(mConfig.repeatIterations);
+        draftDecodePerCallSamples.reserve(mConfig.repeatIterations);
         outputTokenSamples.reserve(mConfig.repeatIterations);
         acceptedSamples.reserve(mConfig.repeatIterations);
         draftTokenSamples.reserve(mConfig.repeatIterations);
-        stepSamples.reserve(mConfig.repeatIterations);
+        targetDecodeCallSamples.reserve(mConfig.repeatIterations);
+        draftDecodeCallSamples.reserve(mConfig.repeatIterations);
 
         for (int i = 0; i < mConfig.repeatIterations; ++i) {
             RunMetrics metrics = runOnce(promptTokens);
@@ -321,43 +326,42 @@ private:
                 return false;
             }
             targetPrefillSamples.push_back(metrics.targetPrefillMs);
-            decodeTotalSamples.push_back(metrics.decodeTotalMs);
-            targetVerifySamples.push_back(metrics.targetVerifyMs);
+            targetDecodePerCallSamples.push_back(metrics.targetDecodePerCallMs);
             draftPrefillSamples.push_back(metrics.draftPrefillMs);
-            draftDecodeSamples.push_back(metrics.draftDecodeMs);
+            draftDecodePerCallSamples.push_back(metrics.draftDecodePerCallMs);
             outputTokenSamples.push_back(metrics.outputTokens);
             acceptedSamples.push_back(metrics.acceptedTokens);
             draftTokenSamples.push_back(metrics.draftTokens);
-            stepSamples.push_back(metrics.steps);
+            targetDecodeCallSamples.push_back(metrics.targetDecodeCalls);
+            draftDecodeCallSamples.push_back(metrics.draftDecodeCalls);
 
             std::cout << "  repeat " << (i + 1) << "/" << mConfig.repeatIterations
                       << ": target_prefill=" << formatMs(metrics.targetPrefillMs)
-                      << ", decode_total=" << formatMs(metrics.decodeTotalMs)
-                      << ", target_verify=" << formatMs(metrics.targetVerifyMs)
+                      << ", target_decode_per_call=" << formatMs(metrics.targetDecodePerCallMs)
                       << ", draft_prefill=" << formatMs(metrics.draftPrefillMs)
-                      << ", draft_decode=" << formatMs(metrics.draftDecodeMs)
+                      << ", draft_decode_per_call=" << formatMs(metrics.draftDecodePerCallMs)
+                      << ", target_decode_calls=" << metrics.targetDecodeCalls
+                      << ", draft_decode_calls=" << metrics.draftDecodeCalls
                       << ", output_tokens=" << metrics.outputTokens
                       << ", accepted_tokens=" << metrics.acceptedTokens
-                      << ", draft_tokens=" << metrics.draftTokens
-                      << ", steps=" << metrics.steps << "\n";
+                      << ", draft_tokens=" << metrics.draftTokens << "\n";
         }
 
         result.promptLength = promptLength;
         result.targetPrefill = Stats::calculate(targetPrefillSamples);
-        result.decodeTotal = Stats::calculate(decodeTotalSamples);
-        result.targetVerify = Stats::calculate(targetVerifySamples);
+        result.targetDecodePerCall = Stats::calculate(targetDecodePerCallSamples);
         result.draftPrefill = Stats::calculate(draftPrefillSamples);
-        result.draftDecode = Stats::calculate(draftDecodeSamples);
+        result.draftDecodePerCall = Stats::calculate(draftDecodePerCallSamples);
         result.outputTokens = Stats::calculate(outputTokenSamples);
         result.acceptedTokens = Stats::calculate(acceptedSamples);
         result.draftTokens = Stats::calculate(draftTokenSamples);
-        result.steps = Stats::calculate(stepSamples);
+        result.targetDecodeCalls = Stats::calculate(targetDecodeCallSamples);
+        result.draftDecodeCalls = Stats::calculate(draftDecodeCallSamples);
 
         std::cout << "  result: target_prefill=" << formatStats(result.targetPrefill)
-                  << ", decode_total=" << formatStats(result.decodeTotal)
-                  << ", target_verify=" << formatStats(result.targetVerify)
+                  << ", target_decode_per_call=" << formatStats(result.targetDecodePerCall)
                   << ", draft_prefill=" << formatStats(result.draftPrefill)
-                  << ", draft_decode=" << formatStats(result.draftDecode) << "\n\n";
+                  << ", draft_decode_per_call=" << formatStats(result.draftDecodePerCall) << "\n\n";
         return true;
     }
 
@@ -394,29 +398,36 @@ private:
         std::cout << "================================================\n";
         std::cout << std::setw(10) << "Prompt"
                   << std::setw(20) << "TargetPrefill"
-                  << std::setw(20) << "DecodeTotal"
-                  << std::setw(20) << "TargetVerify"
+                  << std::setw(24) << "TargetDecode/Call"
                   << std::setw(20) << "DraftPrefill"
-                  << std::setw(20) << "DraftDecode"
+                  << std::setw(24) << "DraftDecode/Call"
+                  << std::setw(18) << "TargetCalls"
+                  << std::setw(18) << "DraftCalls"
                   << std::setw(18) << "OutputTokens"
                   << std::setw(18) << "Accepted"
                   << std::setw(18) << "DraftTokens"
-                  << std::setw(18) << "Steps"
                   << "\n";
-        std::cout << std::string(182, '-') << "\n";
+        std::cout << std::string(188, '-') << "\n";
         for (const auto& result : mResults) {
             std::cout << std::setw(10) << result.promptLength;
             printStatsCell(result.targetPrefill);
-            printStatsCell(result.decodeTotal);
-            printStatsCell(result.targetVerify);
+            printStatsCellWide(result.targetDecodePerCall);
             printStatsCell(result.draftPrefill);
-            printStatsCell(result.draftDecode);
+            printStatsCellWide(result.draftDecodePerCall);
+            printNumberStatsCell(result.targetDecodeCalls);
+            printNumberStatsCell(result.draftDecodeCalls);
             printNumberStatsCell(result.outputTokens);
             printNumberStatsCell(result.acceptedTokens);
             printNumberStatsCell(result.draftTokens);
-            printNumberStatsCell(result.steps);
             std::cout << "\n";
         }
+    }
+
+    static void printStatsCellWide(const Stats& stats) {
+        std::ostringstream os;
+        os << std::fixed << std::setprecision(3)
+           << stats.mean << "±" << stats.stddev;
+        std::cout << std::setw(24) << os.str();
     }
 };
 
