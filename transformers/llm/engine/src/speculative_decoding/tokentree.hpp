@@ -14,6 +14,7 @@
 #include <algorithm>
 #include <sstream>
 #include <map>
+#include <functional>
 
 namespace MNN {
 namespace Transformer {
@@ -24,18 +25,20 @@ using NodePtr = std::shared_ptr<TokenTreeNode>;
 class TokenTreeNode : public std::enable_shared_from_this<TokenTreeNode> {
 public:
     int mTokenId, mNodeId, mDepth;
-    double mLogProb, mCumulativeLogProb;
+    double mLogProb, mCumulativeLogProb, mSurvivalProb;
     std::weak_ptr<TokenTreeNode> mParent;
     std::vector<NodePtr> mChildren;
 
-    TokenTreeNode(int tokenId, double logProb, NodePtr parent, int nodeId)
+    TokenTreeNode(int tokenId, double logProb, double confidence, NodePtr parent, int nodeId)
         : mTokenId(tokenId), mLogProb(logProb), mNodeId(nodeId), mParent(parent) {
         if (parent) {
             mDepth = parent->mDepth + 1;
             mCumulativeLogProb = parent->mCumulativeLogProb + logProb;
+            mSurvivalProb = parent->mSurvivalProb * confidence;
         } else {
             mDepth = 0;
             mCumulativeLogProb = logProb;
+            mSurvivalProb = confidence;
         }
     }
 
@@ -55,7 +58,7 @@ struct TreeOutputs {
 class TokenTree {
 public:
     TokenTree(int topK, const int* d2tPtr = nullptr) : mTopK(topK), mD2tPtr(d2tPtr), mCounter(0) {
-        mRoot = std::make_shared<TokenTreeNode>(-1, 0.0, nullptr, -1);
+        mRoot = std::make_shared<TokenTreeNode>(-1, 0.0, 1.0, nullptr, -1);
         mRoot->mDepth = -1;
         // init mask
         mMask.assign(topK, std::vector<bool>(topK, false));
@@ -64,17 +67,17 @@ public:
         }
     }
 
-    void init(const int* indices, const float* scores) {
+    void init(const int* indices, const float* scores, const double* confidences = nullptr) {
         for (size_t i = 0; i < mTopK; i++) {
             auto node = std::make_shared<TokenTreeNode>(
-                d2t(indices[i]), scores[i], mRoot, mCounter++
+                d2t(indices[i]), scores[i], confidence(confidences, i), mRoot, mCounter++
             );
             mRoot->addChild(node);
             mActives.push_back(node);
         }
     }
 
-    void grow(const int* indices, const float* scores) {
+    void grow(const int* indices, const float* scores, const double* confidences = nullptr) {
         std::vector<NodePtr> candidates;
         std::map<NodePtr, int> parant2index;
         // 1. Generate all possible child nodes for each active leaf.
@@ -85,6 +88,7 @@ public:
                 auto child_node = std::make_shared<TokenTreeNode>(
                     d2t(indices[i * mTopK + j]),
                     scores[i * mTopK + j],
+                    confidence(confidences, i * mTopK + j),
                     parent, mCounter++
                 );
                 parent->addChild(child_node);
@@ -224,6 +228,14 @@ public:
         return tokenIds;
     }
 
+    double topKSurvivalSum() const {
+        double sum = 0.0;
+        for (const auto& active : mActives) {
+            sum += active->mSurvivalProb;
+        }
+        return sum;
+    }
+
     std::string toString(const std::function<std::string(int)>& decoder) const {
         if (mRoot->mChildren.empty()) {
             return "<Empty Tree>\n";
@@ -239,6 +251,10 @@ private:
     std::vector<NodePtr> mActives;
     std::vector<std::vector<bool>> mMask;
     const int* mD2tPtr;
+
+    double confidence(const double* confidences, int index) const {
+        return confidences == nullptr ? 1.0 : confidences[index];
+    }
 
     int d2t(int token) {
         if (mD2tPtr) {

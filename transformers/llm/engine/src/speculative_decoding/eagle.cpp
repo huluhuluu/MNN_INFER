@@ -9,6 +9,7 @@
 #include "tokentree.hpp"
 #include <numeric>
 #include <algorithm>
+#include <cmath>
 
 #define EAGLE_DEBUG 0
 
@@ -19,6 +20,66 @@ namespace Transformer {
 template <typename T>
 static inline VARP _var(std::vector<T> vec, const std::vector<int> &dims) {
     return _Const(vec.data(), dims, NHWC, halide_type_of<T>());
+}
+
+static EagleGeneration::DraftMode parseDraftMode(const std::string& mode) {
+    if (mode == "deagle") {
+        return EagleGeneration::DraftMode::DEAGLE;
+    }
+    if (mode == "svip") {
+        return EagleGeneration::DraftMode::SVIP;
+    }
+    return EagleGeneration::DraftMode::FIXED;
+}
+
+struct TopKInfo {
+    std::vector<float> scores;
+    std::vector<int> indices;
+    std::vector<double> confidences;
+    double maxEntropy = 0.0;
+};
+
+static TopKInfo getTopKInfo(VARP logits, int topK, bool needProbStats) {
+    auto topKV = MNN::Express::_TopKV2(logits, MNN::Express::_Scalar<int>(topK));
+    auto scorePtr = topKV[0]->readMap<float>();
+    auto indexPtr = topKV[1]->readMap<int>();
+    int rows = topKV[0]->getInfo()->size / topK;
+    TopKInfo info;
+    info.scores.resize(rows * topK);
+    info.indices.resize(rows * topK);
+    if (needProbStats) {
+        info.confidences.resize(rows * topK);
+    }
+    auto logitsPtr = needProbStats ? logits->readMap<float>() : nullptr;
+    int vocabSize = needProbStats && rows > 0 ? logits->getInfo()->size / rows : 0;
+    for (int i = 0; i < rows; i++) {
+        double logZ = 0.0;
+        if (needProbStats) {
+            auto rowPtr = logitsPtr + i * vocabSize;
+            double maxLogit = rowPtr[0];
+            for (int j = 1; j < vocabSize; j++) {
+                maxLogit = std::max(maxLogit, static_cast<double>(rowPtr[j]));
+            }
+            double expSum = 0.0;
+            double weightedLogitSum = 0.0;
+            for (int j = 0; j < vocabSize; j++) {
+                double expValue = std::exp(static_cast<double>(rowPtr[j]) - maxLogit);
+                expSum += expValue;
+                weightedLogitSum += expValue * rowPtr[j];
+            }
+            logZ = maxLogit + std::log(expSum);
+            double entropy = logZ - weightedLogitSum / expSum;
+            info.maxEntropy = std::max(info.maxEntropy, entropy);
+        }
+        for (int j = 0; j < topK; j++) {
+            info.scores[i * topK + j] = scorePtr[i * topK + j];
+            info.indices[i * topK + j] = indexPtr[i * topK + j];
+            if (needProbStats) {
+                info.confidences[i * topK + j] = std::exp(static_cast<double>(scorePtr[i * topK + j]) - logZ);
+            }
+        }
+    }
+    return info;
 }
 
 EagleGeneration::EagleGeneration(Llm* llm, std::shared_ptr<LlmContext> context, std::shared_ptr<LlmConfig> config) : Generation(llm, context) {
@@ -41,6 +102,10 @@ void EagleGeneration::load(Module::Config module_config) {
     // init
     mTopK = mLlm->mConfig->eagle_topk();
     mDepth = mLlm->mConfig->eagle_depth();
+    mDraftMode = parseDraftMode(mLlm->mConfig->eagle_draft_mode());
+    mSvipEntropyThreshold = mLlm->mConfig->eagle_svip_entropy_threshold();
+    mDeagleSurvivalSumThreshold = mLlm->mConfig->eagle_deagle_survival_sum_threshold();
+    mDeagleMomentumThreshold = mLlm->mConfig->eagle_deagle_momentum_threshold();
     mTreePosition = _Input({1, mTopK}, NCHW, halide_type_of<int>());
 }
 
@@ -107,6 +172,30 @@ std::vector<VARP> EagleGeneration::eagleForward(const std::vector<int>& input_id
     return outputs;
 }
 
+bool EagleGeneration::canExpandDraftTree(int growIndex, double survivalSum, int momentumDecayCount, double draftEntropy) const {
+    if (mDraftMode == DraftMode::FIXED) {
+        return true;
+    }
+    if (growIndex == 0) {
+        return true;
+    }
+    if (mDraftMode == DraftMode::SVIP) {
+        return std::sqrt(draftEntropy) <= mSvipEntropyThreshold;
+    }
+    int currentDepth = growIndex + 1;
+    int stopVotes = 0;
+    if (survivalSum < mDeagleSurvivalSumThreshold) {
+        stopVotes++;
+    }
+    if (momentumDecayCount >= 2) {
+        stopVotes++;
+    }
+    if (currentDepth >= static_cast<int>(std::ceil(survivalSum))) {
+        stopVotes++;
+    }
+    return stopVotes < 2;
+}
+
 EagleGeneration::DraftInfo EagleGeneration::topkGenerate(const std::vector<int>& inputIds, MNN::Express::VARP hiddenStates, MNN::Express::VARP inputEmbeds) {
     auto d2tPtr = mD2t->readMap<int>();
     TokenTree tokenTree(mTopK, d2tPtr);
@@ -126,22 +215,27 @@ EagleGeneration::DraftInfo EagleGeneration::topkGenerate(const std::vector<int>&
     mEagleMeta->remove = mEagleRemove;
     auto outputs      = eagleForward(inputEmbeds, inputHidden);
     mEaglePastLen     = seqLen;
-    mEagleRemove      = mTopK * (mDepth - 1);
     auto lastP        = outputs[0];
     auto lastHidden   = outputs[1];
-    auto topKV = MNN::Express::_TopKV2(lastP, MNN::Express::_Scalar<int>(mTopK));
-    auto scores = topKV[0]->readMap<float>();
-    auto indices = topKV[1]->readMap<int>();
+    bool dynamicDraft = mDraftMode != DraftMode::FIXED;
+    auto topKInfo = getTopKInfo(lastP, mTopK, dynamicDraft);
 #if EAGLE_DEBUG
-    for (int i = 0; i < topKV[0]->getInfo()->size; i++) {
-        auto token = indices[i];
+    for (int i = 0; i < topKInfo.indices.size(); i++) {
+        auto token = topKInfo.indices[i];
         token = token + d2tPtr[token];
-        printf("# top-%d: %d[%f], %s\n", i, token, scores[i], tokenStr(token).c_str());
+        printf("# top-%d: %d[%f], %s\n", i, token, topKInfo.scores[i], tokenStr(token).c_str());
     }
 #endif
-    tokenTree.init(indices, scores);
+    tokenTree.init(topKInfo.indices.data(), topKInfo.scores.data(), dynamicDraft ? topKInfo.confidences.data() : nullptr);
+    int generatedTreeTokens = 0;
+    double previousSurvivalSum = tokenTree.topKSurvivalSum();
+    int momentumDecayCount = 0;
     inputHidden = MNN::Express::_Tile(lastHidden, _var<int>({1, mTopK, 1}, {3}));
     for (int d = 0; d < mDepth - 1; d++) {
+        double survivalSum = tokenTree.topKSurvivalSum();
+        if (!canExpandDraftTree(d, survivalSum, momentumDecayCount, topKInfo.maxEntropy)) {
+            break;
+        }
         setPosition(seqLen + d);
         inputEmbeds   = mLlm->embedding(tokenTree.getIds());
         auto attentionMask = getMask(tokenTree.getMask(), seqLen);
@@ -149,11 +243,16 @@ EagleGeneration::DraftInfo EagleGeneration::topkGenerate(const std::vector<int>&
         outputs = eagleForwardRaw({inputEmbeds, inputHidden, attentionMask, mTreePosition, mLlm->logitsAllIdx});
         lastP   = outputs[0];
         inputHidden  = outputs[1];
-        auto topKV   = MNN::Express::_TopKV2(lastP, MNN::Express::_Scalar<int>(mTopK));
-        auto scores  = topKV[0]->readMap<float>();
-        auto indices = topKV[1]->readMap<int>();
-        tokenTree.grow(indices, scores);
+        topKInfo = getTopKInfo(lastP, mTopK, dynamicDraft);
+        tokenTree.grow(topKInfo.indices.data(), topKInfo.scores.data(), dynamicDraft ? topKInfo.confidences.data() : nullptr);
+        generatedTreeTokens += mTopK;
+        double currentSurvivalSum = tokenTree.topKSurvivalSum();
+        if (previousSurvivalSum > 0.0 && currentSurvivalSum / previousSurvivalSum < mDeagleMomentumThreshold) {
+            momentumDecayCount++;
+        }
+        previousSurvivalSum = currentSurvivalSum;
     }
+    mEagleRemove = generatedTreeTokens;
     auto output = tokenTree.finalize(sampleToken, mLlm->mDraftLength);
 #if EAGLE_DEBUG
     {

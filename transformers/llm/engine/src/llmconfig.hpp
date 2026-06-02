@@ -646,6 +646,18 @@ public:
     int eagle_topk() const {
         return config_.value("eagle_topk", 1);
     }
+    std::string eagle_draft_mode() const {
+        return config_.value("eagle_draft_mode", "fixed");
+    }
+    float eagle_svip_entropy_threshold() const {
+        return config_.value("eagle_svip_entropy_threshold", 0.3f);
+    }
+    float eagle_deagle_survival_sum_threshold() const {
+        return config_.value("eagle_deagle_survival_sum_threshold", 0.15f);
+    }
+    float eagle_deagle_momentum_threshold() const {
+        return config_.value("eagle_deagle_momentum_threshold", 0.6f);
+    }
     // speculative decoding config end >
 };
 } // Transformer

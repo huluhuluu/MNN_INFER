@@ -79,6 +79,12 @@ private:
 
 class EagleGeneration: public Generation {
 public:
+    enum class DraftMode {
+        FIXED,
+        DEAGLE,
+        SVIP
+    };
+
     EagleGeneration(Llm* llm, std::shared_ptr<LlmContext> context, std::shared_ptr<LlmConfig> config);
     virtual ~EagleGeneration() = default;
     virtual void load(Module::Config module_config) override;
@@ -103,6 +109,7 @@ private:
     AcceptInfo evaluatePosterior(const DraftInfo& drafInfo, VARP logits);
     DraftInfo updateDraft(const AcceptInfo& accpetInfo, VARP hiddenStates);
     MNN::Express::VARP getMask(std::vector<std::vector<bool>> mask, int seqLen);
+    bool canExpandDraftTree(int growIndex, double survivalSum, int momentumDecayCount, double draftEntropy) const;
     bool processTokens(const std::vector<int>& accpetTokens);
     void setPosition(int position);
     std::string tokenStr(int token);
@@ -110,6 +117,10 @@ private:
     std::shared_ptr<KVMeta> mEagleMeta;
     MNN::Express::VARP mD2t, mTreePosition;
     int mTopK, mDepth;
+    DraftMode mDraftMode = DraftMode::FIXED;
+    float mSvipEntropyThreshold = 0.3f;
+    float mDeagleSurvivalSumThreshold = 0.15f;
+    float mDeagleMomentumThreshold = 0.6f;
     int mEaglePastLen = 0, mEagleRemove = 0;
 };
 
