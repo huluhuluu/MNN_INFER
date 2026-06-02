@@ -36,7 +36,7 @@ struct TopKInfo {
     std::vector<float> scores;
     std::vector<int> indices;
     std::vector<double> confidences;
-    double maxEntropy = 0.0;
+    std::vector<double> entropies;
 };
 
 static TopKInfo getTopKInfo(VARP logits, int topK, bool needProbStats) {
@@ -49,6 +49,7 @@ static TopKInfo getTopKInfo(VARP logits, int topK, bool needProbStats) {
     info.indices.resize(rows * topK);
     if (needProbStats) {
         info.confidences.resize(rows * topK);
+        info.entropies.resize(rows);
     }
     auto logitsPtr = needProbStats ? logits->readMap<float>() : nullptr;
     int vocabSize = needProbStats && rows > 0 ? logits->getInfo()->size / rows : 0;
@@ -69,7 +70,7 @@ static TopKInfo getTopKInfo(VARP logits, int topK, bool needProbStats) {
             }
             logZ = maxLogit + std::log(expSum);
             double entropy = logZ - weightedLogitSum / expSum;
-            info.maxEntropy = std::max(info.maxEntropy, entropy);
+            info.entropies[i] = entropy;
         }
         for (int j = 0; j < topK; j++) {
             info.scores[i * topK + j] = scorePtr[i * topK + j];
@@ -233,7 +234,22 @@ EagleGeneration::DraftInfo EagleGeneration::topkGenerate(const std::vector<int>&
     inputHidden = MNN::Express::_Tile(lastHidden, _var<int>({1, mTopK, 1}, {3}));
     for (int d = 0; d < mDepth - 1; d++) {
         double survivalSum = tokenTree.topKSurvivalSum();
-        if (!canExpandDraftTree(d, survivalSum, momentumDecayCount, topKInfo.maxEntropy)) {
+        std::vector<bool> expandableRows;
+        const std::vector<bool>* expandablePtr = nullptr;
+        if (mDraftMode == DraftMode::SVIP) {
+            if (d > 0) {
+                bool hasExpandable = false;
+                expandableRows.resize(topKInfo.entropies.size());
+                for (size_t i = 0; i < topKInfo.entropies.size(); i++) {
+                    expandableRows[i] = canExpandDraftTree(d, survivalSum, momentumDecayCount, topKInfo.entropies[i]);
+                    hasExpandable = hasExpandable || expandableRows[i];
+                }
+                if (!hasExpandable) {
+                    break;
+                }
+                expandablePtr = &expandableRows;
+            }
+        } else if (!canExpandDraftTree(d, survivalSum, momentumDecayCount, 0.0)) {
             break;
         }
         setPosition(seqLen + d);
@@ -244,7 +260,9 @@ EagleGeneration::DraftInfo EagleGeneration::topkGenerate(const std::vector<int>&
         lastP   = outputs[0];
         inputHidden  = outputs[1];
         topKInfo = getTopKInfo(lastP, mTopK, dynamicDraft);
-        tokenTree.grow(topKInfo.indices.data(), topKInfo.scores.data(), dynamicDraft ? topKInfo.confidences.data() : nullptr);
+        if (!tokenTree.grow(topKInfo.indices.data(), topKInfo.scores.data(), dynamicDraft ? topKInfo.confidences.data() : nullptr, expandablePtr)) {
+            break;
+        }
         generatedTreeTokens += mTopK;
         double currentSurvivalSum = tokenTree.topKSurvivalSum();
         if (previousSurvivalSum > 0.0 && currentSurvivalSum / previousSurvivalSum < mDeagleMomentumThreshold) {
@@ -419,7 +437,11 @@ void EagleGeneration::generate(GenerationParams& param) {
     // eagle generate
     MNN::Timer _gt;
     auto draftInfo  = topkGenerate(inputIds, hiddenStates, inputEmbeds);
-    eagleGenerateTime += _gt.durationInUs();
+    const auto draftPrefillUs = _gt.durationInUs();
+    mEagleContext.draft_time_us += draftPrefillUs;
+    mEagleContext.draft_prefill_time_us += draftPrefillUs;
+    mEagleContext.draft += draftInfo.draftTokens.size();
+    eagleGenerateTime += draftPrefillUs;
     std::vector<int> accpetLens;
     auto newTokens = 0, steps = 0;
     while (true) {
@@ -427,6 +449,7 @@ void EagleGeneration::generate(GenerationParams& param) {
             break;
         }
         steps++;
+        mEagleContext.steps++;
         MNN::Timer _dt;
         auto decodingInfo = treeDecoding(draftInfo);
         for (auto o : decodingInfo) {
@@ -438,9 +461,11 @@ void EagleGeneration::generate(GenerationParams& param) {
         if(decodingInfo.empty()) {
             break;
         }
-        
-        treeDecodingTime += _dt.durationInUs();
         auto acceptInfo = evaluatePosterior(draftInfo, decodingInfo[0]);
+        const auto targetVerifyUs = _dt.durationInUs();
+        treeDecodingTime += targetVerifyUs;
+        mEagleContext.target_time_us += targetVerifyUs;
+        mEagleContext.accepted += acceptInfo.acceptTokens.size();
         newTokens += acceptInfo.acceptTokens.size();
         accpetLens.push_back(acceptInfo.acceptTokens.size());
         {
@@ -457,7 +482,11 @@ void EagleGeneration::generate(GenerationParams& param) {
         }
         MNN::Timer _gt;
         draftInfo = updateDraft(acceptInfo, decodingInfo[1]);
-        eagleGenerateTime += _gt.durationInUs();
+        const auto draftDecodeUs = _gt.durationInUs();
+        mEagleContext.draft_time_us += draftDecodeUs;
+        mEagleContext.draft_decode_time_us += draftDecodeUs;
+        mEagleContext.draft += draftInfo.draftTokens.size();
+        eagleGenerateTime += draftDecodeUs;
     }
     mContext->decode_us += _t.durationInUs();
     if(newTokens >= param.max_new_tokens) {

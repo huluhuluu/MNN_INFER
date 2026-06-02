@@ -1170,5 +1170,19 @@ bool Llm::is_stop(int token_id) {
     }
     return stop;
 }
+
+EagleContext* Llm::getEagleContext() {
+    return mGenerationStrategy ? mGenerationStrategy->getEagleContext() : nullptr;
+}
+
+const EagleContext* Llm::getEagleContext() const {
+    return mGenerationStrategy ? mGenerationStrategy->getEagleContext() : nullptr;
+}
+
+void Llm::resetEagleContext() {
+    if (mGenerationStrategy) {
+        mGenerationStrategy->resetEagleContext();
+    }
+}
 } // namespace Transformer
 } // namespace MNN

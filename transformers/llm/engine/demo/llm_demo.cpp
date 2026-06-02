@@ -12,6 +12,7 @@
 #include <fstream>
 #include <sstream>
 #include <stdlib.h>
+#include <stdio.h>
 #include <initializer_list>
 //#define LLM_SUPPORT_AUDIO
 #ifdef LLM_SUPPORT_AUDIO
@@ -76,6 +77,7 @@ static int benchmark(Llm* llm, const std::vector<std::string>& prompts, int max_
     int64_t sample_time = 0;
     // llm->warmup();
     auto context = llm->getContext();
+    llm->resetEagleContext();
     if (max_token_number > 0) {
         llm->set_config("{\"max_new_tokens\":1}");
     }
@@ -93,6 +95,8 @@ static int benchmark(Llm* llm, const std::vector<std::string>& prompts, int max_
     });
 #endif
     for (int i = 0; i < prompts.size(); i++) {
+        MNN_PRINT("\n## progress: %d / %zu\n", i + 1, prompts.size());
+        fflush(stdout);
         auto prompt = prompts[i];
      // #define MIMO_NO_THINKING
      #ifdef MIMO_NO_THINKING
@@ -107,12 +111,12 @@ static int benchmark(Llm* llm, const std::vector<std::string>& prompts, int max_
         }
         
         if (max_token_number >= 0) {
-            llm->response(prompt, &std::cout, nullptr, 0);
+            llm->response(prompt, nullptr, nullptr, 0);
             while (!llm->stoped() && context->gen_seq_len < max_token_number) {
                 llm->generate(1);
             }
         } else {
-            llm->response(prompt);
+            llm->response(prompt, nullptr);
         }
         prompt_len += context->prompt_len;
         decode_len += context->gen_seq_len;
@@ -147,6 +151,23 @@ static int benchmark(Llm* llm, const std::vector<std::string>& prompts, int max_
     MNN_PRINT(" sample time = %.2f s\n", sample_s);
     MNN_PRINT("prefill speed = %.2f tok/s\n", prompt_len / prefill_s);
     MNN_PRINT(" decode speed = %.2f tok/s\n", decode_len / decode_s);
+    if (auto eagleContext = llm->getEagleContext()) {
+        if (eagleContext->steps > 0) {
+            MNN_PRINT(" eagle steps = %u\n", eagleContext->steps);
+            MNN_PRINT(" eagle draft tokens = %u\n", eagleContext->draft);
+            MNN_PRINT(" eagle accepted tokens = %u\n", eagleContext->accepted);
+            MNN_PRINT(" eagle accept rate = %.3f\n", eagleContext->acceptRate());
+            MNN_PRINT(" eagle avg accept len = %.3f\n", eagleContext->avgAcceptLen());
+            MNN_PRINT(" eagle compression ratio = %.3f\n", eagleContext->compressionRatio());
+            MNN_PRINT(" eagle draft prefill time = %.2f ms\n", eagleContext->draft_prefill_time_us / 1000.0f);
+            MNN_PRINT(" eagle draft decode time = %.2f ms\n", eagleContext->draft_decode_time_us / 1000.0f);
+            MNN_PRINT(" eagle draft total time = %.2f ms\n", eagleContext->draft_time_us / 1000.0f);
+            MNN_PRINT(" eagle target verify time = %.2f ms\n", eagleContext->target_time_us / 1000.0f);
+            MNN_PRINT(" eagle avg draft time = %.2f ms/step\n", eagleContext->avgDraftTimeMs());
+            MNN_PRINT(" eagle avg target time = %.2f ms/step\n", eagleContext->avgTargetTimeMs());
+            MNN_PRINT(" eagle theoretical speedup = %.3f\n", eagleContext->theoreticalSpeedup());
+        }
+    }
     MNN_PRINT(" vision speed = %.3f MP/s\n", vision_speed);
     MNN_PRINT(" audio RTF = %.3f \n", audio_s / context->audio_input_s);
     MNN_PRINT("##################################\n");
@@ -273,7 +294,7 @@ int main(int argc, const char* argv[]) {
     }
     if (true) {
         AUTOTIME;
-        tuning_prepare(llm.get());
+        // tuning_prepare(llm.get());
     }
     if (argc < 3) {
         chat(llm.get());

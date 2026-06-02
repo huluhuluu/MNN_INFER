@@ -36,6 +36,9 @@ public:
         // do nothing
     };
     virtual void generate(GenerationParams& param) = 0;
+    virtual EagleContext* getEagleContext() { return nullptr; }
+    virtual const EagleContext* getEagleContext() const { return nullptr; }
+    virtual void resetEagleContext() {}
 protected:
     int draftVerify(MNN::Express::VARP logits, const std::vector<int>& drafts, bool& stop);
     std::shared_ptr<LlmContext> mContext;
@@ -89,6 +92,9 @@ public:
     virtual ~EagleGeneration() = default;
     virtual void load(Module::Config module_config) override;
     virtual void generate(GenerationParams& param) override;
+    EagleContext* getEagleContext() override { return &mEagleContext; }
+    const EagleContext* getEagleContext() const override { return &mEagleContext; }
+    void resetEagleContext() override { mEagleContext.reset(); }
 private:
     struct DraftInfo {
         std::vector<int> draftTokens;
@@ -121,6 +127,7 @@ private:
     float mSvipEntropyThreshold = 0.3f;
     float mDeagleSurvivalSumThreshold = 0.15f;
     float mDeagleMomentumThreshold = 0.6f;
+    EagleContext mEagleContext;
     int mEaglePastLen = 0, mEagleRemove = 0;
 };
 

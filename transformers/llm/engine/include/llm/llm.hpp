@@ -8,6 +8,7 @@
 #ifndef LLM_hpp
 #define LLM_hpp
 
+#include <cstdint>
 #include <vector>
 #include <memory>
 #include <string>
@@ -95,6 +96,60 @@ struct LlmContext {
     LlmStatus status;
 };
 struct GenerationParams;
+
+struct EagleContext {
+    uint32_t draft = 0;
+    uint32_t accepted = 0;
+    uint32_t steps = 0;
+    uint64_t draft_time_us = 0;
+    uint64_t draft_prefill_time_us = 0;
+    uint64_t draft_decode_time_us = 0;
+    uint64_t target_time_us = 0;
+
+    void reset() {
+        draft = 0;
+        accepted = 0;
+        steps = 0;
+        draft_time_us = 0;
+        draft_prefill_time_us = 0;
+        draft_decode_time_us = 0;
+        target_time_us = 0;
+    }
+
+    float avgAcceptLen() const {
+        return steps == 0 ? 0.0f : accepted / static_cast<float>(steps);
+    }
+
+    float acceptRate() const {
+        return draft == 0 ? 0.0f : accepted / static_cast<float>(draft);
+    }
+
+    float compressionRatio() const {
+        return accepted == 0 ? 0.0f : draft / static_cast<float>(accepted);
+    }
+
+    float avgDraftTimeMs() const {
+        return steps == 0 ? 0.0f : draft_time_us / 1000.0f / steps;
+    }
+
+    float avgTargetTimeMs() const {
+        return steps == 0 ? 0.0f : target_time_us / 1000.0f / steps;
+    }
+
+    float theoreticalSpeedup() const {
+        if (draft_time_us == 0 && target_time_us == 0) {
+            return 0.0f;
+        }
+        if (accepted == 0 || steps == 0) {
+            return 0.0f;
+        }
+        float targetTimePerStep = static_cast<float>(target_time_us) / steps;
+        float baselineTime = accepted * targetTimePerStep;
+        float speculativeTime = static_cast<float>(draft_time_us + target_time_us);
+        return baselineTime / speculativeTime;
+    }
+};
+
 class MNN_PUBLIC Llm {
 public:
     enum Stage {
@@ -152,6 +207,9 @@ public:
     const LlmContext* getContext() const {
         return mContext.get();
     }
+    EagleContext* getEagleContext();
+    const EagleContext* getEagleContext() const;
+    void resetEagleContext();
     virtual void setWavformCallback(std::function<bool(const float*, size_t, bool)> callback) {}
     virtual void generateWavform() {}
 protected:
