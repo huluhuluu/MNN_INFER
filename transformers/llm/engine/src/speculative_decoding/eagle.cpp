@@ -234,22 +234,7 @@ EagleGeneration::DraftInfo EagleGeneration::topkGenerate(const std::vector<int>&
     inputHidden = MNN::Express::_Tile(lastHidden, _var<int>({1, mTopK, 1}, {3}));
     for (int d = 0; d < mDepth - 1; d++) {
         double survivalSum = tokenTree.topKSurvivalSum();
-        std::vector<bool> expandableRows;
-        const std::vector<bool>* expandablePtr = nullptr;
-        if (mDraftMode == DraftMode::SVIP) {
-            if (d > 0) {
-                bool hasExpandable = false;
-                expandableRows.resize(topKInfo.entropies.size());
-                for (size_t i = 0; i < topKInfo.entropies.size(); i++) {
-                    expandableRows[i] = canExpandDraftTree(d, survivalSum, momentumDecayCount, topKInfo.entropies[i]);
-                    hasExpandable = hasExpandable || expandableRows[i];
-                }
-                if (!hasExpandable) {
-                    break;
-                }
-                expandablePtr = &expandableRows;
-            }
-        } else if (!canExpandDraftTree(d, survivalSum, momentumDecayCount, 0.0)) {
+        if (mDraftMode != DraftMode::SVIP && !canExpandDraftTree(d, survivalSum, momentumDecayCount, 0.0)) {
             break;
         }
         setPosition(seqLen + d);
@@ -260,6 +245,20 @@ EagleGeneration::DraftInfo EagleGeneration::topkGenerate(const std::vector<int>&
         lastP   = outputs[0];
         inputHidden  = outputs[1];
         topKInfo = getTopKInfo(lastP, mTopK, dynamicDraft);
+        std::vector<bool> expandableRows;
+        const std::vector<bool>* expandablePtr = nullptr;
+        if (mDraftMode == DraftMode::SVIP && d > 0) {
+            bool hasExpandable = false;
+            expandableRows.resize(topKInfo.entropies.size());
+            for (size_t i = 0; i < topKInfo.entropies.size(); i++) {
+                expandableRows[i] = canExpandDraftTree(d, survivalSum, momentumDecayCount, topKInfo.entropies[i]);
+                hasExpandable = hasExpandable || expandableRows[i];
+            }
+            if (!hasExpandable) {
+                break;
+            }
+            expandablePtr = &expandableRows;
+        }
         if (!tokenTree.grow(topKInfo.indices.data(), topKInfo.scores.data(), dynamicDraft ? topKInfo.confidences.data() : nullptr, expandablePtr)) {
             break;
         }

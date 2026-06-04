@@ -77,11 +77,14 @@ public:
         }
     }
 
-    void grow(const int* indices, const float* scores, const double* confidences = nullptr) {
+    bool grow(const int* indices, const float* scores, const double* confidences = nullptr, const std::vector<bool>* expandable = nullptr) {
         std::vector<NodePtr> candidates;
         std::map<NodePtr, int> parant2index;
         // 1. Generate all possible child nodes for each active leaf.
         for (size_t i = 0; i < mActives.size(); ++i) {
+            if (expandable && !(*expandable)[i]) {
+                continue;
+            }
             auto parent = mActives[i];
             parant2index[parent] = i;
             for (size_t j = 0; j < mTopK; j++) {
@@ -94,6 +97,9 @@ public:
                 parent->addChild(child_node);
                 candidates.push_back(child_node);
             }
+        }
+        if (candidates.empty()) {
+            return false;
         }
 
         // 2. Prune: Sort all new candidates by their cumulative log probability.
@@ -134,6 +140,7 @@ public:
 #endif
         // 5. Update the active leaves list.
         mActives = std::move(newActives);
+        return true;
     }
 
     TreeOutputs finalize(int sampleToken, int maxDraftTokens) {
