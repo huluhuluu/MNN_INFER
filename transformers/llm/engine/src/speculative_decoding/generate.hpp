@@ -11,6 +11,7 @@
 #include "llm/llm.hpp"
 #include "../llmconfig.hpp"
 #include "../kvmeta.hpp"
+#include <map>
 
 //#define DUMP_PROFILE_INFO
 
@@ -22,6 +23,7 @@ struct EagleContext {
     uint draft = 0;              // total draft tokens generated
     uint accepted = 0;           // total accepted tokens
     uint steps = 0;                    // total target verify calls
+    std::map<int, uint> accept_len_freq; // accept length -> occurrence count
     uint64_t draft_time_us = 0;        // total draft model time (microseconds)
     uint64_t draft_prefill_time_us = 0; // initial draft tree build time (microseconds)
     uint64_t draft_decode_time_us = 0;  // iterative draft update time (microseconds)
@@ -31,6 +33,7 @@ struct EagleContext {
         draft = 0;
         accepted = 0;
         steps = 0;
+        accept_len_freq.clear();
         draft_time_us = 0;
         draft_prefill_time_us = 0;
         draft_decode_time_us = 0;

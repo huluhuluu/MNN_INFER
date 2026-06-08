@@ -16,6 +16,7 @@
 #include <sstream>
 #include <iomanip>
 #include <vector>
+#include <iterator>
 
 using namespace MNN::Transformer;
 
@@ -212,6 +213,12 @@ private:
         std::cout << "Avg Draft Time:         " << ctx->avgDraftTimeMs() << " ms/step\n";
         std::cout << "Avg Target Time:        " << ctx->avgTargetTimeMs() << " ms/step\n";
         std::cout << "Theoretical Speedup:    " << ctx->theoreticalSpeedup() << "x\n";
+
+        std::cout << "\n--- Accept Length Frequency ---\n";
+        for (const auto& item : ctx->accept_len_freq) {
+            std::cout << "Accept Length " << std::setw(3) << item.first << ": "
+                      << item.second << "\n";
+        }
         
         std::cout << "\n================================================\n";
     }
@@ -237,7 +244,16 @@ private:
         file << "  \"avg_accept_length\": " << ctx->avgAcceptLen() << ",\n";
         file << "  \"accept_rate\": " << ctx->acceptRate() * 100.0f << ",\n";
         file << "  \"compression_ratio\": " << ctx->compressionRatio() << ",\n";
-        file << "  \"theoretical_speedup\": " << ctx->theoreticalSpeedup() << "\n";
+        file << "  \"theoretical_speedup\": " << ctx->theoreticalSpeedup() << ",\n";
+        file << "  \"accept_length_frequency\": {\n";
+        for (auto iter = ctx->accept_len_freq.begin(); iter != ctx->accept_len_freq.end(); ++iter) {
+            file << "    \"" << iter->first << "\": " << iter->second;
+            if (std::next(iter) != ctx->accept_len_freq.end()) {
+                file << ",";
+            }
+            file << "\n";
+        }
+        file << "  }\n";
         file << "}\n";
         
         std::cout << "Results saved to: " << mConfig.outputFile << "\n";

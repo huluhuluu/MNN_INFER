@@ -373,13 +373,15 @@ void EagleGeneration::generate(GenerationParams& param) {
         const auto targetVerifyUs = _dt.durationInUs();
         treeDecodingTime += targetVerifyUs;
         mEagleContext.target_time_us += targetVerifyUs;
-        mEagleContext.accepted += acceptInfo.acceptTokens.size();
+        const int acceptLen = static_cast<int>(acceptInfo.acceptTokens.size());
+        mEagleContext.accepted += acceptLen;
+        mEagleContext.accept_len_freq[acceptLen] += 1;
         if(profiling) {
             // Record accepted tokens
-            targetProfiler->onDecodeTokenEnd(acceptInfo.acceptTokens.size());
+            targetProfiler->onDecodeTokenEnd(acceptLen);
         }
-        newTokens += acceptInfo.acceptTokens.size();
-        accpetLens.push_back(acceptInfo.acceptTokens.size());
+        newTokens += acceptLen;
+        accpetLens.push_back(acceptLen);
         {
             mContext->current_token = acceptInfo.acceptTokens.back();
             for (auto token : acceptInfo.acceptTokens) {
