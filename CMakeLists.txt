@@ -271,9 +271,14 @@ option(MNN_NNAPI "Enable NNAPI" OFF)
 option(MNN_QNN "Enable QNN" OFF)
 option(MNN_QNN_ONLINE_FINALIZE "Enable QNN Online Finalize" ON)
 
+option(MNN_OP_TIME_PROFILE "Enable operator time profiling for supported backends." OFF)
 option(MNN_GPU_TIME_PROFILE "Enable time profiling for the OpenCL backend and Vulkan backend." OFF)
 
 option(MNN_CUDA_PROFILE "Enable CUDA profile" OFF)
+
+if (MNN_OP_TIME_PROFILE)
+  set(MNN_GPU_TIME_PROFILE ON CACHE BOOL "Enable time profiling for the OpenCL backend and Vulkan backend." FORCE)
+endif()
 
 if (NOT MNN_CUDA OR NOT CMAKE_SYSTEM_NAME MATCHES "^Linux")
   set(MNN_CUDA_PROFILE OFF)

@@ -79,6 +79,7 @@ struct PhaseProfile {
 struct BackendOpInfo {
     std::string name;       // Op name
     std::string type;       // Op type
+    std::string backendName; // Optional backend override
     float timeMs = 0.0f;    // Time in milliseconds
     int callCount = 0;      // Number of calls
 };

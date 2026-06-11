@@ -27,11 +27,12 @@ namespace MNN {
 struct OpProfileInfo {
     std::string name;       // Op name
     std::string type;       // Op type
+    std::string backendName; // Optional backend override
     float timeMs = 0.0f;    // Time in milliseconds
     int callCount = 0;      // Number of calls
     
     OpProfileInfo() = default;  // Default constructor required by std::map::operator[]
-    OpProfileInfo(std::string name, std::string type): name(name), type(type){};
+    OpProfileInfo(std::string name, std::string type, std::string backendName = ""): name(name), type(type), backendName(backendName){};
 };
 
 struct Op;
@@ -442,13 +443,16 @@ public:
     /**
      * @brief Record op time with type (called by backends, time in microseconds)
      */
-    void recordOpProfileTime(const std::string& opName, const std::string& opType, uint64_t timeUs) const {
+    void recordOpProfileTime(const std::string& opName, const std::string& opType, uint64_t timeUs, const std::string& backendName = "") const {
         if(mProfileInfo.find(opName) == mProfileInfo.end()){
-            mProfileInfo[opName] = OpProfileInfo(opName, opType);
+            mProfileInfo[opName] = OpProfileInfo(opName, opType, backendName);
         }
         // static op info
         OpProfileInfo& info = mProfileInfo[opName];
         info.type = opType;
+        if (!backendName.empty()) {
+            info.backendName = backendName;
+        }
         info.timeMs += (timeUs / 1000.0f);
         info.callCount += 1;
     }

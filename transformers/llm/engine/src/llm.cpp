@@ -1373,6 +1373,7 @@ void Llm::collectBackendProfileData() {
             BackendOpInfo info;
             info.name = opPair.second.name;
             info.type = opPair.second.type;
+            info.backendName = opPair.second.backendName;
             info.timeMs = opPair.second.timeMs;
             info.callCount += opPair.second.callCount;
             data.opInfos[opPair.first] = info;
