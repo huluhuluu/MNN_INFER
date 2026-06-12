@@ -571,7 +571,7 @@ public:
 
     /**
      speculative decoding algrithm.
-     optional: "lookahead"、 ”mtp“、 "draftmodel", "eagle"
+     optional: "lookahead"、 ”mtp“、 "draftmodel", "eagle", "dflash"
      */
     std::string speculative_type() const {
         return config_.value("speculative_type", "");
@@ -630,6 +630,18 @@ public:
     }
     std::string mtp_model() const {
         return base_dir_ + config_.value("mtp_model", "mtp.mnn");
+    }
+    std::string dflash_model() const {
+        return base_dir_ + config_.value("dflash_model", "dflash.mnn");
+    }
+    int dflash_block_size() const {
+        return config_.value("dflash_block_size", 16);
+    }
+    int dflash_mask_token_id() const {
+        return config_.value("dflash_mask_token_id", -1);
+    }
+    std::vector<int> dflash_target_layer_ids() const {
+        return config_.value("dflash_target_layer_ids", std::vector<int>{});
     }
     std::string eagle_model() const {
         return base_dir_ + config_.value("eagle_model", "eagle.mnn");

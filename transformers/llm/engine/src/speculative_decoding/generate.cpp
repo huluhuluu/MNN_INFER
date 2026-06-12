@@ -25,6 +25,8 @@ std::shared_ptr<Generation> GenerationStrategyFactory::create(Llm* llm, std::sha
             res.reset(new MtpGeneration(llm, context, config));
         } else if(config->speculative_type() == "eagle") {
             res.reset(new EagleGeneration(llm, context, config));
+        } else if(config->speculative_type() == "dflash") {
+            res.reset(new DFlashGeneration(llm, context, config));
         } else {
             // autoregressive generation
             res.reset(new ArGeneration(llm, context, config));

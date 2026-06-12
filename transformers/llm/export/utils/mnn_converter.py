@@ -316,7 +316,15 @@ class MNNConverter:
 
     def build_weight(self, linear, quant_bit, quant_block, symmetric):
         ic, oc = linear.in_features, linear.out_features
-        if quant_bit == 16:
+        if quant_bit == 32:
+            if self.exporter.args.skip_weight:
+                weight_len = ic * oc * 4
+                self.mnn_weight.seek(weight_len, 1)
+            else:
+                float_weight = linear.weight.data.flatten().float()
+                weight_len = self.write_weight(float_weight)
+            alpha_len, q_min, shape_int32, header_len = 0, 0, False, 0
+        elif quant_bit == 16:
             if self.exporter.args.skip_weight:
                 # Use a small dummy buffer and skip full weight loading/conversion
                 weight_len = (ic * oc * 2)
@@ -508,7 +516,9 @@ class MNNConverter:
             "defaultDimentionFormat": "NHWC"
         }
 
-        if quant_bit == 16:
+        if quant_bit == 32:
+            quanParameter = { "type": 8 }
+        elif quant_bit == 16:
             quanParameter = { "type": 3 }
         else:
             if self.args.sym:

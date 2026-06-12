@@ -388,3 +388,8 @@ apps/Android/.qoder/settings.json
 apps/Android/MnnLlmChatOld
 
 transformers/llm/export/tmp/
+findings.md
+progress.md
+task_plan.md
+.codegraph
+.clangd

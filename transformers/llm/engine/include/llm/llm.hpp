@@ -33,7 +33,9 @@ class Sampler;
 class Prompt;
 class Generation;
 class EagleGeneration;
+class DFlashGeneration;
 struct TimePerformance;
+struct SpecContext;
 
 using ChatMessage = std::pair<std::string, std::string>; // <role, content>
 using ChatMessages = std::vector<ChatMessage>;
@@ -152,6 +154,12 @@ public:
     const LlmContext* getContext() const {
         return mContext.get();
     }
+    bool isInSpec() const { return mInSpec; }
+    bool isInSpeculative() const { return mInSpec; }
+    int getDraftLength() const { return mDraftLength; }
+    SpecContext* getSpecContext();
+    const SpecContext* getSpecContext() const;
+    void resetSpecContext();
     virtual void setWavformCallback(std::function<bool(const float*, size_t, bool)> callback) {}
     virtual void generateWavform() {}
 protected:
@@ -183,6 +191,7 @@ protected:
     friend class LookaheadGeneration;
     friend class MtpGeneration;
     friend class EagleGeneration;
+    friend class DFlashGeneration;
     std::vector<Express::VARP> forwardVec(const std::vector<int>& input_ids);
     std::vector<Express::VARP> forwardVec(MNN::Express::VARP input_embeds);
 private:

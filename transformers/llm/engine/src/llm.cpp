@@ -231,6 +231,9 @@ void Llm::setSpeculativeConfig() {
             return;
         }
         mDraftLength = mConfig->draft_predict_length();
+        if (specultive_type == "dflash") {
+            mDraftLength = std::max(1, mConfig->dflash_block_size() - 1);
+        }
         mInSpec = true;
     }
 }
@@ -571,6 +574,8 @@ std::vector<VARP> Llm::forwardVec(const std::vector<int>& input_ids) {
 
 std::vector<VARP> Llm::forwardVec(MNN::Express::VARP input_embeds) {
     int seq_len         = input_embeds->getInfo()->dim[mSeqLenIndex];
+    int hiddenStateIndex = getOutputIndex("hidden_states");
+    VARP hiddenStatesAccum = nullptr;
     if (0 == mBlockSize) {
         mMeta->add = seq_len;
         auto attention_mask = gen_attention_mask(seq_len);
@@ -611,6 +616,10 @@ std::vector<VARP> Llm::forwardVec(MNN::Express::VARP input_embeds) {
         if(logits.empty()) {
             return logits;
         }
+        if (hiddenStateIndex >= 0 && mGenerateParam->outputs.size() > hiddenStateIndex) {
+            auto chunkHidden = mGenerateParam->outputs[hiddenStateIndex];
+            hiddenStatesAccum = hiddenStatesAccum.get() == nullptr ? chunkHidden : _Concat({hiddenStatesAccum, chunkHidden}, 0);
+        }
         updateContext(blockSize, 0);
     }
     bool hasPad = false;
@@ -645,6 +654,10 @@ std::vector<VARP> Llm::forwardVec(MNN::Express::VARP input_embeds) {
         if(logits.empty()) {
             return logits;
         }
+        if (hiddenStateIndex >= 0 && mGenerateParam->outputs.size() > hiddenStateIndex) {
+            auto chunkHidden = mGenerateParam->outputs[hiddenStateIndex];
+            hiddenStatesAccum = hiddenStatesAccum.get() == nullptr ? chunkHidden : _Concat({hiddenStatesAccum, chunkHidden}, 0);
+        }
     }
     updateContext(-blockSize * blockNumber, 0);
     if (hasPad) {
@@ -652,6 +665,9 @@ std::vector<VARP> Llm::forwardVec(MNN::Express::VARP input_embeds) {
         // encode
         mGenerateParam->validLogitStart = ((int)addSize - 1) * logitSize;
         mGenerateParam->validLogitSize = logitSize;
+    }
+    if (hiddenStateIndex >= 0 && hiddenStatesAccum.get() != nullptr && mGenerateParam->outputs.size() > hiddenStateIndex) {
+        mGenerateParam->outputs[hiddenStateIndex] = hiddenStatesAccum;
     }
 
     return logits;
@@ -1169,6 +1185,26 @@ bool Llm::is_stop(int token_id) {
         mContext->status = LlmStatus::NORMAL_FINISHED;
     }
     return stop;
+}
+
+SpecContext* Llm::getSpecContext() {
+    if (!mInSpec || !mGenerationStrategy) {
+        return nullptr;
+    }
+    return mGenerationStrategy->getSpecContext();
+}
+
+const SpecContext* Llm::getSpecContext() const {
+    if (!mInSpec || !mGenerationStrategy) {
+        return nullptr;
+    }
+    return mGenerationStrategy->getSpecContext();
+}
+
+void Llm::resetSpecContext() {
+    if (mGenerationStrategy) {
+        mGenerationStrategy->resetSpecContext();
+    }
 }
 } // namespace Transformer
 } // namespace MNN

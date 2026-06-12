@@ -175,6 +175,8 @@ class LlmModel(PreTrainedModel):
             hidden_states = hidden_states * self.scale_emb
         presents = [None for i in range(len(self.blocks))]
         eagle_hidden_states = []
+        dflash_hidden_states = []
+        dflash_target_layer_ids = getattr(self, 'dflash_target_layer_ids', None)
         rotary_pos_emb = self.rotary(position_ids)
         if self.args and self.args.test and rotary_pos_emb.dtype != hidden_states.dtype:
             rotary_pos_emb = rotary_pos_emb.type(hidden_states.dtype)
@@ -197,6 +199,8 @@ class LlmModel(PreTrainedModel):
             presents[i] = kv
             if deepstack_embeds is not None and i in range(deepstack_embeds.shape[0]):
                 hidden_states += deepstack_embeds[i]
+            if dflash_target_layer_ids is not None and i in dflash_target_layer_ids:
+                dflash_hidden_states.append(hidden_states)
 
         talker_embeds = None
         if hasattr(self, 'talker') and self.talker is not None:
@@ -224,6 +228,8 @@ class LlmModel(PreTrainedModel):
 
         if self.args and self.args.eagle_path is not None:
             final_layernorm = torch.cat(eagle_hidden_states, dim=-1)
+        if dflash_target_layer_ids is not None:
+            final_layernorm = torch.cat(dflash_hidden_states, dim=-1)
 
         return logits, final_layernorm, presents, talker_embeds
 

@@ -112,6 +112,7 @@ class LlmExporter(torch.nn.Module):
         self.audio = self.model.audio
         self.talker = self.model.talker
         self.mtp = self.model.mtp
+        self.dflash = None
         self.scale_emb = self.model.scale_emb
 
         return model_path
@@ -186,6 +187,15 @@ class LlmExporter(torch.nn.Module):
             MNNConverter(self, None).export(eagle_onnx)
             MNNConverter(self, None).export(eagle_fc_onnx)
 
+    def export_dflash(self):
+        if self.args.dflash_path is None:
+            return
+        from utils.dflash import DFlash
+        self.dflash = DFlash(self.args.dflash_path, self.model)
+        self.model.dflash_target_layer_ids = self.dflash.target_layer_ids
+        dflash_onnx = self.dflash.export(self.onnx_path)
+        if self.mnn_converter:
+            MNNConverter(self, self.dflash.unloaded_ops).export(dflash_onnx)
 
     @spinner_run(f'export embedding to ')
     def export_embed(self):
@@ -293,6 +303,13 @@ class LlmExporter(torch.nn.Module):
             if self.args.eagle_path is not None:
                 config['speculative_type'] = 'eagle'
                 config['hidden_states'] = True
+            if self.args.dflash_path is not None:
+                config['speculative_type'] = 'dflash'
+                config['hidden_states'] = True
+                config['dflash_model'] = 'dflash.mnn'
+                config['dflash_block_size'] = self.dflash.block_size if self.dflash is not None else 16
+                config['dflash_mask_token_id'] = self.dflash.mask_token_id if self.dflash is not None else -1
+                config['dflash_target_layer_ids'] = self.dflash.target_layer_ids if self.dflash is not None else []
             json.dump(config, f, ensure_ascii=False, indent=4)
         return config_json
 
@@ -538,6 +555,7 @@ class LlmExporter(torch.nn.Module):
         self.export_vision()
         self.export_audio()
         self.export_eagle()
+        self.export_dflash()
         self.export_language()
         self.export_mtp()
         self.export_tokenizer()
@@ -684,6 +702,7 @@ def build_args(parser):
                         )
     parser.add_argument('--tokenizer_path', type=str, default=None, help='tokenizer path, default is `None` mean using `--path` value.')
     parser.add_argument('--eagle_path', type=str, default=None, help='eagle model path, default is `None`')
+    parser.add_argument('--dflash_path', type=str, default=None, help='DFlash draft model path, default is `None`')
     parser.add_argument('--lora_path', type=str, default=None, help='lora path, default is `None` mean not apply lora.')
     parser.add_argument('--gptq_path', type=str, default=None, help='gptq path, default is `None` mean not apply gptq.')
     parser.add_argument('--dst_path', type=str, default='./model', help='export onnx/mnn model to path, default is `./model`.')

@@ -11,11 +11,65 @@
 #include "llm/llm.hpp"
 #include "../llmconfig.hpp"
 #include "../kvmeta.hpp"
+#include <cstdint>
+#include <map>
 
 //#define DUMP_PROFILE_INFO
 
 namespace MNN {
 namespace Transformer {
+struct SpecContext {
+    unsigned int draft = 0;
+    unsigned int accepted = 0;
+    unsigned int steps = 0;
+    std::map<int, unsigned int> accept_len_freq;
+    uint64_t draft_time_us = 0;
+    uint64_t draft_prefill_time_us = 0;
+    uint64_t draft_decode_time_us = 0;
+    uint64_t target_time_us = 0;
+
+    void reset() {
+        draft = 0;
+        accepted = 0;
+        steps = 0;
+        accept_len_freq.clear();
+        draft_time_us = 0;
+        draft_prefill_time_us = 0;
+        draft_decode_time_us = 0;
+        target_time_us = 0;
+    }
+
+    float avgAcceptLen() const {
+        return steps == 0 ? 0.0f : accepted / (steps * 1.0f);
+    }
+
+    float acceptRate() const {
+        return draft == 0 ? 0.0f : accepted / (draft * 1.0f);
+    }
+
+    float compressionRatio() const {
+        return accepted == 0 ? 0.0f : draft / (accepted * 1.0f);
+    }
+
+    float avgDraftTimeMs() const {
+        return steps == 0 ? 0.0f : draft_time_us / 1000.0f / steps;
+    }
+
+    float avgTargetTimeMs() const {
+        return steps == 0 ? 0.0f : target_time_us / 1000.0f / steps;
+    }
+
+    float theoreticalSpeedup() const {
+        if ((draft_time_us == 0 && target_time_us == 0) || accepted == 0 || steps == 0) {
+            return 0.0f;
+        }
+        float total_time_us = static_cast<float>(draft_time_us + target_time_us);
+        float target_time_per_step_us = static_cast<float>(target_time_us) / steps;
+        float baseline_time_us = accepted * target_time_per_step_us;
+        return baseline_time_us / total_time_us;
+    }
+};
+
 struct GenerationParams {
     int max_new_tokens;
     std::vector<int> input_ids;
@@ -36,6 +90,9 @@ public:
         // do nothing
     };
     virtual void generate(GenerationParams& param) = 0;
+    virtual SpecContext* getSpecContext() { return nullptr; }
+    virtual const SpecContext* getSpecContext() const { return nullptr; }
+    virtual void resetSpecContext() {}
 protected:
     int draftVerify(MNN::Express::VARP logits, const std::vector<int>& drafts, bool& stop);
     std::shared_ptr<LlmContext> mContext;
@@ -83,6 +140,9 @@ public:
     virtual ~EagleGeneration() = default;
     virtual void load(Module::Config module_config) override;
     virtual void generate(GenerationParams& param) override;
+    virtual SpecContext* getSpecContext() override { return &mSpecContext; }
+    virtual const SpecContext* getSpecContext() const override { return &mSpecContext; }
+    virtual void resetSpecContext() override { mSpecContext.reset(); }
 private:
     struct DraftInfo {
         std::vector<int> draftTokens;
@@ -106,11 +166,35 @@ private:
     bool processTokens(const std::vector<int>& accpetTokens);
     void setPosition(int position);
     std::string tokenStr(int token);
+    SpecContext mSpecContext;
     std::vector<std::shared_ptr<MNN::Express::Module>> mEagleModules;
     std::shared_ptr<KVMeta> mEagleMeta;
     MNN::Express::VARP mD2t, mTreePosition;
     int mTopK, mDepth;
     int mEaglePastLen = 0, mEagleRemove = 0;
+};
+
+class DFlashGeneration: public Generation {
+public:
+    DFlashGeneration(Llm* llm, std::shared_ptr<LlmContext> context, std::shared_ptr<LlmConfig> config);
+    virtual ~DFlashGeneration() = default;
+    virtual void load(Module::Config module_config) override;
+    virtual void generate(GenerationParams& param) override;
+    virtual SpecContext* getSpecContext() override { return &mDFlashContext; }
+    virtual const SpecContext* getSpecContext() const override { return &mDFlashContext; }
+    virtual void resetSpecContext() override { mDFlashContext.reset(); }
+private:
+    MNN::Express::VARP buildAttentionMask(int draftLen, int targetLen);
+    MNN::Express::VARP buildPositionIds(int start, int len);
+    MNN::Express::VARP lastHidden(MNN::Express::VARP hidden);
+    MNN::Express::VARP prefixHidden(MNN::Express::VARP hidden, int len);
+    std::vector<int> sampleDraft(MNN::Express::VARP targetHidden, const std::vector<int>& blockTokens);
+    int mHiddenStateIndex = -1;
+    int mBlockSize = 16;
+    int mMaskTokenId = -1;
+    SpecContext mDFlashContext;
+    std::shared_ptr<KVMeta> mDFlashMeta;
+    std::shared_ptr<MNN::Express::Module> mDFlashModule;
 };
 
 
