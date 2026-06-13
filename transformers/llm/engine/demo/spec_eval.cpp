@@ -239,7 +239,7 @@ private:
                     replaceAll(content, "{question}", prompt);
                     messages.emplace_back(item.role, content);
                 }
-                mLlm->response(messages, &std::cout, nullptr, mConfig.maxNewTokens);
+                mLlm->response(messages, nullptr, nullptr, mConfig.maxNewTokens);
             }
             // show output
             // mLlm->response(prompt,  &std::cout, nullptr, mConfig.maxNewTokens);
