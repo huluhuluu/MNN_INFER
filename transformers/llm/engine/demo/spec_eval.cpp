@@ -32,6 +32,7 @@ struct EvalConfig {
     std::string templateFile;     // Prompt template JSON file (optional)
     std::string templateName;     // Prompt template name (optional)
     int maxNewTokens = 512;       // Max tokens per sample
+    int limit = 0;                // Max samples to evaluate, 0 means all
     bool verbose = false;
 };
 
@@ -117,6 +118,9 @@ private:
             }
             if (!line.empty()) {
                 mTestPrompts.push_back(line);
+                if (mConfig.limit > 0 && static_cast<int>(mTestPrompts.size()) >= mConfig.limit) {
+                    break;
+                }
             }
         }
         
@@ -235,7 +239,7 @@ private:
                     replaceAll(content, "{question}", prompt);
                     messages.emplace_back(item.role, content);
                 }
-                mLlm->response(messages, nullptr, nullptr, mConfig.maxNewTokens);
+                mLlm->response(messages, &std::cout, nullptr, mConfig.maxNewTokens);
             }
             // show output
             // mLlm->response(prompt,  &std::cout, nullptr, mConfig.maxNewTokens);
@@ -351,6 +355,7 @@ void printUsage(const char* progName) {
     std::cout << "  --backend=TYPE    Override backend (cpu/opencl)\n";
     std::cout << "  --precision=MODE  Override precision (normal/high/low)\n";
     std::cout << "  --max-tokens=N    Max new tokens (default: 64)\n";
+    std::cout << "  --limit=N         Max samples to evaluate (default: all)\n";
     std::cout << "  --output=FILE     Save results to JSON\n";
     std::cout << "  --template-file=FILE  Prompt template JSON file\n";
     std::cout << "  --template-name=NAME  Prompt template name, e.g. gsm8k\n";
@@ -379,6 +384,8 @@ int main(int argc, const char* argv[]) {
             config.precision = arg.substr(12);
         } else if (arg.find("--max-tokens=") == 0) {
             config.maxNewTokens = std::stoi(arg.substr(13));
+        } else if (arg.find("--limit=") == 0) {
+            config.limit = std::stoi(arg.substr(8));
         } else if (arg.find("--output=") == 0) {
             config.outputFile = arg.substr(9);
         } else if (arg.find("--template-file=") == 0) {
