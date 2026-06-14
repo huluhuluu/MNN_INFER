@@ -23,6 +23,16 @@ static inline VARP _var(std::vector<T> vec, const std::vector<int> &dims) {
     return _Const(vec.data(), dims, NHWC, halide_type_of<T>());
 }
 
+static inline VARP _sliceTail(VARP x, int axis, int keep) {
+    auto info = x->getInfo();
+    MNN_ASSERT(info != nullptr);
+    MNN_ASSERT(axis >= 0 && axis < info->dim.size());
+    auto start = info->dim[axis] - keep;
+    std::vector<int> indices(keep);
+    std::iota(indices.begin(), indices.end(), start);
+    return _GatherV2(x, _var<int>(indices, {keep}), _Scalar<int>(axis));
+}
+
 EagleGeneration::EagleGeneration(Llm* llm, std::shared_ptr<LlmContext> context, std::shared_ptr<LlmConfig> config) : Generation(llm, context) {
     // do nothing
 }
@@ -397,6 +407,16 @@ void EagleGeneration::generate(GenerationParams& param) {
     auto cur_embed  = mLlm->embedding({sampleToken});
     auto pre_embeds = _Split(inputEmbeds, {1, seqLen - 1}, 0);
     inputEmbeds     = _Concat({pre_embeds[1], cur_embed}, 0);
+    auto eagleWindow = mLlm->mConfig->eagle_sliding_window();
+    if (eagleWindow > 0 && inputEmbeds->getInfo()->dim[0] > eagleWindow) {
+        inputEmbeds = _sliceTail(inputEmbeds, 0, eagleWindow);
+        hiddenStates = _sliceTail(hiddenStates, 1, eagleWindow);
+        if (inputIds.size() > static_cast<size_t>(eagleWindow)) {
+            inputIds.erase(inputIds.begin(), inputIds.end() - eagleWindow);
+        }
+        inputEmbeds->readMap<void>();
+        hiddenStates->readMap<void>();
+    }
     // eagle generate
     MNN::Timer _gt;
     // get profiler
