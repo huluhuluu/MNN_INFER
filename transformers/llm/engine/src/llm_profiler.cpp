@@ -208,6 +208,9 @@ void LLMOpProfiler::onDecodePhaseEnd() {
 
 bool LLMOpProfiler::beforeOp(const std::vector<MNN::Tensor*>& tensors, const MNN::OperatorInfo* info) {
     if (!mEnabled) return true;
+    if (info != nullptr && info->type() == "Plugin") {
+        return true;
+    }
     
     mOpTimer.reset();
     
@@ -272,6 +275,9 @@ bool LLMOpProfiler::beforeOp(const std::vector<MNN::Tensor*>& tensors, const MNN
 
 void LLMOpProfiler::afterOp(const std::vector<MNN::Tensor*>& tensors, const MNN::OperatorInfo* info) {
     if (!mEnabled) return;
+    if (info != nullptr && info->type() == "Plugin") {
+        return;
+    }
     
     // Get actual backend from tensor
     MNNForwardType actualBackend = MNN_FORWARD_CPU;
@@ -345,16 +351,17 @@ void LLMOpProfiler::collectBackendProfile(const BackendProfileData& data) {
         const BackendOpInfo& opInfo = opInfoPair.second;
         float timeMs = opInfo.timeMs;
         std::string opType = opInfo.type.empty() ? "Unknown" : opInfo.type;
+        std::string recordBackendName = opInfo.backendName.empty() ? backendName : opInfo.backendName;
         
         // Key: opName@backend
-        std::string opKey = opName + "@" + backendName;
+        std::string opKey = opName + "@" + recordBackendName;
         
         // Create or update op record
         if (profile.opRecords.find(opKey) == profile.opRecords.end()) {
             profile.opRecords[opKey] = OpRecord();
             profile.opRecords[opKey].name = opName;
             profile.opRecords[opKey].type = opType;
-            profile.opRecords[opKey].backend = backendName;
+            profile.opRecords[opKey].backend = recordBackendName;
             profile.opRecords[opKey].isSpecial = isSpecialOp(opName);
         }
         
@@ -364,7 +371,7 @@ void LLMOpProfiler::collectBackendProfile(const BackendProfileData& data) {
         // Note: shapes are not available from backend profile data
         
         // Track per-backend total times
-        profile.backendTotalTimes[backendName] += timeMs;
+        profile.backendTotalTimes[recordBackendName] += timeMs;
         profile.totalTime += timeMs;
     }
 }

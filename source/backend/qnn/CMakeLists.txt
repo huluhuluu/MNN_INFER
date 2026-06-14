@@ -30,6 +30,10 @@ if (MNN_QNN_ONLINE_FINALIZE)
     target_compile_options(MNN_QNN PRIVATE -DENABLE_QNN_ONLINE_FINALIZE)
 endif()
 
+if (MNN_GPU_TIME_PROFILE)
+    target_compile_options(MNN_QNN PRIVATE -DENABLE_QNN_TIME_PROFILER)
+endif()
+
 target_include_directories(MNN_QNN PRIVATE ${CMAKE_CURRENT_LIST_DIR}/backend/)
 target_include_directories(MNN_QNN PRIVATE ${CMAKE_CURRENT_LIST_DIR}/convertor/)
 target_include_directories(MNN_QNN PRIVATE ${_QNN_ROOT}/include/QNN/)

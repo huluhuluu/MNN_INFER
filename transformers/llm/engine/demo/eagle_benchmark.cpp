@@ -220,8 +220,8 @@ private:
             std::cerr << "Error: failed to load model\n";
             return false;
         }
-        if (!mLlm->isInSpeculative() || mLlm->getEagleContext() == nullptr) {
-            std::cerr << "Error: current config is not Eagle speculative decoding\n";
+        if (!mLlm->isInSpec() || mLlm->getSpecContext() == nullptr) {
+            std::cerr << "Error: current config is not supported speculative decoding\n";
             return false;
         }
         return true;
@@ -257,27 +257,27 @@ private:
         RunMetrics metrics;
         mLlm->reset();
         mLlm->generate_init(nullptr, nullptr);
-        mLlm->resetEagleContext();
+        mLlm->resetSpecContext();
 
         const auto outputTokens = mLlm->generate(promptTokens, mConfig.maxNewTokens);
         const auto* context = mLlm->getContext();
-        const auto* eagleContext = mLlm->getEagleContext();
-        if (context == nullptr || eagleContext == nullptr || outputTokens.empty()) {
+        const auto* specContext = mLlm->getSpecContext();
+        if (context == nullptr || specContext == nullptr || outputTokens.empty()) {
             return metrics;
         }
 
         metrics.targetPrefillMs = context->prefill_us / 1000.0;
         metrics.outputTokens = context->gen_seq_len;
-        metrics.draftPrefillMs = eagleContext->draft_prefill_time_us / 1000.0;
-        metrics.acceptedTokens = static_cast<int>(eagleContext->accepted);
-        metrics.draftTokens = static_cast<int>(eagleContext->draft);
-        metrics.targetDecodeCalls = static_cast<int>(eagleContext->steps);
+        metrics.draftPrefillMs = specContext->draft_prefill_time_us / 1000.0;
+        metrics.acceptedTokens = static_cast<int>(specContext->accepted);
+        metrics.draftTokens = static_cast<int>(specContext->draft);
+        metrics.targetDecodeCalls = static_cast<int>(specContext->steps);
         metrics.draftDecodeCalls = std::max(metrics.targetDecodeCalls - 1, 0);
         metrics.targetDecodePerCallMs = metrics.targetDecodeCalls > 0
-            ? (eagleContext->target_time_us / 1000.0) / metrics.targetDecodeCalls
+            ? (specContext->target_time_us / 1000.0) / metrics.targetDecodeCalls
             : 0.0;
         metrics.draftDecodePerCallMs = metrics.draftDecodeCalls > 0
-            ? (eagleContext->draft_decode_time_us / 1000.0) / metrics.draftDecodeCalls
+            ? (specContext->draft_decode_time_us / 1000.0) / metrics.draftDecodeCalls
             : 0.0;
         metrics.valid = metrics.outputTokens > 0;
         return metrics;

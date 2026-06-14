@@ -12,6 +12,7 @@
 // #define MNN_OPEN_TIME_TRACE
 #include <MNN/AutoTime.hpp>
 #include "core/FileLoader.hpp"
+#include <chrono>
 
 // #define QNN_PROFILE_OP
 // #define QNN_PROFILE_SUMMARIZE
@@ -179,7 +180,7 @@ static void createQnnContext(){
     QNN::gContext.dsp_arch = dspArch;
 }
 
-#ifdef QNN_PROFILE_SUMMARIZE
+#if defined(QNN_PROFILE_SUMMARIZE) || defined(ENABLE_QNN_TIME_PROFILER)
 static std::string getOpTypeFromName(const std::string& nodeName) {
     // The pattern is usually "OpType_..."
     size_t pos = nodeName.find('_');
@@ -197,16 +198,101 @@ static std::string getOpTypeFromName(const std::string& nodeName) {
 #endif
 
 static void createProfileHandle(const QNN_INTERFACE_VER_TYPE& interface, const Qnn_BackendHandle_t& backend_handle, Qnn_ProfileHandle_t* profile_handle_ptr) {
-    #if defined(QNN_PROFILE_SUMMARIZE) || defined(QNN_PROFILE_OP)
+    #if defined(QNN_PROFILE_SUMMARIZE) || defined(QNN_PROFILE_OP) || defined(ENABLE_QNN_TIME_PROFILER)
     if (*profile_handle_ptr == nullptr) {
         // set QNN_PROFILE_LEVEL_DETAILED
         QnnProfile_Level_t profileLevel = QNN_PROFILE_LEVEL_DETAILED;
-        MNN_PRINT("[QNN Profile] Creating QNN Profile Handle with DETAILED level.\n");
         auto profile_err = interface.profileCreate(backend_handle, profileLevel, profile_handle_ptr);
         if (profile_err != QNN_SUCCESS || *profile_handle_ptr == nullptr) {
             MNN_ERROR("[QNN Profile] Failed to create QNN Profile Handle, error: %d\n", (int)profile_err);
             *profile_handle_ptr = nullptr;
         }
+    }
+    #endif
+}
+
+#ifdef ENABLE_QNN_TIME_PROFILER
+struct QnnNodeProfileEntry {
+    std::string name;
+    uint64_t timeUs = 0;
+    uint64_t cycles = 0;
+};
+
+static void collectProfileNodeEntries(const QNN_INTERFACE_VER_TYPE& interface, QnnProfile_EventId_t eventId, std::map<std::string, QnnNodeProfileEntry>& nodeEntries) {
+    QnnProfile_EventData_t eventData = QNN_PROFILE_EVENT_DATA_INIT;
+    interface.profileGetEventData(eventId, &eventData);
+    if (eventData.type == QNN_PROFILE_EVENTTYPE_NODE && eventData.identifier != nullptr) {
+        auto& entry = nodeEntries[eventData.identifier];
+        entry.name = eventData.identifier;
+        if (eventData.unit == QNN_PROFILE_EVENTUNIT_MICROSEC) {
+            entry.timeUs += eventData.value;
+        } else if (eventData.unit == QNN_PROFILE_EVENTUNIT_CYCLES) {
+            entry.cycles += eventData.value;
+        }
+    }
+
+    uint32_t numSubEvents = 0;
+    const QnnProfile_EventId_t* subEvents = nullptr;
+    auto get_sub_err = interface.profileGetSubEvents(eventId, &subEvents, &numSubEvents);
+    if (get_sub_err != QNN_SUCCESS) {
+        return;
+    }
+
+    for (uint32_t i = 0; i < numSubEvents; ++i) {
+        collectProfileNodeEntries(interface, subEvents[i], nodeEntries);
+    }
+}
+
+static void recordProfileEventData(const QNN_INTERFACE_VER_TYPE& interface, QnnProfile_EventId_t eventId, const Runtime* runtime, uint64_t fallbackTimeUs) {
+    std::map<std::string, QnnNodeProfileEntry> nodeEntries;
+    collectProfileNodeEntries(interface, eventId, nodeEntries);
+    if (nodeEntries.empty()) {
+        return;
+    }
+
+    bool hasMicrosecNode = false;
+    uint64_t totalCycles = 0;
+    for (const auto& entryPair : nodeEntries) {
+        if (entryPair.second.timeUs > 0) {
+            hasMicrosecNode = true;
+        }
+        totalCycles += entryPair.second.cycles;
+    }
+
+    for (const auto& entryPair : nodeEntries) {
+        const auto& entry = entryPair.second;
+        if (entry.timeUs > 0) {
+            runtime->recordOpProfileTime(entry.name, getOpTypeFromName(entry.name), entry.timeUs, "QNN");
+        } else if (!hasMicrosecNode && fallbackTimeUs > 0 && totalCycles > 0 && entry.cycles > 0) {
+            uint64_t timeUs = (entry.cycles * fallbackTimeUs) / totalCycles;
+            if (timeUs > 0) {
+                runtime->recordOpProfileTime(entry.name, getOpTypeFromName(entry.name), timeUs, "QNN");
+            }
+        }
+    }
+}
+#endif
+
+static void recordProfileData(const QNN_INTERFACE_VER_TYPE& interface, const Qnn_ProfileHandle_t& profile_handle, const Runtime* runtime, uint64_t fallbackTimeUs = 0) {
+#ifdef ENABLE_QNN_TIME_PROFILER
+    if (!profile_handle || !runtime) {
+        return;
+    }
+    if (interface.profileGetEvents == nullptr || interface.profileGetSubEvents == nullptr || interface.profileGetEventData == nullptr) {
+        MNN_ERROR("[QNN Profile] profile event query API is not available.\n");
+        return;
+    }
+
+    uint32_t numTopLevelEvents = 0;
+    const QnnProfile_EventId_t* topLevelEvents = nullptr;
+    auto get_err = interface.profileGetEvents(profile_handle, &topLevelEvents, &numTopLevelEvents);
+    if (get_err != QNN_SUCCESS) {
+        MNN_PRINT("[QNN Profile] Failed to get top-level events. Error: %d\n", (int)get_err);
+        return;
+    }
+
+    for (uint32_t i = 0; i < numTopLevelEvents; ++i) {
+        recordProfileEventData(interface, topLevelEvents[i], runtime, fallbackTimeUs);
     }
     #endif
 }
@@ -746,7 +832,7 @@ private:
     std::vector<Qnn_GraphHandle_t> mQnnGraphHandleVec = {};
     QnnHtpGraph_CustomConfig_t mQnnHtpGraphCustomConfig{};
     QnnGraph_Config_t mQnnGraphConfig{};
-    Qnn_ProfileHandle_t mQnnProfileHandle = nullptr;
+    std::vector<Qnn_ProfileHandle_t> mQnnProfileHandleVec = {};
     GraphInfo **mGraphsInfo = nullptr;
     uint32_t mGraphCount = 0;
     std::string mPath;
@@ -759,9 +845,11 @@ public:
         mPerf->setRpcLatencyAndPolling();
     }
     ~ RawExecutorWrapper() {
-        if (mQnnProfileHandle) {
-            QNN::gContext.interface.profileFree(mQnnProfileHandle);
-            mQnnProfileHandle = nullptr;
+        for (auto& profileHandle : mQnnProfileHandleVec) {
+            if (profileHandle) {
+                QNN::gContext.interface.profileFree(profileHandle);
+                profileHandle = nullptr;
+            }
         }
         if (nullptr != mQnnContextHandle) {
             CALL_QNN(QNN::gContext.interface.contextFree(mQnnContextHandle, nullptr));
@@ -810,12 +898,10 @@ public:
                 return false;
             }
 
-            // Create Graph profile
-            MNN::QNN::createProfileHandle(QNN::gContext.interface, QNN::gContext.backendHandle, &mQnnProfileHandle);
-
-            CALL_QNN(QNN::gContext.interface.contextCreateFromBinary(QNN::gContext.backendHandle, QNN::gContext.deviceHandle, mQnnContextConfig, buffer, size, &mQnnContextHandle, mQnnProfileHandle));
+            CALL_QNN(QNN::gContext.interface.contextCreateFromBinary(QNN::gContext.backendHandle, QNN::gContext.deviceHandle, mQnnContextConfig, buffer, size, &mQnnContextHandle, nullptr));
 
             mQnnGraphHandleVec.resize(mGraphCount, nullptr);
+            mQnnProfileHandleVec.resize(mGraphCount, nullptr);
 
             std::vector<GraphInfo*> sortedGraphsInfo(mGraphCount, nullptr);
             std::map<std::string, GraphInfo*> graphInfoMap;
@@ -834,6 +920,7 @@ public:
 
             for (int i = 0; i < mGraphCount; i++) {
                 CALL_QNN(QNN::gContext.interface.graphRetrieve(mQnnContextHandle, mGraphsInfo[i]->graphName, &(mQnnGraphHandleVec[i])));
+                MNN::QNN::createProfileHandle(QNN::gContext.interface, QNN::gContext.backendHandle, &mQnnProfileHandleVec[i]);
             }
         }
 
@@ -841,9 +928,11 @@ public:
         return true;
     }
 
-    void invokModel(const std::vector<std::pair<const MNN::Tensor *, std::string>>& inputs, std::vector<std::pair<const MNN::Tensor *, std::string>>& outputs, int shapeIndex) {
+    void invokModel(const std::vector<std::pair<const MNN::Tensor *, std::string>>& inputs, std::vector<std::pair<const MNN::Tensor *, std::string>>& outputs, int shapeIndex, const Runtime* runtime) {
         GraphInfo* graph = mGraphsInfo[shapeIndex];
         Qnn_GraphHandle_t qnnGraphHandle = mQnnGraphHandleVec[shapeIndex];
+        Qnn_ProfileHandle_t profileHandle = mQnnProfileHandleVec[shapeIndex];
+        auto executeBegin = std::chrono::high_resolution_clock::now();
 
         // MNN_PRINT("%s, Input:%d, output:%d\n", mPath.c_str(), inputs.size(), outputs.size());
         for (int i=0; i<inputs.size(); ++i) {
@@ -885,8 +974,11 @@ public:
             }
         }
         CALL_QNN(QNN::gContext.interface.graphExecute(qnnGraphHandle, graph->inputTensors, graph->numInputTensors, \
-            graph->outputTensors, graph->numOutputTensors, mQnnProfileHandle, nullptr));
-        MNN::QNN::doProfile(QNN::gContext.interface, mQnnProfileHandle);
+            graph->outputTensors, graph->numOutputTensors, profileHandle, nullptr));
+        auto executeEnd = std::chrono::high_resolution_clock::now();
+        uint64_t executeTimeUs = std::chrono::duration_cast<std::chrono::microseconds>(executeEnd - executeBegin).count();
+        MNN::QNN::recordProfileData(QNN::gContext.interface, profileHandle, runtime, executeTimeUs);
+        MNN::QNN::doProfile(QNN::gContext.interface, profileHandle);
     }
 };
 
@@ -1027,7 +1119,8 @@ public:
         for (int i=0; i<mInputs.size(); ++i) {
             ctx->backend()->onCopyBuffer(inputTensor[i], mRealInputs[i].get());
         }
-        mRawExecutor->invokModel(mInputs, mOutputs, mShapeIndex);
+        auto runtime = ctx->backend() ? ctx->backend()->getRuntime() : nullptr;
+        mRawExecutor->invokModel(mInputs, mOutputs, shapeIndex, runtime);
         for (int i=0; i<mOutputs.size(); ++i) {
             ctx->backend()->onCopyBuffer(mRealOutputs[i].get(), outputTensor[i]);
         }
@@ -1131,6 +1224,7 @@ void QnnBackend::startProfile() const{
 
 void QnnBackend::onExecuteEnd() const {
     executeGraph();
+    MNN::QNN::recordProfileData(mRuntime->mQnnInterface, mQnnProfileHandle, mRuntime);
     if (mPower == BackendConfig::Power_Normal) {
         mPerf->setPowerConfigBalanced();
     }

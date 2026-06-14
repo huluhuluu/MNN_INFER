@@ -1,8 +1,8 @@
 //
-//  eagle_eval.cpp
+//  spec_eval.cpp
 //  MNN
 //
-//  Eagle Speculative Decoding Evaluation Tool
+//  Speculative Decoding Evaluation Tool
 //  - Evaluate accept rate and accept length from test data
 //  - Use config.json settings by default (backend, precision)
 //  - Command line args can override config.json
@@ -12,10 +12,12 @@
 #include "speculative_decoding/generate.hpp"
 #include <MNN/AutoTime.hpp>
 #include <MNN/expr/ExecutorScope.hpp>
+#include <rapidjson/document.h>
 #include <fstream>
 #include <sstream>
 #include <iomanip>
 #include <vector>
+#include <iterator>
 
 using namespace MNN::Transformer;
 
@@ -27,8 +29,17 @@ struct EvalConfig {
     std::string outputFile;      // Output results file (optional)
     std::string backend;         // Override backend (optional)
     std::string precision;       // Override precision (optional)
+    std::string templateFile;     // Prompt template JSON file (optional)
+    std::string templateName;     // Prompt template name (optional)
     int maxNewTokens = 512;       // Max tokens per sample
+    int limit = 0;                // Max samples to evaluate, 0 means all
     bool verbose = false;
+    bool noThinking = false;       // Set Qwen3 enable_thinking=false in chat template context
+};
+
+struct PromptMessageTemplate {
+    std::string role;
+    std::string content;
 };
 
 // ==================== Evaluator ====================
@@ -39,7 +50,7 @@ public:
     
     bool run() {
         std::cout << "\n================================================\n";
-        std::cout << "     Eagle Speculative Decoding Evaluation\n";
+        std::cout << "     Speculative Decoding Evaluation\n";
         std::cout << "================================================\n\n";
         
         std::cout << "Config: " << mConfig.configPath << "\n";
@@ -47,20 +58,23 @@ public:
         
         // Load test data
         if (!loadTestData()) return false;
+
+        // Load prompt template
+        if (!loadPromptTemplate()) return false;
         
         // Load model (uses config.json settings)
         if (!loadModel()) return false;
         
         // Check speculative decoding
-        if (!mLlm->isInSpeculative()) {
-            std::cerr << "Error: Speculative decoding not enabled in config\n";
+        if (!mLlm->isInSpec()) {
+            std::cerr << "Error: Spec decoding not enabled in config\n";
             return false;
         }
         
-        // Run evaluation (accumulates in LLM's EagleContext)
+        // Run evaluation (accumulates in LLM's SpecContext)
         int totalSamples = runEvaluation();
         
-        // Print results (read from LLM's EagleContext)
+        // Print results (read from LLM's SpecContext)
         printResults(totalSamples);
         
         // Save if specified
@@ -75,7 +89,16 @@ private:
     EvalConfig mConfig;
     std::unique_ptr<Llm> mLlm;
     std::vector<std::string> mTestPrompts;
+    std::vector<PromptMessageTemplate> mPromptTemplate;
     int64_t mTotalPromptLen = 0;
+
+    static void replaceAll(std::string& text, const std::string& from, const std::string& to) {
+        size_t pos = 0;
+        while ((pos = text.find(from, pos)) != std::string::npos) {
+            text.replace(pos, from.length(), to);
+            pos += to.length();
+        }
+    }
     
     bool loadTestData() {
         std::ifstream file(mConfig.dataFile);
@@ -96,11 +119,62 @@ private:
             }
             if (!line.empty()) {
                 mTestPrompts.push_back(line);
+                if (mConfig.limit > 0 && static_cast<int>(mTestPrompts.size()) >= mConfig.limit) {
+                    break;
+                }
             }
         }
         
         std::cout << "Loaded " << mTestPrompts.size() << " test samples\n\n";
         return !mTestPrompts.empty();
+    }
+
+    bool loadPromptTemplate() {
+        if (mConfig.templateFile.empty() && mConfig.templateName.empty()) {
+            return true;
+        }
+        if (mConfig.templateFile.empty() || mConfig.templateName.empty()) {
+            std::cerr << "Error: --template-file and --template-name must be used together\n";
+            return false;
+        }
+
+        std::ifstream file(mConfig.templateFile);
+        if (!file.is_open()) {
+            std::cerr << "Error: Cannot open template file: " << mConfig.templateFile << "\n";
+            return false;
+        }
+
+        std::ostringstream buffer;
+        buffer << file.rdbuf();
+        rapidjson::Document document;
+        document.Parse(buffer.str().c_str());
+        if (document.HasParseError() || !document.IsObject()) {
+            std::cerr << "Error: Invalid template JSON: " << mConfig.templateFile << "\n";
+            return false;
+        }
+
+        if (!document.HasMember(mConfig.templateName.c_str()) || !document[mConfig.templateName.c_str()].IsObject()) {
+            std::cerr << "Error: Template not found: " << mConfig.templateName << "\n";
+            return false;
+        }
+
+        const auto& item = document[mConfig.templateName.c_str()];
+        if (!item.HasMember("messages") || !item["messages"].IsArray()) {
+            std::cerr << "Error: Template must contain messages array: " << mConfig.templateName << "\n";
+            return false;
+        }
+
+        for (const auto& message : item["messages"].GetArray()) {
+            if (!message.IsObject() || !message.HasMember("role") || !message["role"].IsString() ||
+                !message.HasMember("content") || !message["content"].IsString()) {
+                std::cerr << "Error: Template message must contain string role and content\n";
+                return false;
+            }
+            mPromptTemplate.push_back({message["role"].GetString(), message["content"].GetString()});
+        }
+
+        std::cout << "Template: " << mConfig.templateName << " (" << mConfig.templateFile << ")\n";
+        return true;
     }
     
     bool loadModel() {
@@ -125,6 +199,15 @@ private:
             configJson += "}";
             mLlm->set_config(configJson.c_str());
         }
+        if (mConfig.noThinking) {
+            mLlm->set_config(R"({
+                "jinja": {
+                    "context": {
+                        "enable_thinking": false
+                    }
+                }
+            })");
+        }
         
         MNN::Timer timer;
         timer.reset();
@@ -142,21 +225,32 @@ private:
     int runEvaluation() {
         std::cout << "=== Running Evaluation ===\n\n";
         
-        // Reset once at the beginning - LLM's EagleContext will accumulate all samples
-        mLlm->resetEagleContext();
+        // Reset once at the beginning - LLM's SpecContext will accumulate all samples
+        mLlm->resetSpecContext();
         mTotalPromptLen = 0;
         
         int sampleCount = 0;
         for (const auto& prompt : mTestPrompts) {
             sampleCount++;
             
-            // Reset history but keep EagleContext accumulating
+            // Reset history but keep SpecContext accumulating
             mLlm->reset();
             
             MNN::Timer timer;
             timer.reset();
             
-            mLlm->response(prompt, nullptr, nullptr, mConfig.maxNewTokens);
+            if (mPromptTemplate.empty()) {
+                mLlm->response(prompt, nullptr, nullptr, mConfig.maxNewTokens);
+            } else {
+                ChatMessages messages;
+                for (const auto& item : mPromptTemplate) {
+                    std::string content = item.content;
+                    replaceAll(content, "{{question}}", prompt);
+                    replaceAll(content, "{question}", prompt);
+                    messages.emplace_back(item.role, content);
+                }
+                mLlm->response(messages, nullptr, nullptr, mConfig.maxNewTokens);
+            }
             // show output
             // mLlm->response(prompt,  &std::cout, nullptr, mConfig.maxNewTokens);
             
@@ -164,13 +258,13 @@ private:
             
             // Get current stats (accumulated so far)
             auto context = mLlm->getContext();
-            const EagleContext* eagleCtx = mLlm->getEagleContext();
+            const SpecContext* specCtx = mLlm->getSpecContext();
             mTotalPromptLen += context->prompt_len;
             
             {
                 // Print progress and current stats
-                int steps = eagleCtx ? eagleCtx->steps : 0;
-                float avgAccept = eagleCtx ? eagleCtx->avgAcceptLen() : 0;
+                int steps = specCtx ? specCtx->steps : 0;
+                float avgAccept = specCtx ? specCtx->avgAcceptLen() : 0;
                 double percent = 100.0 * sampleCount / mTestPrompts.size();
                 std::ostringstream oss;
                 oss << "\r[" << std::setw(4) << sampleCount << "/" << mTestPrompts.size() << "] "
@@ -188,7 +282,7 @@ private:
     }
     
     void printResults(int totalSamples) {
-        const EagleContext* ctx = mLlm->getEagleContext();
+        const SpecContext* ctx = mLlm->getSpecContext();
         
         std::cout << "\n================================================\n";
         std::cout << "              Evaluation Results\n";
@@ -212,12 +306,18 @@ private:
         std::cout << "Avg Draft Time:         " << ctx->avgDraftTimeMs() << " ms/step\n";
         std::cout << "Avg Target Time:        " << ctx->avgTargetTimeMs() << " ms/step\n";
         std::cout << "Theoretical Speedup:    " << ctx->theoreticalSpeedup() << "x\n";
+
+        std::cout << "\n--- Accept Length Frequency ---\n";
+        for (const auto& item : ctx->accept_len_freq) {
+            std::cout << "Accept Length " << std::setw(3) << item.first << ": "
+                      << item.second << "\n";
+        }
         
         std::cout << "\n================================================\n";
     }
     
     void saveResults(int totalSamples) {
-        const EagleContext* ctx = mLlm->getEagleContext();
+        const SpecContext* ctx = mLlm->getSpecContext();
         
         std::ofstream file(mConfig.outputFile);
         if (!file.is_open()) {
@@ -237,7 +337,16 @@ private:
         file << "  \"avg_accept_length\": " << ctx->avgAcceptLen() << ",\n";
         file << "  \"accept_rate\": " << ctx->acceptRate() * 100.0f << ",\n";
         file << "  \"compression_ratio\": " << ctx->compressionRatio() << ",\n";
-        file << "  \"theoretical_speedup\": " << ctx->theoreticalSpeedup() << "\n";
+        file << "  \"theoretical_speedup\": " << ctx->theoreticalSpeedup() << ",\n";
+        file << "  \"accept_length_frequency\": {\n";
+        for (auto iter = ctx->accept_len_freq.begin(); iter != ctx->accept_len_freq.end(); ++iter) {
+            file << "    \"" << iter->first << "\": " << iter->second;
+            if (std::next(iter) != ctx->accept_len_freq.end()) {
+                file << ",";
+            }
+            file << "\n";
+        }
+        file << "  }\n";
         file << "}\n";
         
         std::cout << "Results saved to: " << mConfig.outputFile << "\n";
@@ -247,7 +356,7 @@ private:
 // ==================== CLI ====================
 
 void printUsage(const char* progName) {
-    std::cout << "Eagle Speculative Decoding Evaluation\n\n";
+    std::cout << "Spec Decoding Evaluation\n\n";
     std::cout << "Usage: " << progName << " config.json data.txt [options]\n\n";
     std::cout << "Arguments:\n";
     std::cout << "  config.json    Model config (uses backend/precision from this file)\n";
@@ -256,7 +365,11 @@ void printUsage(const char* progName) {
     std::cout << "  --backend=TYPE    Override backend (cpu/opencl)\n";
     std::cout << "  --precision=MODE  Override precision (normal/high/low)\n";
     std::cout << "  --max-tokens=N    Max new tokens (default: 64)\n";
+    std::cout << "  --limit=N         Max samples to evaluate (default: all)\n";
     std::cout << "  --output=FILE     Save results to JSON\n";
+    std::cout << "  --template-file=FILE  Prompt template JSON file\n";
+    std::cout << "  --template-name=NAME  Prompt template name, e.g. gsm8k\n";
+    std::cout << "  --no-thinking     Set enable_thinking=false for Qwen3 chat templates\n";
     std::cout << "  --verbose         Print per-sample details\n";
     std::cout << "  --help            Show this help\n";
 }
@@ -282,8 +395,16 @@ int main(int argc, const char* argv[]) {
             config.precision = arg.substr(12);
         } else if (arg.find("--max-tokens=") == 0) {
             config.maxNewTokens = std::stoi(arg.substr(13));
+        } else if (arg.find("--limit=") == 0) {
+            config.limit = std::stoi(arg.substr(8));
         } else if (arg.find("--output=") == 0) {
             config.outputFile = arg.substr(9);
+        } else if (arg.find("--template-file=") == 0) {
+            config.templateFile = arg.substr(16);
+        } else if (arg.find("--template-name=") == 0) {
+            config.templateName = arg.substr(16);
+        } else if (arg == "--no-thinking") {
+            config.noThinking = true;
         } else if (arg == "--verbose") {
             config.verbose = true;
         }

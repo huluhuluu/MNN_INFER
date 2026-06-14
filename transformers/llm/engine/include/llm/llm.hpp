@@ -35,7 +35,7 @@ class Generation;
 class EagleGeneration;
 struct TimePerformance;
 class LLMOpProfiler;
-struct EagleContext;
+struct SpecContext;
 
 using ChatMessage = std::pair<std::string, std::string>; // <role, content>
 using ChatMessages = std::vector<ChatMessage>;
@@ -177,7 +177,7 @@ public:
     void setProfilerSpecialOps(const std::vector<std::string>& specialOps);
     // clear profiler info
     void clearProfilerInfo();
-    // Get profiler instance (for speculative decoding)
+    // Get profiler instance (for spec decoding)
     LLMOpProfiler* getProfiler() { return mProfiler.get(); }
     // Get draft profiler instance (for Eagle)
     LLMOpProfiler* getDraftProfiler() { return mDraftProfiler.get(); }
@@ -191,20 +191,20 @@ public:
     // ========== End Profiler Interface ==========
     
     // ========== Benchmark Interface ==========
-    // Check if speculative decoding is enabled
-    bool isInSpeculative() const { return mInSpec; }
+    // Check if spec decoding is enabled
+    bool isInSpec() const { return mInSpec; }
     
     // Get draft length for speculative decoding
     int getDraftLength() const { return mDraftLength; }
     
-    // Get generation strategy (for accessing EagleGeneration)
+    // Get generation strategy
     std::shared_ptr<Generation> getGenerationStrategy() { return mGenerationStrategy; }
     
-    // Get Eagle context (for statistics)
-    // Note: Returns nullptr if Eagle is not enabled
-    EagleContext* getEagleContext();
-    const EagleContext* getEagleContext() const;
-    void resetEagleContext();
+    // Get spec context (for statistics)
+    // Note: Returns nullptr if spec decoding is not enabled
+    SpecContext* getSpecContext();
+    const SpecContext* getSpecContext() const;
+    void resetSpecContext();
     // ========== End Benchmark Interface ==========
     
     // Waveform generation
@@ -250,7 +250,7 @@ protected:
     size_t pendingKVCacheLength(size_t add, const std::shared_ptr<KVMeta>& meta) const;
 private:
     std::shared_ptr<Generation> mGenerationStrategy;
-    void setSpeculativeConfig();
+    void setSpecConfig();
     void updateContext(int seq_len, int gen_len);
     void applySlidingWindowKVCache(size_t add);
     size_t pendingKVCacheLength(size_t add) const;

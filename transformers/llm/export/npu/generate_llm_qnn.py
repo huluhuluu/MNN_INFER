@@ -7,10 +7,18 @@ import subprocess
 import json
 import shutil
 
+def normalize_chunk_sizes(chunk_sizes):
+    if isinstance(chunk_sizes, int):
+        chunk_sizes = [chunk_sizes]
+    chunk_sizes = sorted(set(int(size) for size in chunk_sizes) | {1}, reverse=True)
+    return chunk_sizes
+
+
 def makeIO(args):
     exe = os.path.join(os.getcwd(), args.mnn_path, "generateLlmIO")
     output = os.path.join(args.cache_path, 'testdir')
-    print(os.popen(exe + " " + args.model + " " + output + ' %d' %args.chunk_size).read())
+    for chunk_size in args.chunk_sizes:
+        print(os.popen(exe + " " + args.model + " " + output + ' %d' % chunk_size).read())
 
 def seperate(args):
     exe = os.path.join(os.getcwd(), args.mnn_path, "compilefornpu")
@@ -24,8 +32,8 @@ def seperate(args):
         ],
         "cache":"qnn"
     }
-    config['testdir'].append(os.path.join("testdir", '1'))
-    config['testdir'].append(os.path.join("testdir", '%d' %args.chunk_size))
+    for chunk_size in args.chunk_sizes:
+        config['testdir'].append(os.path.join("testdir", '%d' % chunk_size))
     cache = os.path.join(os.getcwd(), args.cache_path)
     with open(os.path.join(cache, 'qnn.json'), 'w') as f:
         f.write(json.dumps(config, indent=4))
@@ -53,7 +61,7 @@ def output_qnn(args):
         "backend_type": "cpu",
         "thread_num": 1,
         "precision": "low",
-        "chunk_limits":[args.chunk_size, 1],
+        "chunk_limits": args.chunk_sizes,
         "memory": "low",
         "sampler_type": "penalty",
         "penalty": 1.1
@@ -65,6 +73,7 @@ def output_qnn(args):
 import time
 
 def convert(args):
+    args.chunk_sizes = normalize_chunk_sizes(args.chunk_size)
     cache = os.path.join(os.getcwd(), args.cache_path)
     os.makedirs(cache, exist_ok=True)
     sta = time.time()
@@ -105,8 +114,8 @@ def main():
     parser.add_argument('--cache_path', type=str, default="tmp",
                         help='cache path for work'
                         )
-    parser.add_argument('--chunk_size', type=int, default=128,
-                        help='chunk_size for npu'
+    parser.add_argument('--chunk_size', type=int, nargs='+', default=[128, 1],
+                        help='chunk size list for npu, e.g. --chunk_size 128 64 32 1'
                         )
     args = parser.parse_args()
     convert(args)

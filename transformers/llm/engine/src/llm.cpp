@@ -231,7 +231,7 @@ static bool canSpecDecode(std::shared_ptr<Express::Module> module) {
     }
     return canSpec;
 }
-void Llm::setSpeculativeConfig() {
+void Llm::setSpecConfig() {
     auto specultive_type = mConfig->speculative_type();
     if(!specultive_type.empty()) {
         if(!canSpecDecode(mModule)) {
@@ -317,7 +317,7 @@ bool Llm::load() {
         return false;
     }
     // set speculative decoding params
-    setSpeculativeConfig();
+    setSpecConfig();
     
     // Initialize profiler
     mProfiler = std::make_shared<LLMOpProfiler>();
@@ -1431,6 +1431,7 @@ void Llm::collectBackendProfileData() {
             BackendOpInfo info;
             info.name = opPair.second.name;
             info.type = opPair.second.type;
+            info.backendName = opPair.second.backendName;
             info.timeMs = opPair.second.timeMs;
             info.callCount += opPair.second.callCount;
             data.opInfos[opPair.first] = info;
@@ -1445,30 +1446,25 @@ void Llm::collectBackendProfileData() {
     }
 }
 
-// ========== Eagle Context Interface ==========
-EagleContext* Llm::getEagleContext() {
+// ========== Spec Context Interface ==========
+SpecContext* Llm::getSpecContext() {
     if (!mInSpec || !mGenerationStrategy) {
         return nullptr;
     }
-    auto eagleGen = static_cast<EagleGeneration*>(mGenerationStrategy.get());
-    return eagleGen ? eagleGen->getEagleContext() : nullptr;
+    return mGenerationStrategy->getSpecContext();
 }
 
-const EagleContext* Llm::getEagleContext() const {
+const SpecContext* Llm::getSpecContext() const {
     if (!mInSpec || !mGenerationStrategy) {
         return nullptr;
     }
-    // Cast to EagleGeneration using static_cast (MNN uses -fno-rtti)
-    // We assume mGenerationStrategy is EagleGeneration when mInSpec is true
-    auto eagleGen = static_cast<EagleGeneration*>(mGenerationStrategy.get());
-    return eagleGen ? eagleGen->getEagleContext() : nullptr;
+    return mGenerationStrategy->getSpecContext();
 }
 
 
-void Llm::resetEagleContext() {
-    auto ctx = getEagleContext();
-    if (ctx) {
-        ctx->reset();
+void Llm::resetSpecContext() {
+    if (mInSpec && mGenerationStrategy) {
+        mGenerationStrategy->resetSpecContext();
     }
 }
 

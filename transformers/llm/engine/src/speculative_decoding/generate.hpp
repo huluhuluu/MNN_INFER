@@ -11,17 +11,19 @@
 #include "llm/llm.hpp"
 #include "../llmconfig.hpp"
 #include "../kvmeta.hpp"
+#include <map>
 
 //#define DUMP_PROFILE_INFO
 
 namespace MNN {
 namespace Transformer {
-// ==================== Eagle Context ====================
-// Statistics for Eagle speculative decoding
-struct EagleContext {
+// ==================== Spec Context ====================
+// Statistics for spec decoding
+struct SpecContext {
     uint draft = 0;              // total draft tokens generated
     uint accepted = 0;           // total accepted tokens
     uint steps = 0;                    // total target verify calls
+    std::map<int, uint> accept_len_freq; // accept length -> occurrence count
     uint64_t draft_time_us = 0;        // total draft model time (microseconds)
     uint64_t draft_prefill_time_us = 0; // initial draft tree build time (microseconds)
     uint64_t draft_decode_time_us = 0;  // iterative draft update time (microseconds)
@@ -31,6 +33,7 @@ struct EagleContext {
         draft = 0;
         accepted = 0;
         steps = 0;
+        accept_len_freq.clear();
         draft_time_us = 0;
         draft_prefill_time_us = 0;
         draft_decode_time_us = 0;
@@ -105,6 +108,9 @@ public:
         // do nothing
     };
     virtual void generate(GenerationParams& param) = 0;
+    virtual SpecContext* getSpecContext() { return nullptr; }
+    virtual const SpecContext* getSpecContext() const { return nullptr; }
+    virtual void resetSpecContext() {}
 protected:
     int draftVerify(MNN::Express::VARP logits, const std::vector<int>& drafts, bool& stop);
     std::shared_ptr<LlmContext> mContext;
@@ -153,11 +159,11 @@ public:
     virtual void load(Module::Config module_config) override;
     virtual void generate(GenerationParams& param) override;
     
-    // Eagle context interface
-    EagleContext* getEagleContext() { return &mEagleContext; }
-    const EagleContext* getEagleContext() const { return &mEagleContext; }
-    void resetEagleContext() { mEagleContext.reset(); }
-private: // For eagle_eval access
+    // Spec context interface
+    SpecContext* getSpecContext() override { return &mSpecContext; }
+    const SpecContext* getSpecContext() const override { return &mSpecContext; }
+    void resetSpecContext() override { mSpecContext.reset(); }
+private:
     struct DraftInfo {
         std::vector<int> draftTokens;
         std::vector<std::vector<int>> retrieveIndices;
@@ -183,7 +189,7 @@ private: // For eagle_eval access
     void setPosition(int position);
     std::string tokenStr(int token);
     
-    EagleContext mEagleContext;
+    SpecContext mSpecContext;
     std::vector<std::shared_ptr<MNN::Express::Module>> mEagleModules;
     std::shared_ptr<KVMeta> mEagleMeta;
     MNN::Express::VARP mD2t, mTreePosition;
