@@ -104,6 +104,8 @@ class LlmExporter(torch.nn.Module):
                      self.llm_config['jinja']['bos'] = self.tokenizer.bos_token
                  if self.tokenizer.eos_token:
                      self.llm_config['jinja']['eos'] = self.tokenizer.eos_token
+                 if self.args.no_thinking and self.config.model_type == 'qwen3':
+                     self.llm_config['jinja'].setdefault('context', {})['enable_thinking'] = False
 
         # tie word embeddings
         self.args.tie_word_embeddings = not self.args.seperate_embed and self.model.lm.lm.weight.equal(self.model.embed.embed.weight)
@@ -703,6 +705,7 @@ def build_args(parser):
     parser.add_argument('--tokenizer_path', type=str, default=None, help='tokenizer path, default is `None` mean using `--path` value.')
     parser.add_argument('--eagle_path', type=str, default=None, help='eagle model path, default is `None`')
     parser.add_argument('--dflash_path', type=str, default=None, help='DFlash draft model path, default is `None`')
+    parser.add_argument('--no_thinking', action='store_true', help='Export Qwen3 chat template with enable_thinking=false.')
     parser.add_argument('--lora_path', type=str, default=None, help='lora path, default is `None` mean not apply lora.')
     parser.add_argument('--gptq_path', type=str, default=None, help='gptq path, default is `None` mean not apply gptq.')
     parser.add_argument('--dst_path', type=str, default='./model', help='export onnx/mnn model to path, default is `./model`.')
