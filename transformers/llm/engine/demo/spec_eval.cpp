@@ -34,6 +34,7 @@ struct EvalConfig {
     int maxNewTokens = 512;       // Max tokens per sample
     int limit = 0;                // Max samples to evaluate, 0 means all
     bool verbose = false;
+    bool noThinking = false;       // Set Qwen3 enable_thinking=false in chat template context
 };
 
 struct PromptMessageTemplate {
@@ -198,6 +199,15 @@ private:
             configJson += "}";
             mLlm->set_config(configJson.c_str());
         }
+        if (mConfig.noThinking) {
+            mLlm->set_config(R"({
+                "jinja": {
+                    "context": {
+                        "enable_thinking": false
+                    }
+                }
+            })");
+        }
         
         MNN::Timer timer;
         timer.reset();
@@ -359,6 +369,7 @@ void printUsage(const char* progName) {
     std::cout << "  --output=FILE     Save results to JSON\n";
     std::cout << "  --template-file=FILE  Prompt template JSON file\n";
     std::cout << "  --template-name=NAME  Prompt template name, e.g. gsm8k\n";
+    std::cout << "  --no-thinking     Set enable_thinking=false for Qwen3 chat templates\n";
     std::cout << "  --verbose         Print per-sample details\n";
     std::cout << "  --help            Show this help\n";
 }
@@ -392,6 +403,8 @@ int main(int argc, const char* argv[]) {
             config.templateFile = arg.substr(16);
         } else if (arg.find("--template-name=") == 0) {
             config.templateName = arg.substr(16);
+        } else if (arg == "--no-thinking") {
+            config.noThinking = true;
         } else if (arg == "--verbose") {
             config.verbose = true;
         }
