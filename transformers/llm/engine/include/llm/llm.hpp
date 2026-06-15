@@ -17,6 +17,7 @@
 #include <iostream>
 #include <streambuf>
 #include <functional>
+#include <map>
 #include <unordered_map>
 
 #include <MNN/expr/Expr.hpp>
@@ -97,10 +98,11 @@ struct LlmContext {
 };
 struct GenerationParams;
 
-struct EagleContext {
+struct SpecContext {
     uint32_t draft = 0;
     uint32_t accepted = 0;
     uint32_t steps = 0;
+    std::map<int, uint32_t> accept_len_freq;
     uint64_t draft_time_us = 0;
     uint64_t draft_prefill_time_us = 0;
     uint64_t draft_decode_time_us = 0;
@@ -110,6 +112,7 @@ struct EagleContext {
         draft = 0;
         accepted = 0;
         steps = 0;
+        accept_len_freq.clear();
         draft_time_us = 0;
         draft_prefill_time_us = 0;
         draft_decode_time_us = 0;
@@ -187,6 +190,8 @@ public:
     std::vector<int> generate(MNN::Express::VARP input_embeds, int max_tokens = -1);
     bool stoped();
     bool reuse_kv();
+    bool isInSpeculative() const { return mInSpec; }
+    int getDraftLength() const { return mDraftLength; }
     // config function
     std::string dump_config();
     bool set_config(const std::string& content);
@@ -207,9 +212,9 @@ public:
     const LlmContext* getContext() const {
         return mContext.get();
     }
-    EagleContext* getEagleContext();
-    const EagleContext* getEagleContext() const;
-    void resetEagleContext();
+    SpecContext* getSpecContext();
+    const SpecContext* getSpecContext() const;
+    void resetSpecContext();
     virtual void setWavformCallback(std::function<bool(const float*, size_t, bool)> callback) {}
     virtual void generateWavform() {}
 protected:

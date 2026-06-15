@@ -437,9 +437,9 @@ void EagleGeneration::generate(GenerationParams& param) {
     MNN::Timer _gt;
     auto draftInfo  = topkGenerate(inputIds, hiddenStates, inputEmbeds);
     const auto draftPrefillUs = _gt.durationInUs();
-    mEagleContext.draft_time_us += draftPrefillUs;
-    mEagleContext.draft_prefill_time_us += draftPrefillUs;
-    mEagleContext.draft += draftInfo.draftTokens.size();
+    mSpecContext.draft_time_us += draftPrefillUs;
+    mSpecContext.draft_prefill_time_us += draftPrefillUs;
+    mSpecContext.draft += draftInfo.draftTokens.size();
     eagleGenerateTime += draftPrefillUs;
     std::vector<int> accpetLens;
     auto newTokens = 0, steps = 0;
@@ -448,7 +448,7 @@ void EagleGeneration::generate(GenerationParams& param) {
             break;
         }
         steps++;
-        mEagleContext.steps++;
+        mSpecContext.steps++;
         MNN::Timer _dt;
         auto decodingInfo = treeDecoding(draftInfo);
         for (auto o : decodingInfo) {
@@ -463,8 +463,9 @@ void EagleGeneration::generate(GenerationParams& param) {
         auto acceptInfo = evaluatePosterior(draftInfo, decodingInfo[0]);
         const auto targetVerifyUs = _dt.durationInUs();
         treeDecodingTime += targetVerifyUs;
-        mEagleContext.target_time_us += targetVerifyUs;
-        mEagleContext.accepted += acceptInfo.acceptTokens.size();
+        mSpecContext.target_time_us += targetVerifyUs;
+        mSpecContext.accepted += acceptInfo.acceptTokens.size();
+        mSpecContext.accept_len_freq[acceptInfo.acceptTokens.size()] += 1;
         newTokens += acceptInfo.acceptTokens.size();
         accpetLens.push_back(acceptInfo.acceptTokens.size());
         {
@@ -482,9 +483,9 @@ void EagleGeneration::generate(GenerationParams& param) {
         MNN::Timer _gt;
         draftInfo = updateDraft(acceptInfo, decodingInfo[1]);
         const auto draftDecodeUs = _gt.durationInUs();
-        mEagleContext.draft_time_us += draftDecodeUs;
-        mEagleContext.draft_decode_time_us += draftDecodeUs;
-        mEagleContext.draft += draftInfo.draftTokens.size();
+        mSpecContext.draft_time_us += draftDecodeUs;
+        mSpecContext.draft_decode_time_us += draftDecodeUs;
+        mSpecContext.draft += draftInfo.draftTokens.size();
         eagleGenerateTime += draftDecodeUs;
     }
     mContext->decode_us += _t.durationInUs();

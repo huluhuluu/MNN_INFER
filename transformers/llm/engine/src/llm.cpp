@@ -1171,17 +1171,17 @@ bool Llm::is_stop(int token_id) {
     return stop;
 }
 
-EagleContext* Llm::getEagleContext() {
-    return mGenerationStrategy ? mGenerationStrategy->getEagleContext() : nullptr;
+SpecContext* Llm::getSpecContext() {
+    return mGenerationStrategy ? mGenerationStrategy->getSpecContext() : nullptr;
 }
 
-const EagleContext* Llm::getEagleContext() const {
-    return mGenerationStrategy ? mGenerationStrategy->getEagleContext() : nullptr;
+const SpecContext* Llm::getSpecContext() const {
+    return mGenerationStrategy ? mGenerationStrategy->getSpecContext() : nullptr;
 }
 
-void Llm::resetEagleContext() {
+void Llm::resetSpecContext() {
     if (mGenerationStrategy) {
-        mGenerationStrategy->resetEagleContext();
+        mGenerationStrategy->resetSpecContext();
     }
 }
 } // namespace Transformer
