@@ -9,7 +9,6 @@
 //
 
 #include "llm/llm.hpp"
-#include "speculative_decoding/generate.hpp"
 #include <MNN/AutoTime.hpp>
 #include <MNN/expr/ExecutorScope.hpp>
 #include <rapidjson/document.h>
@@ -35,11 +34,17 @@ struct EvalConfig {
     int limit = 0;                // Max samples to evaluate, 0 means all
     bool verbose = false;
     bool noThinking = false;       // Set Qwen3 enable_thinking=false in chat template context
+    bool entropySampling = false;  // Collect accept/reject entropy samples
 };
 
 struct PromptMessageTemplate {
     std::string role;
     std::string content;
+};
+
+struct EntropySample {
+    std::vector<double> acceptEntropies;
+    std::vector<double> rejectEntropies;
 };
 
 // ==================== Evaluator ====================
@@ -60,7 +65,7 @@ public:
         if (!loadPromptTemplate()) return false;
         if (!loadModel()) return false;
         
-        if (!mLlm->isInSpec()) {
+        if (!mLlm->isInSpeculative()) {
             std::cerr << "Error: Spec decoding not enabled in config\n";
             return false;
         }
@@ -78,6 +83,7 @@ private:
     std::unique_ptr<Llm> mLlm;
     std::vector<std::string> mTestPrompts;
     std::vector<PromptMessageTemplate> mPromptTemplate;
+    std::vector<EntropySample> mEntropySamples;
     int64_t mTotalPromptLen = 0;
 
     static void replaceAll(std::string& text, const std::string& from, const std::string& to) {
@@ -194,6 +200,9 @@ private:
                 }
             })");
         }
+        if (mConfig.entropySampling) {
+            mLlm->set_config(R"({"eagle_entropy_sampling": true})");
+        }
         
         MNN::Timer timer;
         timer.reset();
@@ -211,11 +220,15 @@ private:
         std::cout << "=== Running Evaluation ===\n\n";
         mLlm->resetSpecContext();
         mTotalPromptLen = 0;
+        mEntropySamples.clear();
         
         int sampleCount = 0;
         for (const auto& prompt : mTestPrompts) {
             sampleCount++;
             mLlm->reset();
+            const SpecContext* beforeSpecCtx = mLlm->getSpecContext();
+            size_t acceptEntropyStart = beforeSpecCtx ? beforeSpecCtx->accept_entropy.size() : 0;
+            size_t rejectEntropyStart = beforeSpecCtx ? beforeSpecCtx->reject_entropy.size() : 0;
             
             MNN::Timer timer;
             timer.reset();
@@ -236,6 +249,20 @@ private:
             float timeMs = timer.durationInUs() / 1000.0f;
             auto context = mLlm->getContext();
             const SpecContext* specCtx = mLlm->getSpecContext();
+            if (mConfig.entropySampling && specCtx) {
+                EntropySample entropySample;
+                entropySample.acceptEntropies.insert(
+                    entropySample.acceptEntropies.end(),
+                    specCtx->accept_entropy.begin() + acceptEntropyStart,
+                    specCtx->accept_entropy.end()
+                );
+                entropySample.rejectEntropies.insert(
+                    entropySample.rejectEntropies.end(),
+                    specCtx->reject_entropy.begin() + rejectEntropyStart,
+                    specCtx->reject_entropy.end()
+                );
+                mEntropySamples.push_back(entropySample);
+            }
             mTotalPromptLen += context->prompt_len;
             
             int steps = specCtx ? specCtx->steps : 0;
@@ -285,6 +312,35 @@ private:
             std::cout << "Accept Length " << std::setw(3) << item.first << ": "
                       << item.second << "\n";
         }
+
+        double acceptEntropyMean = 0.0;
+        double rejectEntropyMean = 0.0;
+        size_t acceptEntropyCount = 0;
+        size_t rejectEntropyCount = 0;
+        if (mConfig.entropySampling) {
+            for (const auto& item : mEntropySamples) {
+                for (double v : item.acceptEntropies) {
+                    ++acceptEntropyCount;
+                    acceptEntropyMean += (v - acceptEntropyMean) / static_cast<double>(acceptEntropyCount);
+                }
+                for (double v : item.rejectEntropies) {
+                    ++rejectEntropyCount;
+                    rejectEntropyMean += (v - rejectEntropyMean) / static_cast<double>(rejectEntropyCount);
+                }
+            }
+        }
+        if (acceptEntropyCount > 0 || rejectEntropyCount > 0) {
+            std::cout << "\n--- Entropy Sampling ---\n";
+            if (acceptEntropyCount > 0) {
+                std::cout << "Mean accepted entropy: " << acceptEntropyMean
+                          << " / " << acceptEntropyCount << "\n";
+            }
+            if (rejectEntropyCount > 0) {
+                std::cout << "Mean rejected entropy: " << rejectEntropyMean
+                          << " / " << rejectEntropyCount << "\n";
+            }
+            std::cout << "SVIP threshold relation: entropy <= threshold^2, since current code checks sqrt(entropy) <= threshold\n";
+        }
         
         std::cout << "\n================================================\n";
     }
@@ -319,7 +375,37 @@ private:
             }
             file << "\n";
         }
-        file << "  }\n";
+        file << "  }";
+        if (mConfig.entropySampling) {
+            file << ",\n";
+            file << "  \"entropy_sampling\": [\n";
+            for (size_t i = 0; i < mEntropySamples.size(); ++i) {
+                const auto& item = mEntropySamples[i];
+                file << "    {\"accept_entropies\": [";
+                for (size_t j = 0; j < item.acceptEntropies.size(); ++j) {
+                    if (j > 0) {
+                        file << ", ";
+                    }
+                    file << item.acceptEntropies[j];
+                }
+                file << "], \"reject_entropies\": [";
+                for (size_t j = 0; j < item.rejectEntropies.size(); ++j) {
+                    if (j > 0) {
+                        file << ", ";
+                    }
+                    file << item.rejectEntropies[j];
+                }
+                file << "], \"accept_count\": " << item.acceptEntropies.size()
+                     << ", \"reject_count\": " << item.rejectEntropies.size() << "}";
+                if (i + 1 != mEntropySamples.size()) {
+                    file << ",";
+                }
+                file << "\n";
+            }
+            file << "  ]\n";
+        } else {
+            file << "\n";
+        }
         file << "}\n";
         
         std::cout << "Results saved to: " << mConfig.outputFile << "\n";
@@ -341,6 +427,7 @@ void printUsage(const char* progName) {
     std::cout << "  --template-file=FILE  Prompt template JSON file\n";
     std::cout << "  --template-name=NAME  Prompt template name, e.g. gsm8k\n";
     std::cout << "  --no-thinking     Set enable_thinking=false for Qwen3 chat templates\n";
+    std::cout << "  --entropy-sampling  Collect accept/reject entropy samples\n";
     std::cout << "  --verbose         Print per-sample details\n";
     std::cout << "  --help            Show this help\n";
 }
@@ -376,6 +463,8 @@ int main(int argc, const char* argv[]) {
             config.templateName = arg.substr(16);
         } else if (arg == "--no-thinking") {
             config.noThinking = true;
+        } else if (arg == "--entropy-sampling") {
+            config.entropySampling = true;
         } else if (arg == "--verbose") {
             config.verbose = true;
         }

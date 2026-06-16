@@ -649,6 +649,9 @@ public:
     std::string eagle_draft_mode() const {
         return config_.value("eagle_draft_mode", "fixed");
     }
+    bool eagle_entropy_sampling() const {
+        return config_.value("eagle_entropy_sampling", false);
+    }
     float eagle_svip_entropy_threshold() const {
         return config_.value("eagle_svip_entropy_threshold", 0.3f);
     }

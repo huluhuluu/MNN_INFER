@@ -77,7 +77,7 @@ static int benchmark(Llm* llm, const std::vector<std::string>& prompts, int max_
     int64_t sample_time = 0;
     // llm->warmup();
     auto context = llm->getContext();
-    llm->resetEagleContext();
+    llm->resetSpecContext();
     if (max_token_number > 0) {
         llm->set_config("{\"max_new_tokens\":1}");
     }
@@ -151,21 +151,21 @@ static int benchmark(Llm* llm, const std::vector<std::string>& prompts, int max_
     MNN_PRINT(" sample time = %.2f s\n", sample_s);
     MNN_PRINT("prefill speed = %.2f tok/s\n", prompt_len / prefill_s);
     MNN_PRINT(" decode speed = %.2f tok/s\n", decode_len / decode_s);
-    if (auto eagleContext = llm->getEagleContext()) {
-        if (eagleContext->steps > 0) {
-            MNN_PRINT(" eagle steps = %u\n", eagleContext->steps);
-            MNN_PRINT(" eagle draft tokens = %u\n", eagleContext->draft);
-            MNN_PRINT(" eagle accepted tokens = %u\n", eagleContext->accepted);
-            MNN_PRINT(" eagle accept rate = %.3f\n", eagleContext->acceptRate());
-            MNN_PRINT(" eagle avg accept len = %.3f\n", eagleContext->avgAcceptLen());
-            MNN_PRINT(" eagle compression ratio = %.3f\n", eagleContext->compressionRatio());
-            MNN_PRINT(" eagle draft prefill time = %.2f ms\n", eagleContext->draft_prefill_time_us / 1000.0f);
-            MNN_PRINT(" eagle draft decode time = %.2f ms\n", eagleContext->draft_decode_time_us / 1000.0f);
-            MNN_PRINT(" eagle draft total time = %.2f ms\n", eagleContext->draft_time_us / 1000.0f);
-            MNN_PRINT(" eagle target verify time = %.2f ms\n", eagleContext->target_time_us / 1000.0f);
-            MNN_PRINT(" eagle avg draft time = %.2f ms/step\n", eagleContext->avgDraftTimeMs());
-            MNN_PRINT(" eagle avg target time = %.2f ms/step\n", eagleContext->avgTargetTimeMs());
-            MNN_PRINT(" eagle theoretical speedup = %.3f\n", eagleContext->theoreticalSpeedup());
+    if (auto specContext = llm->getSpecContext()) {
+        if (specContext->steps > 0) {
+            MNN_PRINT(" spec steps = %u\n", specContext->steps);
+            MNN_PRINT(" spec draft tokens = %u\n", specContext->draft);
+            MNN_PRINT(" spec accepted tokens = %u\n", specContext->accepted);
+            MNN_PRINT(" spec accept rate = %.3f\n", specContext->acceptRate());
+            MNN_PRINT(" spec avg accept len = %.3f\n", specContext->avgAcceptLen());
+            MNN_PRINT(" spec compression ratio = %.3f\n", specContext->compressionRatio());
+            MNN_PRINT(" spec draft prefill time = %.2f ms\n", specContext->draft_prefill_time_us / 1000.0f);
+            MNN_PRINT(" spec draft decode time = %.2f ms\n", specContext->draft_decode_time_us / 1000.0f);
+            MNN_PRINT(" spec draft total time = %.2f ms\n", specContext->draft_time_us / 1000.0f);
+            MNN_PRINT(" spec target verify time = %.2f ms\n", specContext->target_time_us / 1000.0f);
+            MNN_PRINT(" spec avg draft time = %.2f ms/step\n", specContext->avgDraftTimeMs());
+            MNN_PRINT(" spec avg target time = %.2f ms/step\n", specContext->avgTargetTimeMs());
+            MNN_PRINT(" spec theoretical speedup = %.3f\n", specContext->theoreticalSpeedup());
         }
     }
     MNN_PRINT(" vision speed = %.3f MP/s\n", vision_speed);

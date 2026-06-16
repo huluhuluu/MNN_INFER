@@ -104,6 +104,7 @@ void EagleGeneration::load(Module::Config module_config) {
     mTopK = mLlm->mConfig->eagle_topk();
     mDepth = mLlm->mConfig->eagle_depth();
     mDraftMode = parseDraftMode(mLlm->mConfig->eagle_draft_mode());
+    mEntropySampling = mLlm->mConfig->eagle_entropy_sampling();
     mSvipEntropyThreshold = mLlm->mConfig->eagle_svip_entropy_threshold();
     mDeagleSurvivalSumThreshold = mLlm->mConfig->eagle_deagle_survival_sum_threshold();
     mDeagleMomentumThreshold = mLlm->mConfig->eagle_deagle_momentum_threshold();
@@ -219,7 +220,8 @@ EagleGeneration::DraftInfo EagleGeneration::topkGenerate(const std::vector<int>&
     auto lastP        = outputs[0];
     auto lastHidden   = outputs[1];
     bool dynamicDraft = mDraftMode != DraftMode::FIXED;
-    auto topKInfo = getTopKInfo(lastP, mTopK, dynamicDraft);
+    bool needProbStats = dynamicDraft || mEntropySampling;
+    auto topKInfo = getTopKInfo(lastP, mTopK, needProbStats);
 #if EAGLE_DEBUG
     for (int i = 0; i < topKInfo.indices.size(); i++) {
         auto token = topKInfo.indices[i];
@@ -227,7 +229,7 @@ EagleGeneration::DraftInfo EagleGeneration::topkGenerate(const std::vector<int>&
         printf("# top-%d: %d[%f], %s\n", i, token, topKInfo.scores[i], tokenStr(token).c_str());
     }
 #endif
-    tokenTree.init(topKInfo.indices.data(), topKInfo.scores.data(), dynamicDraft ? topKInfo.confidences.data() : nullptr);
+    tokenTree.init(topKInfo.indices.data(), topKInfo.scores.data(), dynamicDraft ? topKInfo.confidences.data() : nullptr, mEntropySampling ? topKInfo.entropies.data() : nullptr);
     int generatedTreeTokens = 0;
     double previousSurvivalSum = tokenTree.topKSurvivalSum();
     int momentumDecayCount = 0;
@@ -244,7 +246,7 @@ EagleGeneration::DraftInfo EagleGeneration::topkGenerate(const std::vector<int>&
         outputs = eagleForwardRaw({inputEmbeds, inputHidden, attentionMask, mTreePosition, mLlm->logitsAllIdx});
         lastP   = outputs[0];
         inputHidden  = outputs[1];
-        topKInfo = getTopKInfo(lastP, mTopK, dynamicDraft);
+        topKInfo = getTopKInfo(lastP, mTopK, needProbStats);
         std::vector<bool> expandableRows;
         const std::vector<bool>* expandablePtr = nullptr;
         if (mDraftMode == DraftMode::SVIP && d > 0) {
@@ -259,7 +261,7 @@ EagleGeneration::DraftInfo EagleGeneration::topkGenerate(const std::vector<int>&
             }
             expandablePtr = &expandableRows;
         }
-        if (!tokenTree.grow(topKInfo.indices.data(), topKInfo.scores.data(), dynamicDraft ? topKInfo.confidences.data() : nullptr, expandablePtr)) {
+        if (!tokenTree.grow(topKInfo.indices.data(), topKInfo.scores.data(), dynamicDraft ? topKInfo.confidences.data() : nullptr, mEntropySampling ? topKInfo.entropies.data() : nullptr, expandablePtr)) {
             break;
         }
         generatedTreeTokens += mTopK;
@@ -312,6 +314,9 @@ EagleGeneration::DraftInfo EagleGeneration::topkGenerate(const std::vector<int>&
     DraftInfo info;
     info.draftTokens = std::move(output.draftTokens);
     info.retrieveIndices = std::move(output.retrieveIndices);
+    if (mEntropySampling) {
+        info.entropies = std::move(output.entropies);
+    }
     info.attentionMask = _Input({1, 1, inputLen, inputLen}, NCHW, halide_type_of<float>());
     for (int i = 0; i < inputLen; i++) {
         for (int j = 0; j < inputLen; j++) {
@@ -377,6 +382,22 @@ EagleGeneration::AcceptInfo EagleGeneration::evaluatePosterior(const EagleGenera
     acceptInfo.sampleTokens  = std::move(samples);
     acceptInfo.acceptIndices = std::move(bestCandidate);
     acceptInfo.acceptTokens  = std::move(acceptTokens);
+    if (mEntropySampling) {
+        std::vector<char> acceptedFlags(drafInfo.draftTokens.size(), 0);
+        for (int idx : acceptInfo.acceptIndices) {
+            if (idx >= 0 && idx < static_cast<int>(acceptedFlags.size())) {
+                acceptedFlags[idx] = 1;
+            }
+        }
+        for (size_t i = 0; i < drafInfo.entropies.size(); ++i) {
+            size_t draftIndex = i + 1;
+            if (draftIndex < acceptedFlags.size() && acceptedFlags[draftIndex]) {
+                mSpecContext.accept_entropy.push_back(drafInfo.entropies[i]);
+            } else {
+                mSpecContext.reject_entropy.push_back(drafInfo.entropies[i]);
+            }
+        }
+    }
     return acceptInfo;
 }
 

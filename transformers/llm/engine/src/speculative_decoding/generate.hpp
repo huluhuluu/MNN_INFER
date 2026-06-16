@@ -99,6 +99,7 @@ private:
     struct DraftInfo {
         std::vector<int> draftTokens;
         std::vector<std::vector<int>> retrieveIndices;
+        std::vector<double> entropies;
         VARP attentionMask;
         VARP positionIds;
     };
@@ -124,6 +125,7 @@ private:
     MNN::Express::VARP mD2t, mTreePosition;
     int mTopK, mDepth;
     DraftMode mDraftMode = DraftMode::FIXED;
+    bool mEntropySampling = false;
     float mSvipEntropyThreshold = 0.3f;
     float mDeagleSurvivalSumThreshold = 0.15f;
     float mDeagleMomentumThreshold = 0.6f;

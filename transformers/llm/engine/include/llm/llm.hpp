@@ -107,6 +107,8 @@ struct SpecContext {
     uint64_t draft_prefill_time_us = 0;
     uint64_t draft_decode_time_us = 0;
     uint64_t target_time_us = 0;
+    std::vector<double> accept_entropy;
+    std::vector<double> reject_entropy;
 
     void reset() {
         draft = 0;
@@ -117,6 +119,8 @@ struct SpecContext {
         draft_prefill_time_us = 0;
         draft_decode_time_us = 0;
         target_time_us = 0;
+        accept_entropy.clear();
+        reject_entropy.clear();
     }
 
     float avgAcceptLen() const {
