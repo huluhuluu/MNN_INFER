@@ -409,6 +409,7 @@ void EagleGeneration::generate(GenerationParams& param) {
     inputEmbeds     = _Concat({pre_embeds[1], cur_embed}, 0);
     auto eagleWindow = mLlm->mConfig->eagle_sliding_window();
     if (eagleWindow > 0 && inputEmbeds->getInfo()->dim[0] > eagleWindow) {
+        mEaglePastLen = inputEmbeds->getInfo()->dim[0] - eagleWindow;
         inputEmbeds = _sliceTail(inputEmbeds, 0, eagleWindow);
         hiddenStates = _sliceTail(hiddenStates, 1, eagleWindow);
         if (inputIds.size() > static_cast<size_t>(eagleWindow)) {
