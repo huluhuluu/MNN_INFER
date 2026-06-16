@@ -1,0 +1,45 @@
+{
+  "gsm8k": {
+    "messages": [
+      {
+        "role": "user",
+        "content": "Q: {{question}}\nA: Let's think step by step."
+      }
+    ]
+  },
+  "math500": {
+    "messages": [
+      {
+        "role": "user",
+        "content": "Question: {{question}}\nAnswer: Let's think step by step."
+      }
+    ]
+  },
+  "ceval": {
+    "messages": [
+      {
+        "role": "user",
+        "content": "以下是中国关于{{subject}}的单项选择题，请选出其中的正确答案。\n\n题目：{{question}}\n{{choices}}\n\n答案："
+      }
+    ]
+  },
+  "cmmlu": {
+    "messages": [
+      {
+        "role": "user",
+        "content": "以下是中国关于{{subject}}的单项选择题，请选出其中的正确答案。\n\n题目：{{question}}\n{{choices}}\n\n答案："
+      }
+    ]
+  },
+  "humaneval": {
+    "messages": [
+      {
+        "role": "user",
+        "content": "{{prompt}}"
+      }
+    ]
+  },
+  "mtbench": {
+    "system": "You are a helpful assistant."
+  }
+}

@@ -94,42 +94,37 @@ mkdir -p build_64
 adb shell "mkdir -p /data/local/tmp/mnn-dflash"
 ```
 
-然后把运行所需文件推上去：
+然后把运行所需文件推上去, 注意文件路径：
 
 ```bash
-adb push project/android/build_64/eagle_eval /data/local/tmp/mnn-dflash/
+adb push project/android/build_64/spec_eval /data/local/tmp/mnn-dflash/
 adb push project/android/build_64/llm_demo /data/local/tmp/mnn-dflash/llm_demo
 adb push project/android/build_64/libllm.so /data/local/tmp/mnn-dflash/libllm.so
 adb push project/android/build_64/libMNN.so /data/local/tmp/mnn-dflash/libMNN.so
 adb push project/android/build_64/libMNN_Express.so /data/local/tmp/mnn-dflash/libMNN_Express.so
-adb push /path/to/model_dflash /data/local/tmp/mnn-dflash/model
+adb push /path/to/model_dflash /data/local/tmp/
 ```
-
-如果你已经有 `project/android/updateTest.sh` 的完整推送流程，也可以直接复用它，再补上模型目录。
 
 ## 5. 设备运行
 
-进入设备目录后运行：
+进入设备目录后,交互式运行：
 
 ```bash
-adb shell "
-cd /data/local/tmp/mnn-dflash &&
-export LD_LIBRARY_PATH=.:$LD_LIBRARY_PATH &&
-./llm_demo ./model/config.json ./model/prompt.txt
-"
+adb shell
+cd /data/local/tmp/mnn-dflash
+export LD_LIBRARY_PATH=.:$LD_LIBRARY_PATH
+./llm_demo /path/to/model_dflash/config.json
 ```
-
-如果只想看单轮生成，也可以直接传 prompt 文件。
 
 ## 6. DFlash 评测
 
-推测解码统计可以使用 `spec_eval` 工具：
+推测解码统计可以使用 `spec_eval` 工具, 这里的模板和测试数据需要注意路径：
 
 ```bash
 ./spec_eval /path-to-model/config.json samples.txt \
   --template-file=prompt_templates.json \
   --template-name=gsm8k \
-  --limit=3 \
+  --limit=10 \
   --max-tokens=512
 ```
 
@@ -142,9 +137,9 @@ export LD_LIBRARY_PATH=.:$LD_LIBRARY_PATH &&
 - `--limit`：最多评测的样本数。
 - `--max-tokens`：每个样本最多生成的新 token 数。
 
-实测结果：
+实测结果(参考测试样本，问答模板在根目录)：
 ```text
-✗ ./spec_eval /data/HUGGINGFACE/Qwen3-4B-DFlash-MNN/config.json ../gsm8k_eval_samples.txt \
+**✗ ./spec_eval /data/HUGGINGFACE/Qwen3-4B-DFlash-MNN/config.json ../gsm8k_eval_samples.txt \
     --template-file=../prompt_templates.json \
     --template-name=gsm8k \
     --limit=3 --no-thinking
@@ -208,5 +203,5 @@ Accept Length  14: 1
 Accept Length  15: 2
 Accept Length  16: 2
 
-================================================
+================================================**
 ```
