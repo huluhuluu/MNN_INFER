@@ -71,6 +71,7 @@
    transformers/diffusion
    transformers/llm
    transformers/models
+   transformers/mnn-profile
 
 .. toctree::
    :maxdepth: 1

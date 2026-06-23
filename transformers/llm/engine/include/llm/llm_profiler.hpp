@@ -101,7 +101,7 @@ struct BackendProfileData {
  * Provides operator-level profiling for LLM inference,
  * supporting CPU, OpenCL, and QNN backends.
  */
-class LLMOpProfiler {
+class MNN_PUBLIC LLMOpProfiler {
 public:
     /**
      * Profiler configuration

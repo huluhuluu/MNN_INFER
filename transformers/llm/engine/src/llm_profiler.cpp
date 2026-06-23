@@ -149,7 +149,7 @@ std::string LLMOpProfiler::shapeToString(const Express::INTS& shape) {
 void LLMOpProfiler::onPrefillStart() {
     if (!mEnabled) return;
     mInPrefill = true;
-    mPrefillProfile.reset();
+    // mPrefillProfile.reset();
     mTimer.reset(); 
     // printf("[LLM Profiler] Prefill phase started\n");
 }
@@ -183,20 +183,19 @@ void LLMOpProfiler::onDecodeTokenEnd(int count) {
 void LLMOpProfiler::onDecodePhaseStart() {
     if (!mEnabled) return;
     mInPrefill = false;
-    mDecodeProfile.reset();
-    mDecodeTokenTimes.clear();
+    // mDecodeProfile.reset();
+    // mDecodeTokenTimes.clear();
     // printf("[LLM Profiler] Decode phase started\n");
 }
 
 void LLMOpProfiler::onDecodePhaseEnd() {
     if (!mEnabled) return;
     if (!mDecodeTokenTimes.empty()) {
-        float avgTime = 0.0f;
+        float totalTime = 0.0f;
         for (float t : mDecodeTokenTimes) {
-            avgTime += t;
+            totalTime += t;
         }
-        avgTime /= mDecodeTokenTimes.size();
-        mDecodeProfile.tokenTotalTime = avgTime * mDecodeTokenTimes.size();
+        mDecodeProfile.tokenTotalTime = totalTime;
     }
     // printf("[LLM Profiler] Decode phase ended, %d tokens, time %.4f ms, avg time: %.4f ms/token\n", 
             //   mDecodeProfile.tokenCount, 

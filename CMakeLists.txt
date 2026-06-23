@@ -277,6 +277,7 @@ option(MNN_GPU_TIME_PROFILE "Enable time profiling for the OpenCL backend and Vu
 option(MNN_CUDA_PROFILE "Enable CUDA profile" OFF)
 
 if (MNN_OP_TIME_PROFILE)
+  add_definitions(-DMNN_OP_TIME_PROFILE)
   set(MNN_GPU_TIME_PROFILE ON CACHE BOOL "Enable time profiling for the OpenCL backend and Vulkan backend." FORCE)
 endif()
 

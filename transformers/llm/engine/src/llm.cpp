@@ -750,6 +750,7 @@ void Llm::reset() {
     mContext->audio_us = 0;
     mContext->audio_input_s = 0.0f;
     mMeta->remove = mMeta->previous;
+    mContext->current_stage = LlmStage::Idle;
 }
 
 void Llm::generate_init(std::ostream* os, const char* end_with) {
@@ -934,7 +935,12 @@ std::vector<int> Llm::generate(MNN::Express::VARP input_embeds, int max_tokens) 
     if (mProfiler && mProfiler->isEnabled()) {
         printf("Prefill time: %ld us\n", mContext->prefill_us);
         collectBackendProfileData();
-        mProfiler->onPrefillEnd(mContext->prompt_len);
+        mProfiler->onPrefillEnd(seqLen);
+
+        // chunk prefill
+        if (max_tokens <= 0) {
+            mContext->current_stage = LlmStage::Idle;
+        }
     }
     // ========== End Profiler: Prefill Phase End ==========
 
