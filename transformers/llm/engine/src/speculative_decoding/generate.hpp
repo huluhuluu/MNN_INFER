@@ -184,14 +184,38 @@ public:
     virtual const SpecContext* getSpecContext() const override { return &mDFlashContext; }
     virtual void resetSpecContext() override { mDFlashContext.reset(); }
 private:
+    struct DFlashDraftInfo {
+        std::vector<int> draftTokens;
+        MNN::Express::VARP logits;
+    };
+    struct TreeInfo {
+        std::vector<int> draftTokens;
+        std::vector<std::map<int, int>> childMaps;
+        std::vector<std::vector<int>> retrieveIndices;
+        MNN::Express::VARP attentionMask;
+        MNN::Express::VARP positionIds;
+    };
+    struct AcceptInfo {
+        std::vector<int> sampleTokens;
+        std::vector<int> acceptIndices;
+        std::vector<int> acceptTokens;
+    };
     MNN::Express::VARP buildAttentionMask(int draftLen, int targetLen);
     MNN::Express::VARP buildPositionIds(int start, int len);
     MNN::Express::VARP lastHidden(MNN::Express::VARP hidden);
     MNN::Express::VARP prefixHidden(MNN::Express::VARP hidden, int len);
+    MNN::Express::VARP gatherHidden(MNN::Express::VARP hidden, const std::vector<int>& indices);
+    DFlashDraftInfo sampleDraftWithLogits(MNN::Express::VARP targetHidden, const std::vector<int>& blockTokens);
     std::vector<int> sampleDraft(MNN::Express::VARP targetHidden, const std::vector<int>& blockTokens);
+    TreeInfo buildDDTree(int anchorToken, MNN::Express::VARP logits, int startPosition, int pastLength);
+    AcceptInfo evaluateTreePosterior(const TreeInfo& treeInfo, MNN::Express::VARP logits);
+    bool processAcceptedTokens(const std::vector<int>& tokens, int& len, int maxToken);
+    void compactTargetCache(const AcceptInfo& acceptInfo);
     int mHiddenStateIndex = -1;
     int mBlockSize = 16;
     int mMaskTokenId = -1;
+    int mDDTreeTopK = 0;
+    int mDDTreeBudget = 16;
     SpecContext mDFlashContext;
     std::shared_ptr<KVMeta> mDFlashMeta;
     std::shared_ptr<MNN::Express::Module> mDFlashModule;

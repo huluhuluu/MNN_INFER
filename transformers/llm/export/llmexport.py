@@ -312,6 +312,8 @@ class LlmExporter(torch.nn.Module):
                 config['dflash_block_size'] = self.dflash.block_size if self.dflash is not None else 16
                 config['dflash_mask_token_id'] = self.dflash.mask_token_id if self.dflash is not None else -1
                 config['dflash_target_layer_ids'] = self.dflash.target_layer_ids if self.dflash is not None else []
+                config['dflash_ddtree_topk'] = 0
+                config['dflash_ddtree_budget'] = 0
             json.dump(config, f, ensure_ascii=False, indent=4)
         return config_json
 

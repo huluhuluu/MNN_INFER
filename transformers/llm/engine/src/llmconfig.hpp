@@ -643,6 +643,12 @@ public:
     std::vector<int> dflash_target_layer_ids() const {
         return config_.value("dflash_target_layer_ids", std::vector<int>{});
     }
+    int dflash_ddtree_topk() const {
+        return config_.value("dflash_ddtree_topk", 0);
+    }
+    int dflash_ddtree_budget() const {
+        return config_.value("dflash_ddtree_budget", 0);
+    }
     std::string eagle_model() const {
         return base_dir_ + config_.value("eagle_model", "eagle.mnn");
     }
