@@ -297,7 +297,8 @@ ErrorCode CPUPackedAttention::onExecute(const std::vector<Tensor*>& inputs, cons
             int id = mBatchMeta->calId[i];
             auto reqLen = static_cast<int>(mBatchMeta->mMetas[id]->add);
             auto reqOffset = reqLenBias * mNumHead * mHeadDim;
-            gcore->MNNCountMaxMinValue(query->host<float>() + reqOffset, (float*)(&minValue), (float*)(&maxValue), reqLen * mNumHead * mHeadDim);
+            auto queryPtr = reinterpret_cast<float*>(query->host<int8_t>() + (size_t)reqOffset * mBytes);
+            gcore->MNNCountMaxMinValue(queryPtr, (float*)(&minValue), (float*)(&maxValue), reqLen * mNumHead * mHeadDim);
             float maxV = maxValue;
             float minV = minValue;
             float absMax = ALIMAX(fabsf(maxV), fabsf(minV));
@@ -666,13 +667,14 @@ ErrorCode CPUPackedAttention::onExecute(const std::vector<Tensor*>& inputs, cons
                     // 2. softmax scores
                     // qk: [kv_seq_len/mPack, seq_len, mPack] -> [seq_len/eP, kv_seq_len/lP, eP, lP]
                     {
+                        auto maskPtr = isLowerTriangular ? nullptr : mask + maskBias * mBytes;
                         if (mBytes == 2) {
                             if (!mQuantKey || !isLowerTriangular || sinksPtr != nullptr) {
-                                _maskQK<FLOAT16_T>((float*)qkPacked, &mScales[idx], reqLen, subKvSeqLen, mPack, kvSeqLen, i * mBlockKV, sinksPtr, mask + maskBias * mBytes, mQuantKey, isLowerTriangular);
+                                _maskQK<FLOAT16_T>((float*)qkPacked, &mScales[idx], reqLen, subKvSeqLen, mPack, kvSeqLen, i * mBlockKV, sinksPtr, maskPtr, mQuantKey, isLowerTriangular);
                             }
                         } else {
                             if (!mQuantKey || !isLowerTriangular || sinksPtr != nullptr) {
-                                _maskQK<float>((float*)qkPacked, &mScales[idx], reqLen, subKvSeqLen, mPack, kvSeqLen, i * mBlockKV, sinksPtr, mask + maskBias * mBytes, mQuantKey, isLowerTriangular);
+                                _maskQK<float>((float*)qkPacked, &mScales[idx], reqLen, subKvSeqLen, mPack, kvSeqLen, i * mBlockKV, sinksPtr, maskPtr, mQuantKey, isLowerTriangular);
                             }
                         }
                         gcore->MNNSoftmax(qkSoftmax, (float*)qkPacked, runningMax, runningSum, diffScale, reqLen, subKvSeqLen, i * mBlockKV, kvValidOffset, mPack, useMaskInSoftmax);

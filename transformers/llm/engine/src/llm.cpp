@@ -9,7 +9,6 @@
 #include <fstream>
 #include <iostream>
 #include <sstream>
-#include <iomanip>
 #include <unordered_set>
 
 #include <MNN/AutoTime.hpp>
@@ -47,15 +46,6 @@ void KVMeta::sync() {
 }
 
 void BatchKVMeta::sync() {
-    // remove kvmeta
-    for(int& id: remove){
-        if(mMetas.find(id) != mMetas.end()) {
-            delete mMetas[id];
-            mMetas[id] = nullptr;
-            mMetas.erase(id);
-        }
-    }
-
     // resize and sync old elements
     for (auto& meta : mMetas) {
         meta.second->sync();
@@ -844,7 +834,7 @@ std::vector<int> Llm::generate(const std::vector<int>& input_ids, int max_tokens
 }
 
 std::vector<std::vector<int>> Llm::generate(const std::vector<std::vector<int> >& input_ids, std::ostream* os, int max_new_tokens){
-    int gen_len = 0, bs = input_ids.size();
+    int bs = input_ids.size();
     std::vector<std::vector<int>> ret(bs, std::vector<int>{});
     
     // Reset context for batch generation
@@ -854,7 +844,6 @@ std::vector<std::vector<int>> Llm::generate(const std::vector<std::vector<int> >
     
     // add all requests
     std::vector<int> reqIds= mScheduler->addRequest(input_ids);
-    
     if(max_new_tokens > 0) {
         mScheduler->setMaxNewTokens(max_new_tokens);
     }
@@ -862,7 +851,6 @@ std::vector<std::vector<int>> Llm::generate(const std::vector<std::vector<int> >
     mRuntimeManager->setHintPtr(Interpreter::KVCACHE_INFO, mBatchMeta.get());
 
     // generation loop
-    // TODO: 
     while (std::shared_ptr<BatchScheduler::Chunk> chunk = mScheduler->schedule(-1, 4)){// chunk prefill
         // prepare inputs
         Express::VARP hidden_states = this->embedding(chunk->inputs, chunk->calLen, chunk->culLen);
@@ -875,8 +863,6 @@ std::vector<std::vector<int>> Llm::generate(const std::vector<std::vector<int> >
             mBatchMeta->setKVCacheInfo(chunk->reqId[i], chunk->calLen[i], 0, nullptr, 0);
             mBatchMeta->setKVMetaInfo(req_id, mConfig->layer_nums(), 0, 0, "", KVMeta::NoChange);
         }
-        
-        // TODO: static graph doesn't match
         auto moduleKey = std::make_pair(chunk->culLen, false);
         std::shared_ptr<Module> selectModule = mModule;
         if(mModulePool.find(moduleKey) == mModulePool.end()) {
@@ -887,7 +873,6 @@ std::vector<std::vector<int>> Llm::generate(const std::vector<std::vector<int> >
         // get all logits 
         // [1, seqLen, hidden]
         std::vector<Express::VARP> res = selectModule->onForward({hidden_states, attention_mask, position_ids, logitsIndex});
-        auto o = res[0]->readMap<float>();
         Express::VARP logits = _Squeeze(res[0], {0});
         
         int sumLen = 0;

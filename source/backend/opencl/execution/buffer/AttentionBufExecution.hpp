@@ -11,51 +11,12 @@
 #ifndef AttentionBufExecution_hpp
 #define AttentionBufExecution_hpp
 
+#include "backend/opencl/execution/buffer/KVCacheCLManager.hpp"
 #include "backend/opencl/execution/image/CommonExecution.hpp"
 #include "core/OpCommonUtils.hpp"
 
 namespace MNN {
 namespace OpenCL {
-
-class KVCacheCLManager {
-public:
-    KVCacheCLManager(Backend *backend, bool kv_cache);
-
-    ~KVCacheCLManager() = default;
-    void allocKVCache(const KVMeta* meta, int seqlen);
-    bool reallocKVCache(const KVMeta* meta, int seqlen, bool isExecute = true);
-    void setArgs(int numHead, int kvNumHead, int headDim){
-        mNumHead = numHead;
-        mKvNumHead = kvNumHead;
-        mHeadDim = headDim;
-    }
-    int pastKvLength() {
-        return mPastLength;
-    }
-    void addKvLength(int seq_len){
-        mPastLength += seq_len;
-    }
-    int maxLength() {
-        return mMaxLength;
-    }
-    int numHead() {
-        return mNumHead;
-    }
-    const cl::Buffer * key() {
-        return mPastKey.get();
-    }
-    const cl::Buffer * value() {
-        return mPastValue.get();
-    }
-
-private:
-    bool mKVCache;
-    const int mExpandChunk = 64;
-    std::shared_ptr<cl::Buffer> mPastKey, mPastValue;
-    int mPastLength = 0, mMaxLength = 0, mNumHead = 0, mKvNumHead = 0, mHeadDim = 0;
-    OpenCLBackend *mOpenCLBackend;
-    int mByte = 4;
-};
 
 class AttentionBufExecution : public CommonExecution {
 public:

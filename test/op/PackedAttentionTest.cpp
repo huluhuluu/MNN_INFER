@@ -146,7 +146,7 @@ static std::vector<std::vector<std::vector<float>>> concatTensor(const std::vect
 }
 
 // Pack multiple requests into single tensor along seq dimension
-VARP packRequests(std::vector<std::vector<std::vector<std::vector<float>>>>& requests) {
+VARP packRequests(const std::vector<std::vector<std::vector<std::vector<float>>>>& requests) {
     int totalSeqLen = 0;
     int numHead = requests[0][0].size();
     int headDim = requests[0][0][0].size();
@@ -246,7 +246,7 @@ static std::vector<std::vector<std::vector<float>>> computeSingleAttention(
 }
 
 // Generate block diagonal mask for packed requests
-VARP generateBlockDiagonalMask(std::vector<int>& seqLens) {
+VARP generateBlockDiagonalMask(const std::vector<int>& seqLens) {
     int maskSize = 0;
     for (int len : seqLens) {
         maskSize += len * len;
@@ -308,8 +308,6 @@ public:
         
         // Test 1: Two requests with different lengths
         {
-            MNN_PRINT("=== PackedAttention Test 1: Two requests ===\n");
-            
             int req0Len = 256;
             int req1Len = 152;
             std::vector<int> seqLens = {req0Len, req1Len};
@@ -365,16 +363,12 @@ public:
             output->unMap();
             
             if (!pass) {
-                MNN_PRINT("PackedAttention Test 1 FAILED!\n");
                 return false;
             }
-            MNN_PRINT("PackedAttention Test 1 PASSED!\n");
         }
         
         // Test 2: Three requests
         {
-            MNN_PRINT("=== PackedAttention Test 2: Three requests ===\n");
-            
             std::vector<int> seqLens = {256, 128, 1};
             int totalLen = 0;
             for (int len : seqLens) {
@@ -429,16 +423,12 @@ public:
             output->unMap();
 
             if (!pass) {
-                MNN_PRINT("PackedAttention Test 2 FAILED!\n");
                 return false;
             }
-            MNN_PRINT("PackedAttention Test 2 PASSED!\n");
         }
 
         // Test 3: Mixed prefill and decode with existing KV cache
         {
-            MNN_PRINT("=== PackedAttention Test 3: Prefill + Decode ===\n");
-
             const int historyLen = 128;
             const int req0Len = 256;
             const int req1DecodeLen = 1;
@@ -512,7 +502,6 @@ public:
             output->unMap();
 
             if (!pass) {
-                MNN_PRINT("PackedAttention Test 3 FAILED!\n");
                 return false;
             }
             if (gBatchMeta.mMetas[1] == nullptr || gBatchMeta.mMetas[1]->previous != (size_t)(historyLen + req1DecodeLen)) {
@@ -520,7 +509,102 @@ public:
                           historyLen + req1DecodeLen, gBatchMeta.mMetas[1] == nullptr ? 0 : gBatchMeta.mMetas[1]->previous);
                 return false;
             }
-            MNN_PRINT("PackedAttention Test 3 PASSED!\n");
+        }
+
+        // Test 4: Multi-request multi-step decode with existing KV cache
+        {
+            const std::vector<int> historyLens = {33, 65, 17, 96};
+            const int decodeSteps = 4;
+            const int reqCount = (int)historyLens.size();
+            clearBatchMeta(gBatchMeta);
+
+            auto module = _makePackedAttentionModule();
+
+            std::vector<std::vector<std::vector<std::vector<float>>>> allQuery(reqCount);
+            std::vector<std::vector<std::vector<std::vector<float>>>> allKey(reqCount);
+            std::vector<std::vector<std::vector<std::vector<float>>>> allValue(reqCount);
+            std::vector<std::vector<std::vector<std::vector<float>>>> kvKeyPrefix(reqCount);
+            std::vector<std::vector<std::vector<std::vector<float>>>> kvValuePrefix(reqCount);
+
+            for (int r = 0; r < reqCount; ++r) {
+                allQuery[r] = generateRandTensor(historyLens[r] + decodeSteps, gPackedNumHead, gPackedHeadDim, precision);
+                allKey[r] = generateRandTensor(historyLens[r] + decodeSteps, gPackedKvNumHead, gPackedHeadDim, precision);
+                allValue[r] = generateRandTensor(historyLens[r] + decodeSteps, gPackedKvNumHead, gPackedHeadDim, precision);
+
+                auto historyQuery = sliceTensor(allQuery[r], 0, historyLens[r]);
+                auto historyKey = sliceTensor(allKey[r], 0, historyLens[r]);
+                auto historyValue = sliceTensor(allValue[r], 0, historyLens[r]);
+
+                setKVCacheInfo(gBatchMeta, r, historyLens[r]);
+                auto seedOutput = module->onForward({
+                    packRequests(std::vector<std::vector<std::vector<std::vector<float>>>>{historyQuery}),
+                    packRequests(std::vector<std::vector<std::vector<std::vector<float>>>>{historyKey}),
+                    packRequests(std::vector<std::vector<std::vector<std::vector<float>>>>{historyValue}),
+                    generateBlockDiagonalMask(std::vector<int>{historyLens[r]})
+                })[0];
+                (void)seedOutput;
+                syncBatchMeta(gBatchMeta);
+
+                kvKeyPrefix[r] = historyKey;
+                kvValuePrefix[r] = historyValue;
+                if (gBatchMeta.mMetas[r] == nullptr || gBatchMeta.mMetas[r]->previous != (size_t)historyLens[r]) {
+                    MNN_PRINT("Error: Failed to seed KV cache for req%d, expected previous=%d, got %zu\n",
+                              r, historyLens[r], gBatchMeta.mMetas[r] == nullptr ? 0 : gBatchMeta.mMetas[r]->previous);
+                    return false;
+                }
+            }
+
+            for (int step = 0; step < decodeSteps; ++step) {
+                std::vector<int> seqLens(reqCount, 1);
+                std::vector<std::vector<std::vector<std::vector<float>>>> decodeQueries;
+                std::vector<std::vector<std::vector<std::vector<float>>>> decodeKeys;
+                std::vector<std::vector<std::vector<std::vector<float>>>> decodeValues;
+                decodeQueries.reserve(reqCount);
+                decodeKeys.reserve(reqCount);
+                decodeValues.reserve(reqCount);
+
+                for (int r = 0; r < reqCount; ++r) {
+                    decodeQueries.push_back(sliceTensor(allQuery[r], historyLens[r] + step, 1));
+                    decodeKeys.push_back(sliceTensor(allKey[r], historyLens[r] + step, 1));
+                    decodeValues.push_back(sliceTensor(allValue[r], historyLens[r] + step, 1));
+                    setKVCacheInfo(gBatchMeta, r, 1);
+                }
+
+                auto output = module->onForward({
+                    packRequests(decodeQueries),
+                    packRequests(decodeKeys),
+                    packRequests(decodeValues),
+                    generateBlockDiagonalMask(seqLens)
+                })[0];
+                syncBatchMeta(gBatchMeta);
+
+                const float* outPtr = output->readMap<float>();
+                bool pass = true;
+                for (int r = 0; r < reqCount && pass; ++r) {
+                    auto currentKeyTotal = concatTensor(kvKeyPrefix[r], decodeKeys[r]);
+                    auto currentValueTotal = concatTensor(kvValuePrefix[r], decodeValues[r]);
+                    auto ref = computeSingleAttention(decodeQueries[r], currentKeyTotal, currentValueTotal,
+                                                      generateCausalMaskHost(1, (int)currentKeyTotal.size()),
+                                                      1, (int)currentKeyTotal.size());
+                    pass = compareRequestOutput(outPtr, r, ref,
+                                                std::string("Req") + std::to_string(r) + "_Step" + std::to_string(step));
+                    kvKeyPrefix[r] = currentKeyTotal;
+                    kvValuePrefix[r] = currentValueTotal;
+                    if (gBatchMeta.mMetas[r] == nullptr ||
+                        gBatchMeta.mMetas[r]->previous != (size_t)(historyLens[r] + step + 1)) {
+                        MNN_PRINT("Error: Test4 KV cache length mismatch for req%d at step %d, expected %d, got %zu\n",
+                                  r, step, historyLens[r] + step + 1,
+                                  gBatchMeta.mMetas[r] == nullptr ? 0 : gBatchMeta.mMetas[r]->previous);
+                        output->unMap();
+                        return false;
+                    }
+                }
+                output->unMap();
+
+                if (!pass) {
+                    return false;
+                }
+            }
         }
         
         return true;

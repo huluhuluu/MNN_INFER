@@ -14,125 +14,6 @@
 namespace MNN {
 namespace OpenCL {
 
-KVCacheCLManager::KVCacheCLManager(Backend *backend, bool kv_cahce) : mKVCache(kv_cahce){
-    mOpenCLBackend = static_cast<OpenCLBackend *>(backend);
-}
-
-void KVCacheCLManager::allocKVCache(const KVMeta* meta, int seqlen) {
-    if (!mKVCache) {
-        return;
-    }
-    mPastLength = meta != nullptr ? meta->previous : 0;
-    if(mOpenCLBackend->getPrecision() != BackendConfig::Precision_High){
-        mByte = 2;
-    }
-    reallocKVCache(meta, seqlen, false);
-}
-
-bool KVCacheCLManager::reallocKVCache(const KVMeta* meta, int seqlen, bool isExecute) {
-    if (!mKVCache) {
-        return false;
-    }
-    int kvSeqlen = meta->previous + seqlen - meta->remove + meta->computeReverseSize();
-    int start = mPastLength - meta->remove;
-    cl_int res;
-
-    // latest length larger than maxLen
-    if(kvSeqlen > mMaxLength){
-        int copylen = mPastLength - meta->remove + meta->computeReverseSize();
-        bool needCopy = copylen > 0;
-
-        size_t oldSize = mKvNumHead * UP_DIV(mMaxLength, 4) * mHeadDim * 4 * mByte;
-        size_t oldMaxlen = ROUND_UP(mMaxLength, 4);
-        mMaxLength = kvSeqlen + mExpandChunk;
-        size_t newMaxlen = ROUND_UP(mMaxLength, 4);
-        size_t bufferSize = UP_DIV(mMaxLength, 4) * mKvNumHead * mHeadDim * 4 * mByte;
-        // past_key: [1, numhead, headdim, maxlen]
-        auto newKey = new cl::Buffer(mOpenCLBackend->getOpenCLRuntime()->context(), CL_MEM_READ_WRITE | CL_MEM_ALLOC_HOST_PTR, bufferSize);
-        // past_value: [1, numhead, maxlen, headdim]
-        auto newValue = new cl::Buffer(mOpenCLBackend->getOpenCLRuntime()->context(), CL_MEM_READ_WRITE | CL_MEM_ALLOC_HOST_PTR, bufferSize);
-
-        if(needCopy){
-            // copy key
-            {
-                size_t oldMaxlenSize = oldMaxlen * mByte;
-                size_t newMaxlenSize = newMaxlen * mByte;
-                char *newKeyPtr = (char*)mOpenCLBackend->getOpenCLRuntime()->commandQueue().enqueueMapBuffer(*newKey, true, CL_MAP_WRITE, 0, bufferSize, nullptr, nullptr, &res);
-                char *keyPtr = (char*)mOpenCLBackend->getOpenCLRuntime()->commandQueue().enqueueMapBuffer(*mPastKey.get(), true, CL_MAP_READ, 0, oldSize, nullptr, nullptr, &res);
-                if(newKeyPtr != nullptr && keyPtr != nullptr && res == CL_SUCCESS){
-                    for(int i = 0; i < mKvNumHead * mHeadDim; ++i){
-                        ::memcpy(newKeyPtr + i * newMaxlenSize, keyPtr + i * oldMaxlenSize, oldMaxlenSize);
-                    }
-                }else{
-                    MNN_ERROR("Map error key_ptr == nullptr \n");
-                    MNN_ASSERT(false);
-                }
-                mOpenCLBackend->getOpenCLRuntime()->commandQueue().enqueueUnmapMemObject(*newKey, newKeyPtr);
-                mOpenCLBackend->getOpenCLRuntime()->commandQueue().enqueueUnmapMemObject(*mPastKey.get(), keyPtr);
-            }
-
-            // copy value
-            {
-                char *newValuePtr = (char*)mOpenCLBackend->getOpenCLRuntime()->commandQueue().enqueueMapBuffer(*newValue, true, CL_MAP_WRITE, 0, bufferSize, nullptr, nullptr, &res);
-                char *valuePtr = (char*)mOpenCLBackend->getOpenCLRuntime()->commandQueue().enqueueMapBuffer(*mPastValue.get(), true, CL_MAP_READ, 0, oldSize, nullptr, nullptr, &res);
-                if(newValuePtr != nullptr && valuePtr != nullptr && res == CL_SUCCESS){
-                    for(int i = 0; i < mKvNumHead; ++i){
-                        for(int j = 0; j < copylen; ++j){
-                            ::memcpy(newValuePtr + (i * newMaxlen + j) * mHeadDim * mByte, valuePtr + (i * oldMaxlen + j) * mHeadDim * mByte, mHeadDim * mByte);
-                        }
-                    }
-                }else{
-                    MNN_ERROR("Map error value_ptr == nullptr \n");
-                    MNN_ASSERT(false);
-                }
-                mOpenCLBackend->getOpenCLRuntime()->commandQueue().enqueueUnmapMemObject(*newValue, newValuePtr);
-                mOpenCLBackend->getOpenCLRuntime()->commandQueue().enqueueUnmapMemObject(*mPastValue.get(), valuePtr);
-            }
-        }
-        mPastKey.reset(newKey);
-        mPastValue.reset(newValue);
-        // resize phase don't update mPastLength value, excute phase will update it
-        if(isExecute){
-            mPastLength = start;
-        }
-    }
-
-    // Remove
-    // resize phase don't remove kvcache, excute phase will do it
-    if(isExecute){
-        if (0 == meta->n_reserve) {
-            mPastLength = start;
-            return true;
-        }
-
-        size_t pastkvSize = mKvNumHead * UP_DIV(mMaxLength, 4) * mHeadDim * 4 * mByte;
-        char *keyPtr = (char*)mOpenCLBackend->getOpenCLRuntime()->commandQueue().enqueueMapBuffer(*mPastKey.get(), true, CL_MAP_READ, 0, pastkvSize, nullptr, nullptr, &res);
-        char *valuePtr = (char*)mOpenCLBackend->getOpenCLRuntime()->commandQueue().enqueueMapBuffer(*mPastValue.get(), true, CL_MAP_READ, 0, pastkvSize, nullptr, nullptr, &res);
-
-        // TODO: need to ensure reserve info is sorted
-        for (int n = 0; n < meta->n_reserve; ++n) {
-            auto begin = meta->reserve[2 * n];
-            auto length = meta->reserve[2 * n + 1];
-            // past_key   : [mKvNumHead, mHeadDim, mMaxLength]
-            // past_value : [mKvNumHead, mMaxLength, mHeadDim]
-
-            auto copySrcIndex = start + begin;
-            auto copyDstIndex = start;
-            for(int i = 0; i <  mKvNumHead * mHeadDim; i++) {
-                ::memcpy(keyPtr + (i * mMaxLength + copyDstIndex) * mByte, keyPtr + (i * mMaxLength + copySrcIndex) * mByte, length * mByte);
-            }
-            for(int i = 0; i <  mKvNumHead; i++) {
-                for(int j = 0; j < length; j++) {
-                    ::memcpy(valuePtr + (i * mMaxLength + copyDstIndex + j) * mHeadDim * mByte, valuePtr + (i * mMaxLength + copySrcIndex + j) * mHeadDim * mByte, mHeadDim * mByte);
-                }
-            }
-            start += length;
-        }
-        mPastLength = (int)start;
-    }
-    return true;
-}
-
 void AttentionBufExecution::handleKVCache(const std::vector<Tensor *> &inputs, const std::vector<Tensor *> &outputs) {
     if(mHasMask) {
         auto mask = inputs[3];
@@ -149,7 +30,7 @@ void AttentionBufExecution::handleKVCache(const std::vector<Tensor *> &inputs, c
     int kvNumHead = key->shape()[2];
     int headDim = shape[3];
 
-    if(nullptr == mMeta) {
+    if(!mNeedKvCache || nullptr == mMeta) {
         mPastKvSeqlen = 0;
         mKvSeqlen = seqlen;
         mKeyValueMaxlen = ROUND_UP(seqlen, 4);
@@ -165,7 +46,7 @@ void AttentionBufExecution::handleKVCache(const std::vector<Tensor *> &inputs, c
 }
 
 ErrorCode AttentionBufExecution::init() {
-    if(nullptr == mMeta) {
+    if(!mNeedKvCache || nullptr == mMeta) {
         return NO_ERROR;
     }
     //clear update arg vector, if prefill and decode use the same one
@@ -196,7 +77,7 @@ ErrorCode AttentionBufExecution::init() {
 }
 
 ErrorCode AttentionBufExecution::UpdateArgs(const std::vector<Tensor *> &inputs, const std::vector<Tensor *> &outputs){
-    if(nullptr == mMeta) {
+    if(!mNeedKvCache || nullptr == mMeta) {
         return NO_ERROR;
     }
 
@@ -1573,7 +1454,7 @@ ErrorCode AttentionBufExecution::onResize(const std::vector<Tensor *> &inputs, c
 //        MNN_ASSERT(inputs.size() > 3);
     }
     mHasMask = inputs.size() > 3;
-    mIsDecode = seqlen == 1 && mMeta->add == 1;
+    mIsDecode = mNeedKvCache && mMeta != nullptr && seqlen == 1 && mMeta->add == 1;
 
     // reset updateArgs variable and kernel vector
     init();
@@ -1676,7 +1557,7 @@ ErrorCode AttentionBufExecution::onExecute(const std::vector<Tensor *> &inputs, 
 #ifdef LOG_VERBOSE
     MNN_PRINT("start AttentionBufExecution onExecute !\n");
 #endif
-    if(nullptr != mMeta){
+    if(mNeedKvCache && nullptr != mMeta){
         auto shape = inputs[0]->shape();
         int seqlen = shape[1];
         mKVCacheCLManager->reallocKVCache(mMeta, seqlen);
@@ -1791,9 +1672,10 @@ ErrorCode AttentionBufExecution::onExecute(const std::vector<Tensor *> &inputs, 
 }
 
 AttentionBufExecution::AttentionBufExecution(const MNN::Op *op, Backend* backend, bool kv_cahce) : CommonExecution(backend, op) {
-    mMeta = (KVMeta*)(backend->getMetaPtr());
-    mKVCacheCLManager.reset(new KVCacheCLManager(backend, nullptr != mMeta));
+    mNeedKvCache = kv_cahce;
     mOpenCLBackend = static_cast<OpenCLBackend *>(backend);
+    mMeta = (KVMeta*)(mOpenCLBackend->getMetaPtr());
+    mKVCacheCLManager.reset(new KVCacheCLManager(backend, kv_cahce));
     auto kernel = mOpenCLBackend->getOpenCLRuntime()->buildKernel("softmax_buf", "softmax_buf", {"-DSOFTMAX_LOCAL_SIZE=512"}, mOpenCLBackend->getPrecision());
     mMaxWorkGroupSize = static_cast<uint32_t>(mOpenCLBackend->getOpenCLRuntime()->getMaxWorkGroupSize(kernel));
 }
@@ -1801,6 +1683,7 @@ AttentionBufExecution::AttentionBufExecution(const MNN::Op *op, Backend* backend
 AttentionBufExecution::AttentionBufExecution(std::shared_ptr<KVCacheCLManager> manager, const MNN::Op *op, Backend *backend) : CommonExecution(backend, op), mKVCacheCLManager(manager) {
     mMeta = (KVMeta*)(backend->getMetaPtr());
     mOpenCLBackend = static_cast<OpenCLBackend *>(backend);
+    mNeedKvCache = mKVCacheCLManager != nullptr && mKVCacheCLManager->needKVCache();
     auto kernel = mOpenCLBackend->getOpenCLRuntime()->buildKernel("softmax_buf", "softmax_buf", {"-DSOFTMAX_LOCAL_SIZE=512"}, mOpenCLBackend->getPrecision());
     mMaxWorkGroupSize = static_cast<uint32_t>(mOpenCLBackend->getOpenCLRuntime()->getMaxWorkGroupSize(kernel));
 }
@@ -1826,10 +1709,8 @@ public:
         auto param = op->main_as_AttentionParam();
         auto openCLBackend = static_cast<OpenCLBackend *>(backend);
         
-        // Check if packed mode is enabled
-        // Note: OpenCL PackedAttention is currently disabled due to data layout issues
-        // For batched inference, please use CPU backend
-        bool usePacked = openCLBackend->getRuntime()->hint().packedAttentionMode > 0;
+        // Packed OpenCL path writes K/V into the shared cache arena.
+        bool usePacked = openCLBackend->getRuntime()->hint().packedAttentionMode > 0 && param->kv_cache();
         
         if (usePacked) {
             return new PackedAttentionBufExecution(op, backend, param->kv_cache());
