@@ -17,16 +17,13 @@ QNN_SDK_ROOT="${QNN_SDK_ROOT:-}"
 QNN_SOC_ID="${QNN_SOC_ID:-69}"
 QNN_DSP_ARCH="${QNN_DSP_ARCH:-v79}"
 QNN_HEXAGON_ARCH="${QNN_HEXAGON_ARCH:-${QNN_DSP_ARCH#v}}"
-QNN_SKIP_OPS="${QNN_SKIP_OPS:-}"
-QNN_SKIP_MODULES="${QNN_SKIP_MODULES:-}"
-QNN_MAX_NPU_MODULES="${QNN_MAX_NPU_MODULES:--1}"
 BENCH_BIN="${BENCH_BIN:-}"
 LOG_DIR="${LOG_DIR:-$SCRIPT_DIR/llm_profile_logs}"
 WORK_ROOT="${WORK_ROOT:-$SCRIPT_DIR/llm_profile_work}"
 BUILD_JOBS="${BUILD_JOBS:-$(nproc)}"
 
-PROMPT_LENS=(64) # 32 64 128 256 512 1024 2048
-DECODE_LENS=(1 2 4 6 8 16 32 64) # 1 2 4 6 8 16 32 64
+PROMPT_LENS=(1024 2048) # 32 64 128 256 512 1024 2048
+DECODE_LENS=(2 4 6 8 16 32 64) # 1 2 4 6 8 16 32 64
 BACKENDS=(qnn) # cpu opencl qnn
 WARMUP=2
 REPEAT=3
@@ -326,14 +323,6 @@ run_qnn_case() {
   trap cleanup_local_qnn RETURN
 
   chunk_sizes="$(sorted_unique_chunk_sizes "$prompt_len" "$decode_len")"
-  if [[ -n "$QNN_SKIP_OPS" ]]; then
-    local skip_ops_text="${QNN_SKIP_OPS//,/ }"
-    read -r -a skip_args <<< "$skip_ops_text"
-  fi
-  if [[ -n "$QNN_SKIP_MODULES" ]]; then
-    local skip_modules_text="${QNN_SKIP_MODULES//,/ }"
-    read -r -a skip_module_args <<< "$skip_modules_text"
-  fi
   export QNN_SDK_ROOT
 
   python3 "$QNN_EXPORT_SCRIPT" \
@@ -342,10 +331,7 @@ run_qnn_case() {
     --dsp_arch="$QNN_DSP_ARCH" \
     --mnn_path="$HOST_BUILD_DIR" \
     --cache_path "$cache_dir" \
-    --chunk_size $chunk_sizes \
-    --skip_ops "${skip_args[@]}" \
-    --skip_modules "${skip_module_args[@]}" \
-    --max_npu_modules "$QNN_MAX_NPU_MODULES" 2>&1 | tee -a "$QNN_LOG"
+    --chunk_size $chunk_sizes 2>&1 | tee -a "$QNN_LOG"
 
   adb_run push "$local_dir" "$REMOTE_ROOT/" >/dev/null
 
