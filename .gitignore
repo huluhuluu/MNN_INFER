@@ -391,3 +391,7 @@ transformers/llm/export/tmp/
 
 .clangd
 .gitignore
+.codegraph
+findings.md
+progress.md
+task_plan.md
