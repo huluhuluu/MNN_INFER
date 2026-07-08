@@ -181,6 +181,10 @@ class LlmExporter(torch.nn.Module):
             return
         from utils.eagle import Eagle
         self.eagle = Eagle.get_eagle(self.model_type)(self.args.eagle_path, self.model)
+        eagle_sliding_window = getattr(self.eagle.eagle_config, 'sliding_window', 0)
+        use_sliding_window = getattr(self.eagle.eagle_config, 'use_sliding_window', eagle_sliding_window > 0)
+        if use_sliding_window and eagle_sliding_window is not None and eagle_sliding_window > 0:
+            self.eagle_sliding_window = int(eagle_sliding_window)
         eagle_onnx, eagle_fc_onnx = self.eagle.export(self.onnx_path)
         if self.mnn_converter:
             MNNConverter(self, None).export(eagle_onnx)
@@ -293,6 +297,9 @@ class LlmExporter(torch.nn.Module):
             if self.args.eagle_path is not None:
                 config['speculative_type'] = 'eagle'
                 config['hidden_states'] = True
+                eagle_sliding_window = getattr(self, 'eagle_sliding_window', 0)
+                if eagle_sliding_window > 0:
+                    config['eagle_sliding_window'] = eagle_sliding_window
             json.dump(config, f, ensure_ascii=False, indent=4)
         return config_json
 
