@@ -15,6 +15,9 @@
 #include <MNN/expr/ExecutorScope.hpp>
 #include "cpp/ExprDebug.hpp"
 #include "llm/llm.hpp"
+#include "../../../../express/module/StaticModule.hpp"
+#include "llm/DualPipelineScheduler.hpp"
+#include "llm/DualPipelineGraph.hpp"
 #include "kvmeta.hpp"
 #include "llmconfig.hpp"
 #include "prompt.hpp"
@@ -32,6 +35,24 @@
 namespace MNN {
 using namespace Express;
 namespace Transformer {
+
+namespace {
+
+const StaticModule* getStaticModuleForDualPipeline(const Module* module) {
+    if (module == nullptr) {
+        return nullptr;
+    }
+    if (module->type() == "StaticModule") {
+        return static_cast<const StaticModule*>(module);
+    }
+    const std::vector<std::shared_ptr<Module>> children = module->getChildren();
+    if (children.empty()) {
+        return nullptr;
+    }
+    return getStaticModuleForDualPipeline(children[0].get());
+}
+
+} // namespace
 
 void KVMeta::sync() {
     int revertNumber = 0;
@@ -126,7 +147,227 @@ bool Llm::set_config(const std::string& content) {
             mBlockSize = mValidBlockSize[mValidBlockSize.size()-1];
         } while (false);
     }
+    configureDualPipelineMode();
     return res;
+}
+
+void Llm::configureDualPipelineMode() {
+    const bool enabled = mConfig->dual_pipeline_mode();
+    mScheduler->setDualPipelineMode(enabled, mConfig->dual_pipeline_split_count());
+    if (!enabled) {
+        resetDualPipelineGraphState();
+        stopDualPipelineRequestThread();
+        if (mDualPipelineScheduler) {
+            mDualPipelineScheduler->stop();
+            mDualPipelineScheduler.reset();
+        }
+        return;
+    }
+
+    if (!mDualPipelineScheduler) {
+        mDualPipelineScheduler.reset(new DualPipelineScheduler);
+    }
+    DualPipelineScheduler::Config config;
+    const int maxResidentGraphs = mConfig->dual_pipeline_max_resident_graphs();
+    if (maxResidentGraphs > 0) {
+        config.maxResidentGraphs = static_cast<size_t>(maxResidentGraphs);
+    }
+    // The first integration only publishes prefetch/QNN graph intents.
+    // Real backend load/resize hooks should be installed through these callbacks.
+    config.callbacks.onPrefetchResize = [](const DualPipelineScheduler::PrefetchResizeRequest&) {
+    };
+    config.callbacks.onGraphLoad = [](const DualPipelineScheduler::GraphRequest&) {
+    };
+    config.callbacks.onGraphRelease = [](const DualPipelineScheduler::GraphRequest&) {
+    };
+    mDualPipelineScheduler->configure(config);
+    mDualPipelineScheduler->start();
+    startDualPipelineRequestThread();
+}
+
+void Llm::startDualPipelineRequestThread() {
+    std::lock_guard<std::mutex> lock(mDualPipelineRequestMutex);
+    if (mDualPipelineRequestThread.joinable()) {
+        return;
+    }
+    mDualPipelineRequestStop = false;
+    mDualPipelineRequestHasWork = false;
+    mDualPipelineRequestDone = false;
+    mDualPipelineRequestThread = std::thread(&Llm::dualPipelineRequestLoop, this);
+}
+
+void Llm::stopDualPipelineRequestThread() {
+    {
+        std::lock_guard<std::mutex> lock(mDualPipelineRequestMutex);
+        if (!mDualPipelineRequestThread.joinable()) {
+            return;
+        }
+        mDualPipelineRequestStop = true;
+    }
+    mDualPipelineRequestCondition.notify_all();
+    mDualPipelineRequestThread.join();
+    {
+        std::lock_guard<std::mutex> lock(mDualPipelineRequestMutex);
+        mDualPipelineRequestStop = false;
+        mDualPipelineRequestHasWork = false;
+        mDualPipelineRequestDone = false;
+        mDualPipelineRequestWork = std::function<void()>();
+    }
+}
+
+void Llm::dualPipelineRequestLoop() {
+    while (true) {
+        std::function<void()> work;
+        {
+            std::unique_lock<std::mutex> lock(mDualPipelineRequestMutex);
+            while (!mDualPipelineRequestStop && !mDualPipelineRequestHasWork) {
+                mDualPipelineRequestCondition.wait(lock);
+            }
+            if (mDualPipelineRequestStop) {
+                mDualPipelineRequestHasWork = false;
+                mDualPipelineRequestDone = true;
+                mDualPipelineRequestCondition.notify_all();
+                break;
+            }
+            work = mDualPipelineRequestWork;
+            mDualPipelineRequestHasWork = false;
+        }
+        if (work) {
+            work();
+        }
+        {
+            std::lock_guard<std::mutex> lock(mDualPipelineRequestMutex);
+            mDualPipelineRequestWork = std::function<void()>();
+            mDualPipelineRequestDone = true;
+        }
+        mDualPipelineRequestCondition.notify_all();
+    }
+}
+
+void Llm::runOnDualPipelineRequestThread(const std::function<void()>& work) {
+    if (!mConfig->dual_pipeline_mode() || !mDualPipelineRequestThread.joinable() ||
+        mDualPipelineRequestThread.get_id() == std::this_thread::get_id()) {
+        work();
+        return;
+    }
+
+    {
+        std::unique_lock<std::mutex> lock(mDualPipelineRequestMutex);
+        while (mDualPipelineRequestHasWork) {
+            mDualPipelineRequestCondition.wait(lock);
+        }
+        mDualPipelineRequestWork = work;
+        mDualPipelineRequestDone = false;
+        mDualPipelineRequestHasWork = true;
+    }
+    mDualPipelineRequestCondition.notify_all();
+
+    {
+        std::unique_lock<std::mutex> lock(mDualPipelineRequestMutex);
+        while (!mDualPipelineRequestDone && !mDualPipelineRequestStop) {
+            mDualPipelineRequestCondition.wait(lock);
+        }
+    }
+}
+
+std::shared_ptr<BatchScheduler::Chunk> Llm::scheduleBatchChunk(int blockSize, int bs) {
+    std::shared_ptr<BatchScheduler::Chunk> chunk;
+    runOnDualPipelineRequestThread([&]() {
+        chunk = mScheduler->schedule(blockSize, bs);
+    });
+    return chunk;
+}
+
+void Llm::resetDualPipelineGraphState() {
+    mDualPipelineGraphSnapshot.ops.clear();
+    mDualPipelineGraphSnapshotReady = false;
+    mDualPipelinePrefetchOpCursor = 0;
+    mDualPipelineRequestGraphs.clear();
+}
+
+bool Llm::refreshDualPipelineGraphSnapshot() {
+    resetDualPipelineGraphState();
+    if (!mConfig->dual_pipeline_mode() || !mModule) {
+        return false;
+    }
+    const StaticModule* staticModule = getStaticModuleForDualPipeline(mModule.get());
+    if (staticModule == nullptr || staticModule->getSession() == nullptr) {
+        return false;
+    }
+    // Snapshot copies Session metadata once; the prefetch worker must not mutate live Session state.
+    mDualPipelineGraphSnapshot = buildGraphSnapshot(staticModule->getSession(), 0, mConfig->base_dir_, mConfig->npu_model_dir());
+    mDualPipelineGraphSnapshotReady = !mDualPipelineGraphSnapshot.ops.empty();
+    return mDualPipelineGraphSnapshotReady;
+}
+
+void Llm::enqueueDualPipelineChunkGraphs(const BatchScheduler::Chunk& chunk, std::vector<std::string>* graphIds) {
+    if (!mConfig->dual_pipeline_mode() || !mDualPipelineScheduler) {
+        return;
+    }
+    if (!mDualPipelineGraphSnapshotReady && !refreshDualPipelineGraphSnapshot()) {
+        return;
+    }
+    if (mDualPipelineGraphSnapshot.ops.empty()) {
+        return;
+    }
+
+    const int windowK = std::max(1, mConfig->dual_pipeline_prefetch_window());
+    const int start = mDualPipelinePrefetchOpCursor;
+    for (size_t i = 0; i < chunk.reqId.size(); ++i) {
+        const int requestId = chunk.reqId[i];
+        // One scheduled chunk may contain two requests; enqueue future CPU/OpenCL and QNN work for each request.
+        DualPipelineScheduler::PrefetchWindow window = buildPrefetchWindow(mDualPipelineGraphSnapshot, start, windowK, requestId);
+        if (!window.requests.empty()) {
+            mDualPipelineScheduler->enqueuePrefetchWindow(window);
+        }
+
+        const std::vector<DualPipelineScheduler::GraphRequest> requests =
+            buildQnnGraphRequests(mDualPipelineGraphSnapshot, start, windowK, requestId);
+        for (size_t j = 0; j < requests.size(); ++j) {
+            if (mDualPipelineScheduler->enqueueRequestGraph(requests[j])) {
+                if (graphIds != nullptr) {
+                    graphIds->push_back(requests[j].graphId);
+                }
+                mDualPipelineRequestGraphs[requestId].push_back(requests[j].graphId);
+            }
+        }
+    }
+
+    // Move the future-op cursor after this chunk. This is an ordered window, not a DAG scheduler yet.
+    mDualPipelinePrefetchOpCursor += windowK;
+    if (mDualPipelinePrefetchOpCursor >= static_cast<int>(mDualPipelineGraphSnapshot.ops.size())) {
+        mDualPipelinePrefetchOpCursor = 0;
+    }
+}
+
+void Llm::completeDualPipelineChunkGraphs(const std::vector<std::string>& graphIds) {
+    if (!mConfig->dual_pipeline_mode() || !mDualPipelineScheduler) {
+        return;
+    }
+    for (size_t i = 0; i < graphIds.size(); ++i) {
+        mDualPipelineScheduler->markExecutionComplete(graphIds[i]);
+    }
+}
+
+void Llm::releaseDualPipelineRequestGraphs(int requestId) {
+    if (!mConfig->dual_pipeline_mode() || !mDualPipelineScheduler) {
+        return;
+    }
+    std::unordered_set<std::string> graphIds;
+    std::unordered_map<int, std::vector<std::string>>::iterator iter = mDualPipelineRequestGraphs.find(requestId);
+    if (iter != mDualPipelineRequestGraphs.end()) {
+        graphIds.insert(iter->second.begin(), iter->second.end());
+        mDualPipelineRequestGraphs.erase(iter);
+    }
+    // Release requests only need graphId here; scheduler merges metadata from the last load request.
+    for (std::unordered_set<std::string>::const_iterator it = graphIds.begin(); it != graphIds.end(); ++it) {
+        DualPipelineScheduler::GraphRequest release;
+        release.action = DualPipelineScheduler::GRAPH_RELEASE;
+        release.requestId = requestId;
+        release.graphId = *it;
+        release.reason = "request_complete";
+        mDualPipelineScheduler->enqueueRequestGraph(release);
+    }
 }
 
 void Llm::setRuntimeHint(std::shared_ptr<Express::Executor::RuntimeManager> &rtg) {
@@ -379,6 +620,9 @@ bool Llm::load() {
 
     // MTP model load
     mGenerationStrategy->load(module_config);
+    if (mConfig->dual_pipeline_mode()) {
+        refreshDualPipelineGraphSnapshot();
+    }
     mContext->load_us += _t.durationInUs();
     return true;
 }
@@ -843,15 +1087,18 @@ std::vector<std::vector<int>> Llm::generate(const std::vector<std::vector<int> >
     mContext->all_seq_len = 0;
     
     // add all requests
-    std::vector<int> reqIds= mScheduler->addRequest(input_ids);
-    if(max_new_tokens > 0) {
-        mScheduler->setMaxNewTokens(max_new_tokens);
-    }
+    std::vector<int> reqIds;
+    runOnDualPipelineRequestThread([&]() {
+        reqIds = mScheduler->addRequest(input_ids);
+        if(max_new_tokens > 0) {
+            mScheduler->setMaxNewTokens(max_new_tokens);
+        }
+    });
     // set batch kvcache, but actually works in Llm::setRuntimeHint
     mRuntimeManager->setHintPtr(Interpreter::KVCACHE_INFO, mBatchMeta.get());
 
     // generation loop
-    while (std::shared_ptr<BatchScheduler::Chunk> chunk = mScheduler->schedule(-1, 4)){// chunk prefill
+    while (std::shared_ptr<BatchScheduler::Chunk> chunk = scheduleBatchChunk(-1, 4)){// chunk prefill
         // prepare inputs
         Express::VARP hidden_states = this->embedding(chunk->inputs, chunk->calLen, chunk->culLen);
         Express::VARP attention_mask = this->gen_attention_mask(chunk->calLen);
@@ -870,24 +1117,27 @@ std::vector<std::vector<int>> Llm::generate(const std::vector<std::vector<int> >
         }
         selectModule = mModulePool[moduleKey];
 
+        std::vector<std::string> dualPipelineGraphIds;
+        enqueueDualPipelineChunkGraphs(*chunk, &dualPipelineGraphIds);
+
         // get all logits 
         // [1, seqLen, hidden]
         std::vector<Express::VARP> res = selectModule->onForward({hidden_states, attention_mask, position_ids, logitsIndex});
+        completeDualPipelineChunkGraphs(dualPipelineGraphIds);
         Express::VARP logits = _Squeeze(res[0], {0});
         
         int sumLen = 0;
         for (int i = 0; i < chunk->pos.size(); ++i) {
             sumLen += chunk->calLen[i];
+            const bool isPrefill = i < chunk->state.size() && BatchScheduler::judgeState(chunk->state[i], BatchScheduler::RequestState::PREFILL);
             
-            // Use calLen > 1 to detect prefill (schedule already updated all_seq_len)
-            if(chunk->calLen[i] > 1) {
+            if(isPrefill) {
                 updateContext(chunk->calLen[i], 0);  // prefill: update all_seq_len
                 mContext->prompt_len += chunk->calLen[i];
             }
 
-            auto state = mScheduler->state(chunk->reqId[i]);
             // skip prefill - only sample when in decode phase
-            if (!BatchScheduler::judgeState(state, BatchScheduler::RequestState::DECODE)) {
+            if (isPrefill) {
                 continue;
             }
             
@@ -899,10 +1149,17 @@ std::vector<std::vector<int>> Llm::generate(const std::vector<std::vector<int> >
             int token  = this->sample(logit);
 
             int id = chunk->reqId[i];
-            mScheduler->update(id, token, chunk->calLen[i], is_stop(token));
-            // remove finished request
-            if(mScheduler->isFinished(id)) {
-                mScheduler->releaseKVCache(id);
+            bool requestFinished = false;
+            const int calLen = chunk->calLen[i];
+            runOnDualPipelineRequestThread([&]() {
+                mScheduler->update(id, token, calLen, is_stop(token));
+                requestFinished = mScheduler->isFinished(id);
+                if(requestFinished) {
+                    mScheduler->releaseKVCache(id);
+                }
+            });
+            if (requestFinished) {
+                releaseDualPipelineRequestGraphs(id);
             }
             // print token str
             // std::cout<<"ReqId: "<<id<<" | token: "<<token<<" | "<<this->tokenizer_decode(token)<<std::endl;
@@ -910,21 +1167,28 @@ std::vector<std::vector<int>> Llm::generate(const std::vector<std::vector<int> >
         mBatchMeta->sync();
     }
     for(int id: reqIds){
+        std::vector<int> result;
+        runOnDualPipelineRequestThread([&]() {
+            result = mScheduler->getResult(id);
+        });
         // save result
         for(int j = 0; j < bs; j++) {
             if(reqIds[j] == id) {
-                ret[j] = mScheduler->getResult(id);
+                ret[j] = result;
                 break;
             }
         }
         if(os!= nullptr){
             // print res
             *os<<"\n=============================\nReqId: "<<id<<"\n";
-            for(int token: mScheduler->getResult(id)){
+            for(int token: result){
                 *os<<mTokenizer->decode(token);
             }
         }
-        mScheduler->releaseReq(id);
+        releaseDualPipelineRequestGraphs(id);
+        runOnDualPipelineRequestThread([&]() {
+            mScheduler->releaseReq(id);
+        });
     }
     return ret;
 }
@@ -1106,6 +1370,7 @@ Llm::Llm(std::shared_ptr<LlmConfig> config) : mConfig(config) {
     
     mBatchMeta.reset(new BatchKVMeta);
     mScheduler.reset(new BatchScheduler(mConfig, mBatchMeta));
+    configureDualPipelineMode();
 }
 
 Llm::~Llm() {
@@ -1114,6 +1379,10 @@ Llm::~Llm() {
         gTimeTraceInfo->dump();
     }
 #endif
+    stopDualPipelineRequestThread();
+    if (mDualPipelineScheduler) {
+        mDualPipelineScheduler->stop();
+    }
     mGenerateParam.reset();
     mModule.reset();
     mRuntimeManager.reset();

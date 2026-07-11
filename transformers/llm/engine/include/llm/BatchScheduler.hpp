@@ -14,6 +14,7 @@
 #include <map>
 #include <vector>
 #include <memory>
+#include <deque>
 
 namespace MNN {
 namespace Transformer {
@@ -59,7 +60,8 @@ public:
         std::vector<std::vector<int>> inputs; // only read data to make embedding
         std::vector<int> calLen;        // calculated lengths for each input token in the chunk
         std::vector<int> pos;           // position for each input token in the chunk
-        std::vector<int> reqId;         // mapping to request index (Vector index, not Global ID)
+        std::vector<int> reqId;         // global request id
+        std::vector<int> state;         // request state when this chunk was scheduled
         int culLen = 0;                 // cumulative length of the chunk
     };
 
@@ -77,6 +79,7 @@ public:
     // blockSize: chunk size for prefill, -1 means use default
     // bs: batch size limit for number of requests per schedule, -1 means no limit (FIFO)
     std::shared_ptr<Chunk> schedule(int blockSize = -1, int bs = -1);
+    void setDualPipelineMode(bool enable, int splitCount = 2);
 
     // update generated token
     bool update(int req_id, int new_token, int cal_len, bool is_stop_token);
@@ -100,10 +103,18 @@ private:
     std::map<int, int> mReqIdToIndex; // requestId:vectorIndex
     std::shared_ptr<LlmConfig> mConfig;
     std::shared_ptr<BatchKVMeta> mBatchKVMeta;
+    std::deque<std::shared_ptr<Chunk>> mPendingChunks;
     int mBlockSize = 0;
     int mMaxNewTokens = 0;
     int mActiveCount = 0;
     int mIdx = 0; // global request id(increment)
+    bool mDualPipelineMode = false;
+    int mDualPipelineSplitCount = 2;
+
+    void _appendToChunk(const std::shared_ptr<Chunk>& chunk, const std::shared_ptr<Request>& req,
+                        const std::vector<int>& inputs, int calLen, int pos, int state);
+    void _commitChunk(const std::shared_ptr<Chunk>& chunk);
+    std::shared_ptr<Chunk> _popPendingChunk();
 };
 
 } // namespace Transformer

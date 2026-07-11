@@ -337,6 +337,22 @@ public:
     bool all_logits() const {
         return config_.value("all_logits", false);
     }
+
+    bool dual_pipeline_mode() const {
+        return config_.value("dual_pipeline_mode", config_.value("dual_pipeline", false));
+    }
+
+    int dual_pipeline_split_count() const {
+        return config_.value("dual_pipeline_split_count", 2);
+    }
+
+    int dual_pipeline_max_resident_graphs() const {
+        return config_.value("dual_pipeline_max_resident_graphs", 5);
+    }
+
+    int dual_pipeline_prefetch_window() const {
+        return config_.value("dual_pipeline_prefetch_window", 5);
+    }
     // generate config end >
 
     // < backend config start
