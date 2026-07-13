@@ -70,7 +70,6 @@ public:
     ~BatchKVCacheCLManager();
 
     // Batch operations
-    void allocKVCache(const BatchKVMeta* batchMeta);
     bool reallocKVCache(const BatchKVMeta* batchMeta, bool isExecute = true);
     bool remove(const BatchKVMeta* batchMeta);
     bool ensureForExecute(const BatchKVMeta* batchMeta);
@@ -118,7 +117,9 @@ private:
                          cl::Buffer* newKeyBuffer,
                          cl::Buffer* newValueBuffer,
                          const RequestCacheInfo& newInfo,
-                         const KVMeta* meta);
+                         const KVMeta* meta,
+                         int currentPast,
+                         bool applyPendingOps);
 
     Backend* mBackend;
     OpenCLBackend* mOpenCLBackend;

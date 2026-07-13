@@ -16,8 +16,6 @@
 #include <set>
 #include <utility>
 
-#include "core/TensorUtils.hpp"
-
 namespace MNN {
 namespace OpenCL {
 
@@ -48,6 +46,37 @@ static inline int retainedLength(const KVMeta* meta, int currentPast) {
 
 static inline int packedSoftmaxLocalSize(int maxWorkGroupSize) {
     return std::max(std::min<int>(maxWorkGroupSize, 64), 1);
+}
+
+static inline void acquireReleasePackedAttentionTemps(OpenCLBackend* backend, Tensor* q, Tensor* qk,
+                                                      Tensor* softmax, Tensor* mask) {
+    if (backend == nullptr) {
+        return;
+    }
+    if (q != nullptr) {
+        backend->onAcquireBuffer(q, Backend::DYNAMIC_IN_EXECUTION);
+    }
+    if (qk != nullptr) {
+        backend->onAcquireBuffer(qk, Backend::DYNAMIC_IN_EXECUTION);
+    }
+    if (softmax != nullptr) {
+        backend->onAcquireBuffer(softmax, Backend::DYNAMIC_IN_EXECUTION);
+    }
+    if (mask != nullptr) {
+        backend->onAcquireBuffer(mask, Backend::DYNAMIC_IN_EXECUTION);
+    }
+    if (q != nullptr) {
+        backend->onReleaseBuffer(q, Backend::DYNAMIC_IN_EXECUTION);
+    }
+    if (qk != nullptr) {
+        backend->onReleaseBuffer(qk, Backend::DYNAMIC_IN_EXECUTION);
+    }
+    if (softmax != nullptr) {
+        backend->onReleaseBuffer(softmax, Backend::DYNAMIC_IN_EXECUTION);
+    }
+    if (mask != nullptr) {
+        backend->onReleaseBuffer(mask, Backend::DYNAMIC_IN_EXECUTION);
+    }
 }
 
 } // namespace
@@ -109,14 +138,6 @@ ErrorCode PackedAttentionBufExecution::init() {
     return NO_ERROR;
 }
 
-int PackedAttentionBufExecution::getLocalSize(int size, int maxGroupSize) {
-    int localSize = 1;
-    while (localSize * 2 <= std::min(size, maxGroupSize)) {
-        localSize *= 2;
-    }
-    return std::max(localSize, 1);
-}
-
 ErrorCode PackedAttentionBufExecution::onResize(const std::vector<Tensor *> &inputs,
                                                 const std::vector<Tensor *> &outputs) {
     (void)outputs;
@@ -130,16 +151,16 @@ ErrorCode PackedAttentionBufExecution::onResize(const std::vector<Tensor *> &inp
     mKvNumHead = key->length(2);
     mGroupSize = mNumHead / mKvNumHead;
     mScale = 1.0f / std::sqrt((float)mHeadDim);
-    mBytes = mOpenCLBackend->getPrecision() != BackendConfig::Precision_High ? 2 : 4;
     mHasMask = inputs.size() >= 4;
     mIsAddMask = mHasMask && inputs[3]->getType() == halide_type_of<float>();
 
     std::vector<int> reqIds = (mMeta != nullptr && !mMeta->calId.empty()) ? mMeta->calId : std::vector<int>{0};
-    int maxSeqLen = 1;
-    int maxKvSeqLen = 1;
     size_t totalQElems = 0;
     size_t totalQkElems = 0;
     size_t totalMaskElems = 0;
+    int maskElementSize = (mHasMask && !inputs[3]->shape().empty()) ? inputs[3]->elementSize() : 0;
+    int squareMaskSize = 0;
+    int fullMaskSize = 0;
 
     for (int reqId : reqIds) {
         const KVMeta* meta = nullptr;
@@ -153,27 +174,36 @@ ErrorCode PackedAttentionBufExecution::onResize(const std::vector<Tensor *> &inp
         int previous = meta != nullptr ? static_cast<int>(meta->previous) : 0;
         int kvSeqLen = retainedLength(meta, previous) + seqLen;
         int seqLen4 = ROUND_UP(seqLen, 4);
-        maxSeqLen = std::max(maxSeqLen, seqLen);
-        maxKvSeqLen = std::max(maxKvSeqLen, kvSeqLen);
         totalQElems += (size_t)mNumHead * mHeadDim * seqLen4;
         totalQkElems += (size_t)mNumHead * kvSeqLen * seqLen4;
         if (mHasMask) {
-            totalMaskElems += (size_t)seqLen4 * seqLen4;
+            squareMaskSize += seqLen * seqLen;
+            fullMaskSize += seqLen * kvSeqLen;
+        }
+    }
+    const bool useFullMask = maskElementSize > 0 && maskElementSize == fullMaskSize && fullMaskSize != squareMaskSize;
+    if (mHasMask) {
+        for (int reqId : reqIds) {
+            const KVMeta* meta = nullptr;
+            if (mMeta != nullptr) {
+                auto it = mMeta->mMetas.find(reqId);
+                if (it != mMeta->mMetas.end()) {
+                    meta = it->second;
+                }
+            }
+            int seqLen = meta != nullptr ? static_cast<int>(meta->add) : query->length(1);
+            int previous = meta != nullptr ? static_cast<int>(meta->previous) : 0;
+            int kvSeqLen = retainedLength(meta, previous) + seqLen;
+            int maskStride = useFullMask ? kvSeqLen : seqLen;
+            totalMaskElems += (size_t)ROUND_UP(seqLen, 4) * ROUND_UP(maskStride, 4);
         }
     }
 
     mBatchKVCacheManager->setArgs(mNumHead, mKvNumHead, mHeadDim);
-    mBatchKVCacheManager->allocKVCache(mMeta);
 
     mTempQ.reset(Tensor::createDevice<float>({(int)std::max<size_t>(totalQElems, 1)}));
     mTempQK.reset(Tensor::createDevice<float>({(int)std::max<size_t>(totalQkElems, 1)}));
     mTempSoftMax.reset(Tensor::createDevice<float>({(int)std::max<size_t>(totalQkElems, 1)}));
-    mOpenCLBackend->onAcquireBuffer(mTempQ.get(), Backend::DYNAMIC_IN_EXECUTION);
-    mOpenCLBackend->onAcquireBuffer(mTempQK.get(), Backend::DYNAMIC_IN_EXECUTION);
-    mOpenCLBackend->onAcquireBuffer(mTempSoftMax.get(), Backend::DYNAMIC_IN_EXECUTION);
-    mOpenCLBackend->onReleaseBuffer(mTempQ.get(), Backend::DYNAMIC_IN_EXECUTION);
-    mOpenCLBackend->onReleaseBuffer(mTempQK.get(), Backend::DYNAMIC_IN_EXECUTION);
-    mOpenCLBackend->onReleaseBuffer(mTempSoftMax.get(), Backend::DYNAMIC_IN_EXECUTION);
 
     if (mHasMask) {
         if (mIsAddMask) {
@@ -181,11 +211,11 @@ ErrorCode PackedAttentionBufExecution::onResize(const std::vector<Tensor *> &inp
         } else {
             mTempMask.reset(Tensor::createDevice<int>({(int)std::max<size_t>(totalMaskElems, 1)}));
         }
-        mOpenCLBackend->onAcquireBuffer(mTempMask.get(), Backend::DYNAMIC_IN_EXECUTION);
-        mOpenCLBackend->onReleaseBuffer(mTempMask.get(), Backend::DYNAMIC_IN_EXECUTION);
     } else {
         mTempMask.reset();
     }
+    acquireReleasePackedAttentionTemps(mOpenCLBackend, mTempQ.get(), mTempQK.get(),
+                                       mTempSoftMax.get(), mTempMask.get());
 
     if (reqIds.size() > mReqMetaCapacity) {
         mReqMetaCapacity = reqIds.size();
@@ -316,6 +346,7 @@ ErrorCode PackedAttentionBufExecution::onExecute(const std::vector<Tensor *> &in
     int qBase = 0;
     int qkBase = 0;
     int maskBase = 0;
+    int maxMaskStride = 1;
     std::vector<int> seqLens(reqIds.size(), 0);
     std::vector<int> pastLens(reqIds.size(), 0);
     std::vector<int> maxLens(reqIds.size(), 0);
@@ -344,6 +375,17 @@ ErrorCode PackedAttentionBufExecution::onExecute(const std::vector<Tensor *> &in
         maxKvSeqLen = std::max(maxKvSeqLen, kvSeqLen);
     }
 
+    int maskElementSize = (mHasMask && !inputs[3]->shape().empty()) ? inputs[3]->elementSize() : 0;
+    int squareMaskSize = 0;
+    int fullMaskSize = 0;
+    if (maskElementSize > 0) {
+        for (size_t i = 0; i < reqIds.size(); ++i) {
+            squareMaskSize += seqLens[i] * seqLens[i];
+            fullMaskSize += seqLens[i] * kvSeqLens[i];
+        }
+    }
+    const bool useFullMask = maskElementSize > 0 && maskElementSize == fullMaskSize && fullMaskSize != squareMaskSize;
+
     for (size_t i = 0; i < reqIds.size(); ++i) {
         const int reqId = reqIds[i];
         const int seqLen = seqLens[i];
@@ -351,6 +393,7 @@ ErrorCode PackedAttentionBufExecution::onExecute(const std::vector<Tensor *> &in
         const int maxLen = maxLens[i];
         const int kvSeqLen = kvSeqLens[i];
         const int seqLen4 = ROUND_UP(seqLen, 4);
+        const int maskStride = useFullMask ? kvSeqLen : seqLen;
         meta0[i * 4 + 0] = totalSeqOffset;
         meta0[i * 4 + 1] = seqLen;
         meta0[i * 4 + 2] = pastLen;
@@ -364,15 +407,17 @@ ErrorCode PackedAttentionBufExecution::onExecute(const std::vector<Tensor *> &in
         meta2[i * 4 + 0] = maskInputOffset;
         meta2[i * 4 + 1] = maskBase;
         meta2[i * 4 + 2] = kvSeqLen;
-        meta2[i * 4 + 3] = 0;
+        meta2[i * 4 + 3] = maskStride;
 
         totalSeqOffset += seqLen;
-        maskInputOffset += seqLen * seqLen;
+        maskInputOffset += seqLen * maskStride;
         qBase += mNumHead * mHeadDim * seqLen4;
         qkBase += mNumHead * kvSeqLen * (allDecode ? 1 : seqLen4);
-        maskBase += seqLen4 * seqLen4;
+        maskBase += seqLen4 * ROUND_UP(maskStride, 4);
+        maxMaskStride = std::max(maxMaskStride, maskStride);
     }
 
+    bool tempResized = false;
     auto ensureFloatTemp = [&](std::shared_ptr<Tensor>& tensor, size_t elems) -> bool {
         elems = std::max<size_t>(elems, 1);
         if (elems > static_cast<size_t>(std::numeric_limits<int>::max())) {
@@ -382,8 +427,7 @@ ErrorCode PackedAttentionBufExecution::onExecute(const std::vector<Tensor *> &in
             return true;
         }
         tensor.reset(Tensor::createDevice<float>({static_cast<int>(elems)}));
-        mOpenCLBackend->onAcquireBuffer(tensor.get(), Backend::DYNAMIC_IN_EXECUTION);
-        mOpenCLBackend->onReleaseBuffer(tensor.get(), Backend::DYNAMIC_IN_EXECUTION);
+        tempResized = true;
         return true;
     };
     auto ensureMaskTemp = [&](size_t elems) -> bool {
@@ -402,8 +446,7 @@ ErrorCode PackedAttentionBufExecution::onExecute(const std::vector<Tensor *> &in
         } else {
             mTempMask.reset(Tensor::createDevice<int>({static_cast<int>(elems)}));
         }
-        mOpenCLBackend->onAcquireBuffer(mTempMask.get(), Backend::DYNAMIC_IN_EXECUTION);
-        mOpenCLBackend->onReleaseBuffer(mTempMask.get(), Backend::DYNAMIC_IN_EXECUTION);
+        tempResized = true;
         return true;
     };
     if (!ensureFloatTemp(mTempQ, qBase) ||
@@ -412,6 +455,10 @@ ErrorCode PackedAttentionBufExecution::onExecute(const std::vector<Tensor *> &in
         !ensureMaskTemp(maskBase)) {
         MNN_ERROR("PackedAttentionBufExecution failed to grow temporary buffers\n");
         return OUT_OF_MEMORY;
+    }
+    if (tempResized) {
+        acquireReleasePackedAttentionTemps(mOpenCLBackend, mTempQ.get(), mTempQK.get(),
+                                           mTempSoftMax.get(), mTempMask.get());
     }
 
     auto ensureReqMeta = [&]() -> bool {
@@ -508,7 +555,7 @@ ErrorCode PackedAttentionBufExecution::onExecute(const std::vector<Tensor *> &in
 
     if (mHasMask && !allDecode) {
         std::vector<uint32_t> maskGws = {static_cast<uint32_t>(UP_DIV(maxSeqLen, 4)),
-                                         static_cast<uint32_t>(UP_DIV(maxSeqLen, 4)),
+                                         static_cast<uint32_t>(UP_DIV(maxMaskStride, 4)),
                                          static_cast<uint32_t>(reqIds.size())};
         uint32_t index = 0;
         ret = CL_SUCCESS;
@@ -583,76 +630,75 @@ ErrorCode PackedAttentionBufExecution::onExecute(const std::vector<Tensor *> &in
             runKernel2D(mKernelQkvDecode, qkvGws, {0, 0}, runtime);
         }
     } else {
-    {
-        std::vector<uint32_t> qkGws = {static_cast<uint32_t>(UP_DIV(maxSeqLen, 4)),
-                                       static_cast<uint32_t>(UP_DIV(maxKvSeqLen, 4)),
-                                       static_cast<uint32_t>(reqIds.size() * mNumHead)};
-        uint32_t index = 0;
-        ret = CL_SUCCESS;
-        ret |= mKernelQk->get().setArg(index++, qkGws[0]);
-        ret |= mKernelQk->get().setArg(index++, qkGws[1]);
-        ret |= mKernelQk->get().setArg(index++, qkGws[2]);
-        ret |= mKernelQk->get().setArg(index++, tempQBuffer);
-        ret |= mKernelQk->get().setArg(index++, const_cast<cl::Buffer&>(*sharedKeyBuffer));
-        if (mHasMask) {
-            ret |= mKernelQk->get().setArg(index++, *tempMaskBuffer);
+        {
+            std::vector<uint32_t> qkGws = {static_cast<uint32_t>(UP_DIV(maxSeqLen, 4)),
+                                           static_cast<uint32_t>(UP_DIV(maxKvSeqLen, 4)),
+                                           static_cast<uint32_t>(reqIds.size() * mNumHead)};
+            uint32_t index = 0;
+            ret = CL_SUCCESS;
+            ret |= mKernelQk->get().setArg(index++, qkGws[0]);
+            ret |= mKernelQk->get().setArg(index++, qkGws[1]);
+            ret |= mKernelQk->get().setArg(index++, qkGws[2]);
+            ret |= mKernelQk->get().setArg(index++, tempQBuffer);
+            ret |= mKernelQk->get().setArg(index++, const_cast<cl::Buffer&>(*sharedKeyBuffer));
+            if (mHasMask) {
+                ret |= mKernelQk->get().setArg(index++, *tempMaskBuffer);
+            }
+            ret |= mKernelQk->get().setArg(index++, tempQKBuffer);
+            ret |= mKernelQk->get().setArg(index++, *mReqMeta0);
+            ret |= mKernelQk->get().setArg(index++, *mReqMeta1);
+            ret |= mKernelQk->get().setArg(index++, *mReqMeta2);
+            ret |= mKernelQk->get().setArg(index++, mScale);
+            ret |= mKernelQk->get().setArg(index++, mNumHead);
+            ret |= mKernelQk->get().setArg(index++, mHeadDim);
+            MNN_CHECK_CL_SUCCESS(ret, "setArg matmul_qk_div_mask_prefill_packed");
+            run3DKernelDefault(mKernelQk, qkGws, {1, 1, 1}, runtime);
         }
-        ret |= mKernelQk->get().setArg(index++, tempQKBuffer);
-        ret |= mKernelQk->get().setArg(index++, *mReqMeta0);
-        ret |= mKernelQk->get().setArg(index++, *mReqMeta1);
-        ret |= mKernelQk->get().setArg(index++, *mReqMeta2);
-        ret |= mKernelQk->get().setArg(index++, mScale);
-        ret |= mKernelQk->get().setArg(index++, mNumHead);
-        ret |= mKernelQk->get().setArg(index++, mHeadDim);
-        MNN_CHECK_CL_SUCCESS(ret, "setArg matmul_qk_div_mask_prefill_packed");
-        run3DKernelDefault(mKernelQk, qkGws, {1, 1, 1}, runtime);
-    }
 
-    {
-        int localSize = packedSoftmaxLocalSize(mMaxWorkGroupSize);
-        std::vector<uint32_t> softmaxGws = {static_cast<uint32_t>(localSize),
+        {
+            int localSize = packedSoftmaxLocalSize(mMaxWorkGroupSize);
+            std::vector<uint32_t> softmaxGws = {static_cast<uint32_t>(localSize),
+                                                static_cast<uint32_t>(UP_DIV(maxSeqLen, 4)),
+                                                static_cast<uint32_t>(reqIds.size() * mNumHead)};
+            std::vector<uint32_t> softmaxLws = {static_cast<uint32_t>(localSize), 1, 1};
+            uint32_t index = 0;
+            ret = CL_SUCCESS;
+            ret |= mKernelSoftmax->get().setArg(index++, softmaxGws[0]);
+            ret |= mKernelSoftmax->get().setArg(index++, softmaxGws[1]);
+            ret |= mKernelSoftmax->get().setArg(index++, softmaxGws[2]);
+            ret |= mKernelSoftmax->get().setArg(index++, tempQKBuffer);
+            ret |= mKernelSoftmax->get().setArg(index++, tempSoftmaxBuffer);
+            ret |= mKernelSoftmax->get().setArg(index++, *mReqMeta0);
+            ret |= mKernelSoftmax->get().setArg(index++, *mReqMeta1);
+            ret |= mKernelSoftmax->get().setArg(index++, *mReqMeta2);
+            ret |= mKernelSoftmax->get().setArg(index++, mNumHead);
+            MNN_CHECK_CL_SUCCESS(ret, "setArg softmax_v4_buf_packed");
+            run3DKernelDefault(mKernelSoftmax, softmaxGws, softmaxLws, runtime);
+        }
+
+        {
+            std::vector<uint32_t> qkvGws = {static_cast<uint32_t>(std::max(UP_DIV(mHeadDim, 8), 1)),
                                             static_cast<uint32_t>(UP_DIV(maxSeqLen, 4)),
                                             static_cast<uint32_t>(reqIds.size() * mNumHead)};
-        std::vector<uint32_t> softmaxLws = {static_cast<uint32_t>(localSize), 1, 1};
-        uint32_t index = 0;
-        ret = CL_SUCCESS;
-        ret |= mKernelSoftmax->get().setArg(index++, softmaxGws[0]);
-        ret |= mKernelSoftmax->get().setArg(index++, softmaxGws[1]);
-        ret |= mKernelSoftmax->get().setArg(index++, softmaxGws[2]);
-        ret |= mKernelSoftmax->get().setArg(index++, tempQKBuffer);
-        ret |= mKernelSoftmax->get().setArg(index++, tempSoftmaxBuffer);
-        ret |= mKernelSoftmax->get().setArg(index++, *mReqMeta0);
-        ret |= mKernelSoftmax->get().setArg(index++, *mReqMeta1);
-        ret |= mKernelSoftmax->get().setArg(index++, *mReqMeta2);
-        ret |= mKernelSoftmax->get().setArg(index++, mNumHead);
-        MNN_CHECK_CL_SUCCESS(ret, "setArg softmax_v4_buf_packed");
-        run3DKernelDefault(mKernelSoftmax, softmaxGws, softmaxLws, runtime);
+            uint32_t index = 0;
+            ret = CL_SUCCESS;
+            ret |= mKernelQkv->get().setArg(index++, qkvGws[0]);
+            ret |= mKernelQkv->get().setArg(index++, qkvGws[1]);
+            ret |= mKernelQkv->get().setArg(index++, qkvGws[2]);
+            ret |= mKernelQkv->get().setArg(index++, tempSoftmaxBuffer);
+            ret |= mKernelQkv->get().setArg(index++, const_cast<cl::Buffer&>(*sharedValueBuffer));
+            ret |= mKernelQkv->get().setArg(index++, outputBuffer);
+            ret |= mKernelQkv->get().setArg(index++, *mReqMeta0);
+            ret |= mKernelQkv->get().setArg(index++, *mReqMeta1);
+            ret |= mKernelQkv->get().setArg(index++, *mReqMeta2);
+            ret |= mKernelQkv->get().setArg(index++, mNumHead);
+            ret |= mKernelQkv->get().setArg(index++, mKvNumHead);
+            ret |= mKernelQkv->get().setArg(index++, mHeadDim);
+            MNN_CHECK_CL_SUCCESS(ret, "setArg matmul_qkv_prefill_packed");
+            run3DKernelDefault(mKernelQkv, qkvGws, {1, 1, 1}, runtime);
+        }
     }
 
-    {
-        std::vector<uint32_t> qkvGws = {static_cast<uint32_t>(std::max(UP_DIV(mHeadDim, 8), 1)),
-                                        static_cast<uint32_t>(UP_DIV(maxSeqLen, 4)),
-                                        static_cast<uint32_t>(reqIds.size() * mNumHead)};
-        uint32_t index = 0;
-        ret = CL_SUCCESS;
-        ret |= mKernelQkv->get().setArg(index++, qkvGws[0]);
-        ret |= mKernelQkv->get().setArg(index++, qkvGws[1]);
-        ret |= mKernelQkv->get().setArg(index++, qkvGws[2]);
-        ret |= mKernelQkv->get().setArg(index++, tempSoftmaxBuffer);
-        ret |= mKernelQkv->get().setArg(index++, const_cast<cl::Buffer&>(*sharedValueBuffer));
-        ret |= mKernelQkv->get().setArg(index++, outputBuffer);
-        ret |= mKernelQkv->get().setArg(index++, *mReqMeta0);
-        ret |= mKernelQkv->get().setArg(index++, *mReqMeta1);
-        ret |= mKernelQkv->get().setArg(index++, *mReqMeta2);
-        ret |= mKernelQkv->get().setArg(index++, mNumHead);
-        ret |= mKernelQkv->get().setArg(index++, mKvNumHead);
-        ret |= mKernelQkv->get().setArg(index++, mHeadDim);
-        MNN_CHECK_CL_SUCCESS(ret, "setArg matmul_qkv_prefill_packed");
-        run3DKernelDefault(mKernelQkv, qkvGws, {1, 1, 1}, runtime);
-    }
-    }
-
-    queue.finish();
     if (mNeedKvCache) {
         for (size_t i = 0; i < reqIds.size(); ++i) {
             mBatchKVCacheManager->addKvLength(reqIds[i], seqLens[i]);

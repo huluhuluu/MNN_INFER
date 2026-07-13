@@ -10,7 +10,7 @@
 
 #include "backend/opencl/execution/buffer/AttentionBufExecution.hpp"
 #include "backend/opencl/execution/buffer/PackedAttentionBufExecution.hpp"
-#include <fstream>
+#include <algorithm>
 namespace MNN {
 namespace OpenCL {
 
@@ -1667,7 +1667,6 @@ ErrorCode AttentionBufExecution::onExecute(const std::vector<Tensor *> &inputs, 
 #ifdef LOG_VERBOSE
     MNN_PRINT("end AttentionBufExecution onExecute !\n");
 #endif
-
     return NO_ERROR;
 }
 

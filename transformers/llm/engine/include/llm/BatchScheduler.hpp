@@ -12,6 +12,7 @@
 #include <iostream>
 #include <numeric>
 #include <map>
+#include <set>
 #include <vector>
 #include <memory>
 
@@ -59,7 +60,7 @@ public:
         std::vector<std::vector<int>> inputs; // only read data to make embedding
         std::vector<int> calLen;        // calculated lengths for each input token in the chunk
         std::vector<int> pos;           // position for each input token in the chunk
-        std::vector<int> reqId;         // mapping to request index (Vector index, not Global ID)
+        std::vector<int> reqId;         // global request id for each input slice
         int culLen = 0;                 // cumulative length of the chunk
     };
 
@@ -77,9 +78,11 @@ public:
     // blockSize: chunk size for prefill, -1 means use default
     // bs: batch size limit for number of requests per schedule, -1 means no limit (FIFO)
     std::shared_ptr<Chunk> schedule(int blockSize = -1, int bs = -1);
+    std::shared_ptr<Chunk> schedule(int blockSize, int bs, const std::set<int>& skipReqIds);
 
     // update generated token
     bool update(int req_id, int new_token, int cal_len, bool is_stop_token);
+    bool update(int req_id, const std::vector<int>& new_tokens, int cal_len, bool is_stop_token);
 
     // prefill or decode
     int state(int req_id) const;

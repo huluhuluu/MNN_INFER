@@ -653,41 +653,42 @@ __kernel void rearrange_mask_shortprefill_packed(GLOBAL_SIZE_3_DIMS
     const int query_seq_len4 = ((query_seq_len + 3) / 4) * 4;
     const int mask_input_offset = meta2[req * 4 + 0];
     const int mask_output_offset = meta2[req * 4 + 1];
+    const int mask_stride = meta2[req * 4 + 3];
 
     const int x4 = x << 2;
     const int y4 = y << 2;
-    if (x4 >= query_seq_len || y4 >= query_seq_len) {
+    if (x4 >= query_seq_len || y4 >= mask_stride) {
         return;
     }
 
     float4 mask_tmp0, mask_tmp1, mask_tmp2, mask_tmp3;
     float4 mask0, mask1, mask2, mask3;
-    int mask_offset = mask_input_offset + x4 * query_seq_len + y4;
-    if (x4 + 3 < query_seq_len && y4 + 3 < query_seq_len) {
-        mask_tmp0 = convert_float4(vload4(0, mask + mask_offset)); mask_offset += query_seq_len;
-        mask_tmp1 = convert_float4(vload4(0, mask + mask_offset)); mask_offset += query_seq_len;
-        mask_tmp2 = convert_float4(vload4(0, mask + mask_offset)); mask_offset += query_seq_len;
+    int mask_offset = mask_input_offset + x4 * mask_stride + y4;
+    if (x4 + 3 < query_seq_len && y4 + 3 < mask_stride) {
+        mask_tmp0 = convert_float4(vload4(0, mask + mask_offset)); mask_offset += mask_stride;
+        mask_tmp1 = convert_float4(vload4(0, mask + mask_offset)); mask_offset += mask_stride;
+        mask_tmp2 = convert_float4(vload4(0, mask + mask_offset)); mask_offset += mask_stride;
         mask_tmp3 = convert_float4(vload4(0, mask + mask_offset));
     } else {
-        if (y4 + 3 < query_seq_len) {
-            mask_tmp0 = convert_float4(vload4(0, mask + mask_offset)); mask_offset += query_seq_len;
-            mask_tmp1 = (x4 + 1 >= query_seq_len) ? (float4)0 : convert_float4(vload4(0, mask + mask_offset)); mask_offset += query_seq_len;
-            mask_tmp2 = (x4 + 2 >= query_seq_len) ? (float4)0 : convert_float4(vload4(0, mask + mask_offset)); mask_offset += query_seq_len;
+        if (y4 + 3 < mask_stride) {
+            mask_tmp0 = convert_float4(vload4(0, mask + mask_offset)); mask_offset += mask_stride;
+            mask_tmp1 = (x4 + 1 >= query_seq_len) ? (float4)0 : convert_float4(vload4(0, mask + mask_offset)); mask_offset += mask_stride;
+            mask_tmp2 = (x4 + 2 >= query_seq_len) ? (float4)0 : convert_float4(vload4(0, mask + mask_offset)); mask_offset += mask_stride;
             mask_tmp3 = (x4 + 3 >= query_seq_len) ? (float4)0 : convert_float4(vload4(0, mask + mask_offset));
-        } else if (y4 + 1 == query_seq_len) {
-            mask_tmp0 = (float4)(mask[mask_offset], 0, 0, 0); mask_offset += query_seq_len;
-            mask_tmp1 = (x4 + 1 >= query_seq_len) ? (float4)0 : (float4)(mask[mask_offset], 0, 0, 0); mask_offset += query_seq_len;
-            mask_tmp2 = (x4 + 2 >= query_seq_len) ? (float4)0 : (float4)(mask[mask_offset], 0, 0, 0); mask_offset += query_seq_len;
+        } else if (y4 + 1 == mask_stride) {
+            mask_tmp0 = (float4)(mask[mask_offset], 0, 0, 0); mask_offset += mask_stride;
+            mask_tmp1 = (x4 + 1 >= query_seq_len) ? (float4)0 : (float4)(mask[mask_offset], 0, 0, 0); mask_offset += mask_stride;
+            mask_tmp2 = (x4 + 2 >= query_seq_len) ? (float4)0 : (float4)(mask[mask_offset], 0, 0, 0); mask_offset += mask_stride;
             mask_tmp3 = (x4 + 3 >= query_seq_len) ? (float4)0 : (float4)(mask[mask_offset], 0, 0, 0);
-        } else if (y4 + 2 == query_seq_len) {
-            mask_tmp0 = (float4)(mask[mask_offset], mask[mask_offset + 1], 0, 0); mask_offset += query_seq_len;
-            mask_tmp1 = (x4 + 1 >= query_seq_len) ? (float4)0 : (float4)(mask[mask_offset], mask[mask_offset + 1], 0, 0); mask_offset += query_seq_len;
-            mask_tmp2 = (x4 + 2 >= query_seq_len) ? (float4)0 : (float4)(mask[mask_offset], mask[mask_offset + 1], 0, 0); mask_offset += query_seq_len;
+        } else if (y4 + 2 == mask_stride) {
+            mask_tmp0 = (float4)(mask[mask_offset], mask[mask_offset + 1], 0, 0); mask_offset += mask_stride;
+            mask_tmp1 = (x4 + 1 >= query_seq_len) ? (float4)0 : (float4)(mask[mask_offset], mask[mask_offset + 1], 0, 0); mask_offset += mask_stride;
+            mask_tmp2 = (x4 + 2 >= query_seq_len) ? (float4)0 : (float4)(mask[mask_offset], mask[mask_offset + 1], 0, 0); mask_offset += mask_stride;
             mask_tmp3 = (x4 + 3 >= query_seq_len) ? (float4)0 : (float4)(mask[mask_offset], mask[mask_offset + 1], 0, 0);
         } else {
-            mask_tmp0 = (float4)(mask[mask_offset], mask[mask_offset + 1], mask[mask_offset + 2], 0); mask_offset += query_seq_len;
-            mask_tmp1 = (x4 + 1 >= query_seq_len) ? (float4)0 : (float4)(mask[mask_offset], mask[mask_offset + 1], mask[mask_offset + 2], 0); mask_offset += query_seq_len;
-            mask_tmp2 = (x4 + 2 >= query_seq_len) ? (float4)0 : (float4)(mask[mask_offset], mask[mask_offset + 1], mask[mask_offset + 2], 0); mask_offset += query_seq_len;
+            mask_tmp0 = (float4)(mask[mask_offset], mask[mask_offset + 1], mask[mask_offset + 2], 0); mask_offset += mask_stride;
+            mask_tmp1 = (x4 + 1 >= query_seq_len) ? (float4)0 : (float4)(mask[mask_offset], mask[mask_offset + 1], mask[mask_offset + 2], 0); mask_offset += mask_stride;
+            mask_tmp2 = (x4 + 2 >= query_seq_len) ? (float4)0 : (float4)(mask[mask_offset], mask[mask_offset + 1], mask[mask_offset + 2], 0); mask_offset += mask_stride;
             mask_tmp3 = (x4 + 3 >= query_seq_len) ? (float4)0 : (float4)(mask[mask_offset], mask[mask_offset + 1], mask[mask_offset + 2], 0);
         }
     }
@@ -891,27 +892,54 @@ __kernel void matmul_qk_div_mask_prefill_packed(GLOBAL_SIZE_3_DIMS
     out3 *= (float4)scale;
 
     #if defined(ADD_MASK) || defined(SET_MASK)
-    const int query_start = key_seq_len - seq_len;
-    #define APPLY_CAUSAL_MASK(score, key_index) \
-        if ((key_index) > query_start + x4) { score.s0 = -FLT_MAX; } \
-        if ((key_index) > query_start + x4 + 1) { score.s1 = -FLT_MAX; } \
-        if ((key_index) > query_start + x4 + 2) { score.s2 = -FLT_MAX; } \
-        if ((key_index) > query_start + x4 + 3) { score.s3 = -FLT_MAX; }
-    APPLY_CAUSAL_MASK(out0, y4);
-    APPLY_CAUSAL_MASK(out1, y4 + 1);
-    APPLY_CAUSAL_MASK(out2, y4 + 2);
-    APPLY_CAUSAL_MASK(out3, y4 + 3);
-    #undef APPLY_CAUSAL_MASK
+    const int mask_stride = meta2[req * 4 + 3];
+    const int mask_gap = key_seq_len - mask_stride;
+    #ifdef ADD_MASK
+    #define APPLY_PACKED_MASK(score, key_index) \
+        { \
+            const int mask_index = (key_index) - mask_gap; \
+            if (mask_index >= 0 && mask_index < mask_stride) { \
+                const int mask_offset = mask_base + mask_index * query_seq_len4 + x4; \
+                const float4 mask_value = convert_float4(vload4(0, mask + mask_offset)); \
+                /* Square masks cover only current tokens; full masks cover the whole KV span. */ \
+                score = score + mask_value; \
+            } \
+        }
+    #else
+    #define APPLY_PACKED_MASK(score, key_index) \
+        { \
+            const int mask_index = (key_index) - mask_gap; \
+            if (mask_index >= 0 && mask_index < mask_stride) { \
+                const int mask_offset = mask_base + mask_index * query_seq_len4 + x4; \
+                const float4 mask_value = convert_float4(vload4(0, mask + mask_offset)); \
+                /* Square masks cover only current tokens; full masks cover the whole KV span. */ \
+                if (mask_value.s0 == 0.0f) { score.s0 = -FLT_MAX; } \
+                if (mask_value.s1 == 0.0f) { score.s1 = -FLT_MAX; } \
+                if (mask_value.s2 == 0.0f) { score.s2 = -FLT_MAX; } \
+                if (mask_value.s3 == 0.0f) { score.s3 = -FLT_MAX; } \
+            } \
+        }
+    #endif
+    APPLY_PACKED_MASK(out0, y4);
+    APPLY_PACKED_MASK(out1, y4 + 1);
+    APPLY_PACKED_MASK(out2, y4 + 2);
+    APPLY_PACKED_MASK(out3, y4 + 3);
+    #undef APPLY_PACKED_MASK
     #endif
 
     const int qk_offset = qk_base + (hn * key_seq_len + y4) * query_seq_len4 + x4;
-    vstore4(CONVERT_FLOAT4(out0), 0, qk + qk_offset);
-    if (y4 + 1 >= key_seq_len) return;
-    vstore4(CONVERT_FLOAT4(out1), 0, qk + qk_offset + query_seq_len4);
-    if (y4 + 2 >= key_seq_len) return;
-    vstore4(CONVERT_FLOAT4(out2), 0, qk + qk_offset + query_seq_len4 + query_seq_len4);
-    if (y4 + 3 >= key_seq_len) return;
-    vstore4(CONVERT_FLOAT4(out3), 0, qk + qk_offset + query_seq_len4 + query_seq_len4 + query_seq_len4);
+    if (y4 < key_seq_len) {
+        vstore4(CONVERT_FLOAT4(out0), 0, qk + qk_offset);
+    }
+    if (y4 + 1 < key_seq_len) {
+        vstore4(CONVERT_FLOAT4(out1), 0, qk + qk_offset + query_seq_len4);
+    }
+    if (y4 + 2 < key_seq_len) {
+        vstore4(CONVERT_FLOAT4(out2), 0, qk + qk_offset + query_seq_len4 + query_seq_len4);
+    }
+    if (y4 + 3 < key_seq_len) {
+        vstore4(CONVERT_FLOAT4(out3), 0, qk + qk_offset + query_seq_len4 + query_seq_len4 + query_seq_len4);
+    }
 }
 
 __kernel void matmul_qk_decode(GLOBAL_SIZE_2_DIMS

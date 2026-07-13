@@ -10,8 +10,6 @@
 #include <numeric>
 #include <algorithm>
 
-#define EAGLE_DEBUG 0
-
 using namespace MNN::Express;
 namespace MNN {
 namespace Transformer {
@@ -21,12 +19,50 @@ static inline VARP _var(std::vector<T> vec, const std::vector<int> &dims) {
     return _Const(vec.data(), dims, NHWC, halide_type_of<T>());
 }
 
+static VARP _gatherHiddenRows(VARP hiddenStates, const std::vector<int>& indices) {
+    auto info = hiddenStates->getInfo();
+    if (info == nullptr || info->dim.empty()) {
+        return nullptr;
+    }
+    auto src = hiddenStates->readMap<float>();
+    if (src == nullptr) {
+        return nullptr;
+    }
+    int hiddenSize = info->dim.back();
+    int seqLen = info->dim.size() == 3 && info->dim[0] == 1 ? info->dim[1] : info->dim[0];
+    auto output = _Input({1, static_cast<int>(indices.size()), hiddenSize}, NCHW, halide_type_of<float>());
+    auto dst = output->writeMap<float>();
+    if (dst == nullptr) {
+        return nullptr;
+    }
+    for (int i = 0; i < indices.size(); ++i) {
+        int index = indices[i];
+        if (index < 0 || index >= seqLen) {
+            return nullptr;
+        }
+        ::memcpy(dst + i * hiddenSize, src + index * hiddenSize, hiddenSize * sizeof(float));
+    }
+    return output;
+}
+
+static void _waitModuleOutputs(const std::vector<MNN::Express::VARP>& outputs) {
+    for (auto& output : outputs) {
+        ((MNN::Tensor*)(output->getTensor()))->wait(Tensor::MAP_TENSOR_READ, true);
+    }
+}
+
 EagleGeneration::EagleGeneration(Llm* llm, std::shared_ptr<LlmContext> context, std::shared_ptr<LlmConfig> config) : Generation(llm, context) {
     // do nothing
 }
 
 void EagleGeneration::load(Module::Config module_config) {
+    mEagleModuleConfig = module_config;
     mEagleMeta.reset(new KVMeta);
+    mEagleBatchMeta.reset();
+    mEaglePackedRootModule.reset();
+    mEaglePackedModulePool.clear();
+    bool packedMode = mLlm->mConfig->packed_attention();
+    mLlm->mRuntimeManager->setHint(MNN::Interpreter::PACKED_ATTENTION_MODE, false);
     mLlm->mRuntimeManager->setHintPtr(Interpreter::KVCACHE_INFO, mEagleMeta.get());
 
     std::vector<std::string> inputNames{"input_embed", "hidden_states", "attention_mask", "position_ids", "logits_index"};
@@ -35,6 +71,10 @@ void EagleGeneration::load(Module::Config module_config) {
     mEagleModules[0].reset(Module::load(inputNames, outputNames, mLlm->mConfig->eagle_model().c_str(), mLlm->mRuntimeManager, &module_config));
 
     mEagleModules[1].reset(Module::load({"fc_hidden"}, {"hidden_states"}, mLlm->mConfig->eagle_fc().c_str(), mLlm->mRuntimeManager, &module_config));
+    if (packedMode) {
+        loadPackedDraftModule();
+    }
+    mLlm->applyKVCacheRuntimeHint(mLlm->mRuntimeManager, packedMode);
 
     mD2t = Express::Variable::load(mLlm->mConfig->eagle_d2t().c_str())[0];
 
@@ -81,11 +121,14 @@ void EagleGeneration::setPosition(int position) {
 std::vector<MNN::Express::VARP> EagleGeneration::eagleForwardRaw(const std::vector<MNN::Express::VARP>& inputs) {
     int seq_len     = inputs[0]->getInfo()->dim[0];
     mEagleMeta->add = seq_len;
-#if EAGLE_DEBUG
-    printf("pos: "); for (auto i = 0; i < seq_len; i++) printf("%d, ", inputs[3]->readMap<int>()[i]); printf("\n");
-#endif
+    mLlm->mRuntimeManager->setHint(MNN::Interpreter::PACKED_ATTENTION_MODE, false);
+    mLlm->mRuntimeManager->setHintPtr(Interpreter::KVCACHE_INFO, mEagleMeta.get());
     auto outputs    = mEagleModules[0]->onForward(inputs);
+    if (outputs.size() > 1) {
+        _waitModuleOutputs(outputs);
+    }
     mEagleMeta->sync();
+    mLlm->applyKVCacheRuntimeHint(mLlm->mRuntimeManager, mLlm->mConfig->packed_attention());
     return outputs;
 }
 
@@ -107,15 +150,9 @@ std::vector<VARP> EagleGeneration::eagleForward(const std::vector<int>& input_id
     return outputs;
 }
 
-EagleGeneration::DraftInfo EagleGeneration::topkGenerate(const std::vector<int>& inputIds, MNN::Express::VARP hiddenStates, MNN::Express::VARP inputEmbeds) {
+EagleGeneration::DraftInfo EagleGeneration::topkGenerate(const std::vector<int>& inputIds, MNN::Express::VARP hiddenStates, MNN::Express::VARP inputEmbeds, int reqId) {
     auto d2tPtr = mD2t->readMap<int>();
     TokenTree tokenTree(mTopK, d2tPtr);
-#if EAGLE_DEBUG
-    for (int i = 0; i < inputIds.size(); i++) {
-        auto token = inputIds[i];
-        printf("# input-%d: %d, %s\n", i, token, tokenStr(token).c_str());
-    }
-#endif
     int sampleToken = inputIds.back();
     if(inputEmbeds == nullptr) {
         inputEmbeds = mLlm->embedding(inputIds);
@@ -132,13 +169,6 @@ EagleGeneration::DraftInfo EagleGeneration::topkGenerate(const std::vector<int>&
     auto topKV = MNN::Express::_TopKV2(lastP, MNN::Express::_Scalar<int>(mTopK));
     auto scores = topKV[0]->readMap<float>();
     auto indices = topKV[1]->readMap<int>();
-#if EAGLE_DEBUG
-    for (int i = 0; i < topKV[0]->getInfo()->size; i++) {
-        auto token = indices[i];
-        token = token + d2tPtr[token];
-        printf("# top-%d: %d[%f], %s\n", i, token, scores[i], tokenStr(token).c_str());
-    }
-#endif
     tokenTree.init(indices, scores);
     inputHidden = MNN::Express::_Tile(lastHidden, _var<int>({1, mTopK, 1}, {3}));
     for (int d = 0; d < mDepth - 1; d++) {
@@ -155,45 +185,9 @@ EagleGeneration::DraftInfo EagleGeneration::topkGenerate(const std::vector<int>&
         tokenTree.grow(indices, scores);
     }
     auto output = tokenTree.finalize(sampleToken, mLlm->mDraftLength);
-#if EAGLE_DEBUG
-    {
-        std::cout << tokenTree.toString([&](int token){
-            return mLlm->tokenizer_decode(token);
-        });
-        printf("draftTokens: \n");
-        for (auto token : output.draftTokens) {
-            printf("%d: %s\n", token, tokenStr(token).c_str());
-        }
-        printf("positionIds: ");
-        for (auto id : output.positionIds) {
-            printf("%d, ", id);
-        }
-        printf("\nattentionMask: \n");
-        for (auto mask : output.attentionMask) {
-            for (auto m : mask) {
-                printf("%d, ", (bool)m);
-            }
-            printf("\n");
-        }
-        printf("retrieveIndices: \n");
-        for (auto vec : output.retrieveIndices) {
-            for (auto i : vec) {
-                printf("%d, ", i);
-            }
-            printf(" : ");
-            for (auto i : vec) {
-                printf("%d, ", output.draftTokens[i]);
-            }
-            printf(" : ");
-            for (auto i : vec) {
-                printf("%s, ", tokenStr(output.draftTokens[i]).c_str());
-            }
-            printf("\n");
-        }
-    }
-#endif
     int inputLen = output.draftTokens.size();
     DraftInfo info;
+    info.reqId = reqId;
     info.draftTokens = std::move(output.draftTokens);
     info.retrieveIndices = std::move(output.retrieveIndices);
     info.attentionMask = _Input({1, 1, inputLen, inputLen}, NCHW, halide_type_of<float>());
@@ -210,11 +204,13 @@ EagleGeneration::DraftInfo EagleGeneration::topkGenerate(const std::vector<int>&
 }
 
 VARPS EagleGeneration::treeDecoding(const EagleGeneration::DraftInfo& drafInfo) {
+    if (mLlm->mConfig->packed_attention()) {
+        return treeDecodingPacked(drafInfo);
+    }
     auto inputEmbeds   = mLlm->embedding(drafInfo.draftTokens);
     int inputLen = drafInfo.draftTokens.size();
     mLlm->mMeta->add = inputLen;
-    auto outputs = mLlm->forwardRaw(inputEmbeds, drafInfo.attentionMask, drafInfo.positionIds);
-    return outputs;
+    return mLlm->forwardRaw(inputEmbeds, drafInfo.attentionMask, drafInfo.positionIds);
 }
 
 EagleGeneration::AcceptInfo EagleGeneration::evaluatePosterior(const EagleGeneration::DraftInfo& drafInfo, VARP logits) {
@@ -245,19 +241,8 @@ EagleGeneration::AcceptInfo EagleGeneration::evaluatePosterior(const EagleGenera
     for (int i = 0; i < bestCandidate.size(); i++) {
         acceptTokens[i] = samples[bestCandidate[i]];
     }
-#if EAGLE_DEBUG
-    printf("samples: ");
-    for (int i = 0; i < samples.size(); i++) {
-        printf("%d[%s], ", samples[i], tokenStr(samples[i]).c_str());
-    }
-    printf("\n");
-    printf("accepted: ");
-    for (int i = 0; i < bestCandidate.size(); i++) {
-        printf("%d[%d]: %s, ", bestCandidate[i], samples[bestCandidate[i]], tokenStr(samples[bestCandidate[i]]).c_str());
-    }
-    printf("\n");
-#endif
     AcceptInfo acceptInfo;
+    acceptInfo.reqId = drafInfo.reqId;
     acceptInfo.sampleTokens  = std::move(samples);
     acceptInfo.acceptIndices = std::move(bestCandidate);
     acceptInfo.acceptTokens  = std::move(acceptTokens);
@@ -269,16 +254,25 @@ EagleGeneration::DraftInfo EagleGeneration::updateDraft(const AcceptInfo& accept
     // update base model kv cache
     {
         mLlm->updateContext(acceptLen, acceptLen);
-        mLlm->mMeta->remove = acceptInfo.sampleTokens.size();
-        mLlm->mMeta->n_reserve = acceptLen;
-        mLlm->mMeta->reserve = new int[mLlm->mMeta->n_reserve * 2];
-        for (size_t i = 0; i < acceptLen; i++) {
-            mLlm->mMeta->reserve[2 * i] = acceptInfo.acceptIndices[i];
-            mLlm->mMeta->reserve[2 * i + 1] = 1;
+        if (mLlm->mConfig->packed_attention()) {
+            updatePackedBaseKV(acceptInfo);
+        } else {
+            mLlm->mMeta->remove = acceptInfo.sampleTokens.size();
+            mLlm->mMeta->n_reserve = acceptLen;
+            mLlm->mMeta->reserveHost.resize(acceptLen * 2);
+            mLlm->mMeta->reserve = mLlm->mMeta->reserveHost.data();
+            for (int i = 0; i < acceptLen; i++) {
+                mLlm->mMeta->reserve[2 * i] = acceptInfo.acceptIndices[i];
+                mLlm->mMeta->reserve[2 * i + 1] = 1;
+            }
         }
     }
-    auto acceptHiddenState = _GatherV2(hiddenStates, _var<int>(acceptInfo.acceptIndices, {acceptLen}), _Scalar<int>(1));
-    return topkGenerate(acceptInfo.acceptTokens, acceptHiddenState);
+    auto acceptHiddenState = _gatherHiddenRows(hiddenStates, acceptInfo.acceptIndices);
+    if (acceptHiddenState == nullptr) {
+        mContext->status = LlmStatus::INTERNAL_ERROR;
+        return {};
+    }
+    return topkGenerate(acceptInfo.acceptTokens, acceptHiddenState, nullptr, acceptInfo.reqId);
 }
 
 bool EagleGeneration::processTokens(const std::vector<int>& acceptTokens) {
@@ -296,9 +290,9 @@ bool EagleGeneration::processTokens(const std::vector<int>& acceptTokens) {
 }
 
 void EagleGeneration::generate(GenerationParams& param) {
+    int reqId = param.reqId;
     mEaglePastLen = 0;
     mEagleRemove  = mEagleMeta->previous;
-    int64_t treeDecodingTime = 0, eagleGenerateTime = 0;
     MNN::Timer _t;
     VARP inputEmbeds  = param.input_embeds;
     auto inputIds     = param.input_ids;
@@ -318,17 +312,13 @@ void EagleGeneration::generate(GenerationParams& param) {
     auto pre_embeds = _Split(inputEmbeds, {1, seqLen - 1}, 0);
     inputEmbeds     = _Concat({pre_embeds[1], cur_embed}, 0);
     // eagle generate
-    MNN::Timer _gt;
-    auto draftInfo  = topkGenerate(inputIds, hiddenStates, inputEmbeds);
-    eagleGenerateTime += _gt.durationInUs();
-    std::vector<int> accpetLens;
+    auto draftInfo  = topkGenerate(inputIds, hiddenStates, inputEmbeds, reqId);
     auto newTokens = 0, steps = 0;
     while (true) {
         if(mContext->status == LlmStatus::USER_CANCEL) {
             break;
         }
         steps++;
-        MNN::Timer _dt;
         auto decodingInfo = treeDecoding(draftInfo);
         for (auto o : decodingInfo) {
             if(nullptr == o->readMap<float>()) {
@@ -340,10 +330,8 @@ void EagleGeneration::generate(GenerationParams& param) {
             break;
         }
         
-        treeDecodingTime += _dt.durationInUs();
         auto acceptInfo = evaluatePosterior(draftInfo, decodingInfo[0]);
         newTokens += acceptInfo.acceptTokens.size();
-        accpetLens.push_back(acceptInfo.acceptTokens.size());
         {
             mContext->current_token = acceptInfo.acceptTokens.back();
             for (auto token : acceptInfo.acceptTokens) {
@@ -356,34 +344,14 @@ void EagleGeneration::generate(GenerationParams& param) {
             mContext->output_tokens.push_back(steps);
             break;
         }
-        MNN::Timer _gt;
         draftInfo = updateDraft(acceptInfo, decodingInfo[1]);
-        eagleGenerateTime += _gt.durationInUs();
     }
     mContext->decode_us += _t.durationInUs();
     if(newTokens >= param.max_new_tokens) {
         mContext->status = LlmStatus::MAX_TOKENS_FINISHED;
     }
-#if EAGLE_DEBUG
-    printf("\n### Tree Decoding Time: %f s, Eagle Generate Time: %f s\n", (float)treeDecodingTime / 1000000.0, (float)eagleGenerateTime / 1000000.0);
-    printf("\n### Tree Decoding Avg Time: %f ms, steps: %d\n", (float)treeDecodingTime / 1000.0 / steps, steps);
-    printf("\n### Compression Ratio: %f\n", (float)newTokens / steps);
-    for (auto acceptLen : accpetLens) {
-        printf("%d, ", acceptLen);
-    }
-    printf("\n");
-#endif
+    mBasePendingKV.erase(reqId);
     return;
-}
-
-std::string EagleGeneration::tokenStr(int token) {
-    auto str = mLlm->tokenizer_decode(token);
-    std::string::size_type pos = 0;
-    while ((pos = str.find('\n', pos)) != std::string::npos) {
-        str.replace(pos, 1, "\\n");
-        pos += 2;
-    }
-    return str;
 }
 
 } // namespace Transformer

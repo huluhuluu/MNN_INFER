@@ -229,32 +229,15 @@ int BatchKVCacheCLManager::alignedLength(int length) const {
     return ROUND_UP(chunkAligned, 4);
 }
 
-void BatchKVCacheCLManager::allocKVCache(const BatchKVMeta* batchMeta) {
-    if (!mKVCache || batchMeta == nullptr) {
-        return;
-    }
-    for (const auto& item : batchMeta->mMetas) {
-        const int reqId = item.first;
-        const KVMeta* meta = item.second;
-        auto& info = mRequestInfos[reqId];
-        if (info.pastLength == 0 && meta != nullptr) {
-            info.pastLength = static_cast<int>(meta->previous);
-        }
-        int required = info.pastLength;
-        if (meta != nullptr) {
-            required = std::max(required, retainedLength(meta, info.pastLength) + static_cast<int>(meta->add));
-        }
-        info.maxLength = std::max(info.maxLength, alignedLength(required));
-    }
-}
-
 bool BatchKVCacheCLManager::copyRequestData(const cl::Buffer* oldKeyBuffer,
                                             const cl::Buffer* oldValueBuffer,
                                             const RequestCacheInfo* oldInfo,
                                             cl::Buffer* newKeyBuffer,
                                             cl::Buffer* newValueBuffer,
                                             const RequestCacheInfo& newInfo,
-                                            const KVMeta* meta) {
+                                            const KVMeta* meta,
+                                            int currentPast,
+                                            bool applyPendingOps) {
     if (oldKeyBuffer == nullptr || oldValueBuffer == nullptr || oldInfo == nullptr ||
         newKeyBuffer == nullptr || newValueBuffer == nullptr || oldInfo->pastLength <= 0) {
         return true;
@@ -291,8 +274,15 @@ bool BatchKVCacheCLManager::copyRequestData(const cl::Buffer* oldKeyBuffer,
                    newKeyErr == CL_SUCCESS && newValueErr == CL_SUCCESS;
 
     if (success) {
-        int remove = meta != nullptr ? std::min<int>(meta->remove, oldInfo->pastLength) : 0;
-        int prefix = std::max(oldInfo->pastLength - remove, 0);
+        int sourcePast = oldInfo->pastLength;
+        if (meta != nullptr) {
+            if (oldInfo->pastLength != currentPast) {
+                MNN_ERROR("OpenCL batch KV length mismatch, req cache=%d meta=%d\n", oldInfo->pastLength, currentPast);
+            }
+            sourcePast = std::min(oldInfo->pastLength, currentPast);
+        }
+        int remove = applyPendingOps && meta != nullptr ? std::min<int>(meta->remove, sourcePast) : 0;
+        int prefix = std::max(sourcePast - remove, 0);
         int dstIndex = prefix;
         const size_t oldKeyRowStride = (size_t)oldInfo->maxLength * mByte;
         const size_t newKeyRowStride = (size_t)newInfo.maxLength * mByte;
@@ -316,7 +306,7 @@ bool BatchKVCacheCLManager::copyRequestData(const cl::Buffer* oldKeyBuffer,
         };
 
         copyRange(0, 0, prefix);
-        if (meta != nullptr && meta->n_reserve > 0 && meta->reserve != nullptr) {
+        if (applyPendingOps && meta != nullptr && meta->n_reserve > 0 && meta->reserve != nullptr) {
             const int start = prefix;
             for (int i = 0; i < meta->n_reserve; ++i) {
                 const int srcIndex = start + meta->reserve[2 * i];
@@ -364,7 +354,7 @@ bool BatchKVCacheCLManager::rebuildArena(const BatchKVMeta* batchMeta, bool appl
             info.pastLength = static_cast<int>(meta->previous);
         }
 
-        const int currentPast = std::max(info.pastLength, meta != nullptr ? static_cast<int>(meta->previous) : 0);
+        const int currentPast = meta != nullptr ? static_cast<int>(meta->previous) : info.pastLength;
         const int nextPast = applyPendingOps ? retainedLength(meta, currentPast) : currentPast;
         const int requiredLength = nextPast + (meta != nullptr ? static_cast<int>(meta->add) : 0);
         info.maxLength = std::max(info.maxLength, alignedLength(requiredLength));
@@ -376,6 +366,9 @@ bool BatchKVCacheCLManager::rebuildArena(const BatchKVMeta* batchMeta, bool appl
         newInfos[reqId] = info;
 
         if (!layoutChanged) {
+            if (applyPendingOps && meta != nullptr && (meta->remove > 0 || meta->n_reserve > 0)) {
+                layoutChanged = true;
+            }
             if (oldIt == mRequestInfos.end() ||
                 oldIt->second.maxLength != info.maxLength ||
                 oldIt->second.keyOffset != info.keyOffset ||
@@ -409,8 +402,11 @@ bool BatchKVCacheCLManager::rebuildArena(const BatchKVMeta* batchMeta, bool appl
         const KVMeta* meta = batchMeta->mMetas.at(reqId);
         auto oldIt = mRequestInfos.find(reqId);
         const RequestCacheInfo* oldInfo = oldIt == mRequestInfos.end() ? nullptr : &oldIt->second;
+        const int currentPast = meta != nullptr ? static_cast<int>(meta->previous) :
+                                (oldInfo == nullptr ? 0 : oldInfo->pastLength);
         if (!copyRequestData(mPastKeyBuffer.get(), mPastValueBuffer.get(), oldInfo,
-                             newKeyBuffer.get(), newValueBuffer.get(), item.second, meta)) {
+                             newKeyBuffer.get(), newValueBuffer.get(), item.second, meta,
+                             currentPast, applyPendingOps)) {
             return false;
         }
     }

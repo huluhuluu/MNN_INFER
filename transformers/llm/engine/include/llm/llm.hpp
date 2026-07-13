@@ -169,6 +169,7 @@ public:
 protected:
     void initRuntime();
     void setRuntimeHint(std::shared_ptr<Express::Executor::RuntimeManager> &rtg);
+    void applyKVCacheRuntimeHint(std::shared_ptr<Express::Executor::RuntimeManager> &rtg, bool packedMode);
     std::shared_ptr<LlmContext> mContext;
     std::shared_ptr<KVMeta> mMeta;
     std::shared_ptr<BatchKVMeta> mBatchMeta;
@@ -193,6 +194,7 @@ protected:
     Express::VARP logitsAllIdx, logitsLastIdx;
     int mSeqLenIndex = 0;
 protected:
+    friend class Generation;
     friend class ArGeneration;
     friend class LookaheadGeneration;
     friend class MtpGeneration;

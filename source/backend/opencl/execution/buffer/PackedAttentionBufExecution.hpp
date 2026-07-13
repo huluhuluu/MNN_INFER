@@ -30,7 +30,6 @@ public:
 
 private:
     ErrorCode init();
-    int getLocalSize(int size, int maxGroupSize);
     void registerResetCallback();
     void registerReleaseCallback();
 
@@ -43,21 +42,18 @@ private:
     uint32_t mMaxWorkGroupSize;
 
     // Dimensions
-    int mBatch = 1;
-    int mTotalSeqLen = 0;
     int mNumHead = 0;
     int mKvNumHead = 0;
     int mHeadDim = 0;
     int mGroupSize = 1;
     float mScale = 1.0f;
-    int mBytes = 4;
     bool mHasMask = false;
     bool mIsAddMask = false;
 
     // Per-request packed metadata buffers:
     // meta0: [ioOffsetTokens, seqLen, pastLen, maxLen]
     // meta1: [qBaseElems, qkBaseElems, keyBaseElems, valueBaseElems]
-    // meta2: [maskInputOffsetElems, maskBaseElems, kvSeqLen, reserved]
+    // meta2: [maskInputOffsetElems, maskBaseElems, kvSeqLen, maskStride]
     std::shared_ptr<cl::Buffer> mReqMeta0;
     std::shared_ptr<cl::Buffer> mReqMeta1;
     std::shared_ptr<cl::Buffer> mReqMeta2;

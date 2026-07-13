@@ -129,6 +129,15 @@ bool Llm::set_config(const std::string& content) {
     return res;
 }
 
+void Llm::applyKVCacheRuntimeHint(std::shared_ptr<Express::Executor::RuntimeManager> &rtg, bool packedMode) {
+    rtg->setHint(MNN::Interpreter::PACKED_ATTENTION_MODE, packedMode);
+    if (packedMode) {
+        rtg->setHintPtr(Interpreter::KVCACHE_INFO, mBatchMeta.get());
+    } else {
+        rtg->setHintPtr(Interpreter::KVCACHE_INFO, mMeta.get());
+    }
+}
+
 void Llm::setRuntimeHint(std::shared_ptr<Express::Executor::RuntimeManager> &rtg) {
     rtg->setHint(MNN::Interpreter::INIT_THREAD_NUMBER, 4);
 
@@ -166,17 +175,7 @@ void Llm::setRuntimeHint(std::shared_ptr<Express::Executor::RuntimeManager> &rtg
     rtg->setHint(MNN::Interpreter::CPU_SME2_NEON_DIVISION_RATIO, mConfig->config_.value("cpu_sme2_neon_division_ratio", 41));
     rtg->setHint(MNN::Interpreter::CPU_SME_CORES, mConfig->config_.value("cpu_sme_core_num", 2));
 
-    // Set PackedAttention mode for continuous batching
-    bool packedMode = mConfig->packed_attention();
-    rtg->setHint(MNN::Interpreter::PACKED_ATTENTION_MODE, packedMode);
-    if(packedMode){
-        // Batch mode: use BatchKVMeta for CPUPackedAttention
-        rtg->setHintPtr(Interpreter::KVCACHE_INFO, mBatchMeta.get());
-    }
-    else{
-        // Single request mode: use KVMeta for CPUAttention
-        rtg->setHintPtr(Interpreter::KVCACHE_INFO, mMeta.get());
-    }
+    applyKVCacheRuntimeHint(rtg, mConfig->packed_attention());
 }
 
 void Llm::initRuntime() {
@@ -305,7 +304,7 @@ bool Llm::load() {
     if (mConfig->config_.document.HasMember("hidden_states")) {
         needHiddenState = mConfig->config_.document["hidden_states"].GetBool();
     }
-    if(mConfig->speculative_type() == "mtp") {
+    if(mConfig->speculative_type() == "mtp" || mConfig->speculative_type() == "eagle") {
         needHiddenState = true;
     }
     if (needHiddenState) {
@@ -452,6 +451,17 @@ void Llm::switchMode(Llm::Stage stage) {
 }
 
 void Llm::setKVCacheInfo(size_t add, size_t remove, int* reserve, int n_reserve) {
+    if (mConfig->packed_attention()) {
+        auto reqId = 0;
+        auto iter = mBatchMeta->mMetas.find(reqId);
+        auto previous = iter == mBatchMeta->mMetas.end() ? 0 : iter->second->previous;
+        if (remove > previous) {
+            remove = previous;
+        }
+        mBatchMeta->setKVCacheInfo(reqId, add, remove, reserve, n_reserve);
+        mBatchMeta->setKVMetaInfo(reqId, mConfig->layer_nums(), 0, 0, "", KVMeta::NoChange);
+        return;
+    }
     if (remove > mMeta->previous) {
         remove = mMeta->previous;
     }
@@ -474,7 +484,7 @@ std::vector<Express::VARP> Llm::forwardRaw(Express::VARP hiddenState, Express::V
     if (mValidBlockSize.empty()) {
         if(mModulePool.find(moduleKey) == mModulePool.end()) {
             MNN_PRINT("Warning: module need new clone, cloning now.\n");
-            mRuntimeManager->setHintPtr(Interpreter::KVCACHE_INFO, mMeta.get());
+            applyKVCacheRuntimeHint(mRuntimeManager, mConfig->packed_attention());
             mModulePool[moduleKey].reset(Module::clone(mModule.get()));
         }
         selectModule = mModulePool[moduleKey];
@@ -485,7 +495,17 @@ std::vector<Express::VARP> Llm::forwardRaw(Express::VARP hiddenState, Express::V
     } else {
         logitsIndex = logitsLastIdx;
     }
-    if (mMeta->add != seqLen) {
+    size_t kvAdd = mMeta->add;
+    if (mConfig->packed_attention()) {
+        kvAdd = 0;
+        for (int id : mBatchMeta->calId) {
+            auto iter = mBatchMeta->mMetas.find(id);
+            if (iter != mBatchMeta->mMetas.end() && iter->second != nullptr) {
+                kvAdd += iter->second->add;
+            }
+        }
+    }
+    if (kvAdd != seqLen) {
         // Has Pad, need all logits
         logitsIndex = logitsAllIdx;
     }
@@ -561,7 +581,11 @@ std::vector<Express::VARP> Llm::forwardRaw(Express::VARP hiddenState, Express::V
         }
     }
 #endif
-    mMeta->sync();
+    if (mConfig->packed_attention()) {
+        mBatchMeta->sync();
+    } else {
+        mMeta->sync();
+    }
     return outputs;
 }
 
@@ -589,7 +613,7 @@ std::vector<VARP> Llm::forwardVec(const std::vector<int>& input_ids) {
 std::vector<VARP> Llm::forwardVec(MNN::Express::VARP input_embeds) {
     int seq_len         = input_embeds->getInfo()->dim[mSeqLenIndex];
     if (0 == mBlockSize) {
-        mMeta->add = seq_len;
+        setKVCacheInfo(seq_len, 0);
         auto attention_mask = gen_attention_mask(seq_len);
         auto position_ids = gen_position_ids(seq_len);
         auto res = forwardRaw(input_embeds, attention_mask, position_ids);
@@ -620,7 +644,7 @@ std::vector<VARP> Llm::forwardVec(MNN::Express::VARP input_embeds) {
     int addSize = blockSize;
     for (int i=0; i<blockNumber; ++i) {
         logits.clear();
-        mMeta->add = blockSize;
+        setKVCacheInfo(blockSize, 0);
         auto embed = embeddings[i];
         auto attention_mask = gen_attention_mask(blockSize);
         auto position_ids = gen_position_ids(blockSize);
@@ -633,7 +657,7 @@ std::vector<VARP> Llm::forwardVec(MNN::Express::VARP input_embeds) {
     bool hasPad = false;
     if (blockRemain != 0) {
         logits.clear();
-        mMeta->add = blockRemain;
+        setKVCacheInfo(blockRemain, 0);
         addSize = blockRemain;
         int forwardSize = blockRemain;
         input_embeds = embeddings[embeddings.size()-1];
@@ -725,6 +749,9 @@ void Llm::generate_init(std::ostream* os, const char* end_with) {
         mContext->all_seq_len = 0;
         mContext->history_tokens.clear();
         mMeta->remove = mMeta->previous;
+        if (mConfig->packed_attention() && mBatchMeta) {
+            mBatchMeta->releaseKV(0);
+        }
     }
     mContext->output_tokens.clear();
 }
@@ -836,97 +863,15 @@ std::vector<int> Llm::generate(const std::vector<int>& input_ids, int max_tokens
 std::vector<std::vector<int>> Llm::generate(const std::vector<std::vector<int> >& input_ids, std::ostream* os, int max_new_tokens){
     int bs = input_ids.size();
     std::vector<std::vector<int>> ret(bs, std::vector<int>{});
-    
-    // Reset context for batch generation
-    mContext->prompt_len = 0;
-    mContext->gen_seq_len = 0;
-    mContext->all_seq_len = 0;
-    
-    // add all requests
-    std::vector<int> reqIds= mScheduler->addRequest(input_ids);
-    if(max_new_tokens > 0) {
-        mScheduler->setMaxNewTokens(max_new_tokens);
+
+    if (!mConfig->packed_attention()) {
+        for (int i = 0; i < bs; i++) {
+            generate_init(os, nullptr);
+            ret[i] = generate(input_ids[i], max_new_tokens);
+        }
+        return ret;
     }
-    // set batch kvcache, but actually works in Llm::setRuntimeHint
-    mRuntimeManager->setHintPtr(Interpreter::KVCACHE_INFO, mBatchMeta.get());
-
-    // generation loop
-    while (std::shared_ptr<BatchScheduler::Chunk> chunk = mScheduler->schedule(-1, 4)){// chunk prefill
-        // prepare inputs
-        Express::VARP hidden_states = this->embedding(chunk->inputs, chunk->calLen, chunk->culLen);
-        Express::VARP attention_mask = this->gen_attention_mask(chunk->calLen);
-        Express::VARP position_ids = this->gen_position_ids(chunk->pos, chunk->calLen, chunk->culLen);
-        Express::VARP logitsIndex = logitsAllIdx;
-        // set KVCache
-        for(int i = 0; i < chunk->pos.size() ; i++) {
-            int req_id = chunk->reqId[i];
-            mBatchMeta->setKVCacheInfo(chunk->reqId[i], chunk->calLen[i], 0, nullptr, 0);
-            mBatchMeta->setKVMetaInfo(req_id, mConfig->layer_nums(), 0, 0, "", KVMeta::NoChange);
-        }
-        auto moduleKey = std::make_pair(chunk->culLen, false);
-        std::shared_ptr<Module> selectModule = mModule;
-        if(mModulePool.find(moduleKey) == mModulePool.end()) {
-            mModulePool[moduleKey].reset(Module::clone(mModule.get()));
-        }
-        selectModule = mModulePool[moduleKey];
-
-        // get all logits 
-        // [1, seqLen, hidden]
-        std::vector<Express::VARP> res = selectModule->onForward({hidden_states, attention_mask, position_ids, logitsIndex});
-        Express::VARP logits = _Squeeze(res[0], {0});
-        
-        int sumLen = 0;
-        for (int i = 0; i < chunk->pos.size(); ++i) {
-            sumLen += chunk->calLen[i];
-            
-            // Use calLen > 1 to detect prefill (schedule already updated all_seq_len)
-            if(chunk->calLen[i] > 1) {
-                updateContext(chunk->calLen[i], 0);  // prefill: update all_seq_len
-                mContext->prompt_len += chunk->calLen[i];
-            }
-
-            auto state = mScheduler->state(chunk->reqId[i]);
-            // skip prefill - only sample when in decode phase
-            if (!BatchScheduler::judgeState(state, BatchScheduler::RequestState::DECODE)) {
-                continue;
-            }
-            
-            updateContext(1, 1);  // decode: update all_seq_len and gen_seq_len
-
-            // get logits for request i
-            Express::VARP logit = MNN::Express::_Gather(logits, _Scalar(sumLen - 1));
-            // sample
-            int token  = this->sample(logit);
-
-            int id = chunk->reqId[i];
-            mScheduler->update(id, token, chunk->calLen[i], is_stop(token));
-            // remove finished request
-            if(mScheduler->isFinished(id)) {
-                mScheduler->releaseKVCache(id);
-            }
-            // print token str
-            // std::cout<<"ReqId: "<<id<<" | token: "<<token<<" | "<<this->tokenizer_decode(token)<<std::endl;
-        }
-        mBatchMeta->sync();
-    }
-    for(int id: reqIds){
-        // save result
-        for(int j = 0; j < bs; j++) {
-            if(reqIds[j] == id) {
-                ret[j] = mScheduler->getResult(id);
-                break;
-            }
-        }
-        if(os!= nullptr){
-            // print res
-            *os<<"\n=============================\nReqId: "<<id<<"\n";
-            for(int token: mScheduler->getResult(id)){
-                *os<<mTokenizer->decode(token);
-            }
-        }
-        mScheduler->releaseReq(id);
-    }
-    return ret;
+    return mGenerationStrategy->generateBatch(input_ids, os, max_new_tokens);
 }
 
 std::string Llm::apply_chat_template(const std::string& user_content) const {
@@ -1338,7 +1283,33 @@ VARP Llm::gen_attention_mask(const std::vector<int>& calLen){
         return attentionMask;
     }
     else{
-        // TODO: int attention mask
+        int mask_size = 0;
+        for (int len : calLen) {
+            mask_size += len * len;
+        }
+        attentionMask = _Input({1, 1, 1, mask_size}, NCHW, halide_type_of<int>());
+        auto ptr = attentionMask->writeMap<int>();
+        int ind = 0;
+        for (int b = 0; b < bs; b++) {
+            int* batch_ptr = ptr + ind;
+            bool is_glm2 = mConfig->attention_mask() == "glm2";
+            for (int i = 0; i < calLen[b]; i++) {
+                for (int j = 0; j < calLen[b]; j++) {
+                    batch_ptr[i * calLen[b] + j] = is_glm2 ? j > i : j <= i;
+                }
+            }
+            if (mConfig->attention_mask() == "glm") {
+                for (int i = 0; i < calLen[b] * calLen[b]; i++) {
+                    batch_ptr[i] = 0;
+                }
+                if (calLen[b] > 1) {
+                    for (int i = 1; i < calLen[b]; i++) {
+                        batch_ptr[calLen[b] * i - 1] = 1;
+                    }
+                }
+            }
+            ind += calLen[b] * calLen[b];
+        }
         return attentionMask;
     }
     return attentionMask;

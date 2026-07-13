@@ -69,6 +69,10 @@ bool BatchScheduler::appendPrompt(int req_id, const std::vector<int>& new_prompt
 // schedule requests by chunk with FIFO policy
 // bs: batch size limit, -1 means no limit
 std::shared_ptr<BatchScheduler::Chunk> BatchScheduler::schedule(int blockSize, int bs) {
+    return schedule(blockSize, bs, {});
+}
+
+std::shared_ptr<BatchScheduler::Chunk> BatchScheduler::schedule(int blockSize, int bs, const std::set<int>& skipReqIds) {
     if (!hasValidWork()) return nullptr;
     if (blockSize <= 0) blockSize = mBlockSize;
 
@@ -78,6 +82,7 @@ std::shared_ptr<BatchScheduler::Chunk> BatchScheduler::schedule(int blockSize, i
     for (int i = 0; i < mRequests.size(); ++i) {
         auto& req = mRequests[i];
         if (req->finished || req->history_tokens.empty()) continue;
+        if (skipReqIds.find(req->id) != skipReqIds.end()) continue;
 
         // FIFO: check batch size limit
         if (bs > 0 && scheduledCount >= bs) break;
@@ -112,13 +117,20 @@ std::shared_ptr<BatchScheduler::Chunk> BatchScheduler::schedule(int blockSize, i
         req->all_seq_len += task->calLen.back();
         scheduledCount++;
     }
+    if (scheduledCount == 0) {
+        return nullptr;
+    }
     return task;
 }
 
 // update request status
 bool BatchScheduler::update(int req_id, int new_token, int cal_len, bool is_stop_token) {
+    return update(req_id, std::vector<int>{new_token}, cal_len, is_stop_token);
+}
+
+bool BatchScheduler::update(int req_id, const std::vector<int>& new_tokens, int cal_len, bool is_stop_token) {
     int ind = mReqIdToIndex.count(req_id) ? mReqIdToIndex.at(req_id) : -1;
-    if (ind < 0 || ind >= mRequests.size() || mRequests[ind]->finished) return false;
+    if (ind < 0 || ind >= mRequests.size() || mRequests[ind]->finished || new_tokens.empty()) return false;
     
     auto& req = mRequests[ind];
     
@@ -129,9 +141,13 @@ bool BatchScheduler::update(int req_id, int new_token, int cal_len, bool is_stop
     
     // decode phase: append new token
     if (judgeState(state(req_id), RequestState::DECODE)) {
-        req->history_tokens.push_back(new_token);
-        req->output_tokens.push_back(new_token);
-        req->gen_seq_len++;
+        int kv_advance = static_cast<int>(new_tokens.size()) - cal_len;
+        if (kv_advance > 0) {
+            req->all_seq_len += kv_advance;
+        }
+        req->history_tokens.insert(req->history_tokens.end(), new_tokens.begin(), new_tokens.end());
+        req->output_tokens.insert(req->output_tokens.end(), new_tokens.begin(), new_tokens.end());
+        req->gen_seq_len += new_tokens.size();
         
         if (is_stop_token || req->gen_seq_len >= mMaxNewTokens) {
             req->finished = true;
@@ -190,8 +206,11 @@ std::vector<int> BatchScheduler::getResult(int req_id) const {
     
 bool BatchScheduler::releaseReq(int req_id) {
     int ind = mReqIdToIndex.count(req_id) ? mReqIdToIndex.at(req_id) : -1;
-    if (ind < 0 || ind >= mRequests.size() || !mRequests[ind]->finished) return false;
-    this->releaseKVCache(req_id);
+    if (ind < 0 || ind >= mRequests.size()) return false;
+    if (!mRequests[ind]->finished && mActiveCount > 0) {
+        mActiveCount--;
+    }
+    mBatchKVMeta->releaseKV(req_id);
     
     // swap and del last request
     auto& req = mRequests[ind];

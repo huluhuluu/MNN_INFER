@@ -8,6 +8,8 @@
 #define SPEC_GENERATE_HPP
 
 #include <MNN/AutoTime.hpp>
+#include <map>
+#include <ostream>
 #include "llm/llm.hpp"
 #include "../llmconfig.hpp"
 #include "../kvmeta.hpp"
@@ -18,6 +20,7 @@ namespace MNN {
 namespace Transformer {
 struct GenerationParams {
     int max_new_tokens;
+    int reqId = 0;
     std::vector<int> input_ids;
     MNN::Express::VARP input_embeds;
     std::vector<MNN::Express::VARP> outputs;
@@ -36,6 +39,7 @@ public:
         // do nothing
     };
     virtual void generate(GenerationParams& param) = 0;
+    virtual std::vector<std::vector<int>> generateBatch(const std::vector<std::vector<int>>& inputIds, std::ostream* os, int maxNewTokens);
 protected:
     int draftVerify(MNN::Express::VARP logits, const std::vector<int>& drafts, bool& stop);
     std::shared_ptr<LlmContext> mContext;
@@ -46,14 +50,15 @@ class ArGeneration: public Generation {
 public:
     ArGeneration(Llm* llm, std::shared_ptr<LlmContext> context, std::shared_ptr<LlmConfig> config);
     virtual ~ArGeneration() = default;
-    virtual void generate(GenerationParams& param);
+    virtual void generate(GenerationParams& param) override;
+    virtual std::vector<std::vector<int>> generateBatch(const std::vector<std::vector<int>>& inputIds, std::ostream* os, int maxNewTokens) override;
 };
 
 class LookaheadGeneration: public Generation {
 public:
     LookaheadGeneration(Llm* llm, std::shared_ptr<LlmContext> context, std::shared_ptr<LlmConfig> config);
     virtual ~LookaheadGeneration() = default;
-    virtual void generate(GenerationParams& param);
+    virtual void generate(GenerationParams& param) override;
 private:
     int mNgramKeyMaxLen = 4;
     MatchStrictLevel mStrictLevel;
@@ -83,34 +88,68 @@ public:
     virtual ~EagleGeneration() = default;
     virtual void load(Module::Config module_config) override;
     virtual void generate(GenerationParams& param) override;
+    virtual std::vector<std::vector<int>> generateBatch(const std::vector<std::vector<int>>& inputIds, std::ostream* os, int maxNewTokens) override;
 private:
     struct DraftInfo {
+        int reqId = 0;
         std::vector<int> draftTokens;
         std::vector<std::vector<int>> retrieveIndices;
         VARP attentionMask;
         VARP positionIds;
     };
     struct AcceptInfo {
+        int reqId = 0;
         std::vector<int> sampleTokens;
         std::vector<int> acceptIndices;
         std::vector<int> acceptTokens;
     };
+    struct PendingBaseKV {
+        size_t remove = 0;
+        std::vector<int> reserveHost;
+    };
+    struct EagleState {
+        int pastLen = 0;
+        int remove = 0;
+    };
+    struct PackedDraftInput {
+        int reqId = 0;
+        EagleState* state = nullptr;
+        std::vector<int> inputIds;
+        MNN::Express::VARP hiddenStates;
+        MNN::Express::VARP inputEmbeds;
+    };
+    struct PackedDraftKVInfo {
+        int reqId = 0;
+        size_t add = 0;
+        size_t remove = 0;
+    };
     MNN::Express::VARPS eagleForwardRaw(const MNN::Express::VARPS& inputs);
     MNN::Express::VARPS eagleForward(const std::vector<int>& inputEmbeds, MNN::Express::VARP hiddenStates, bool allLogits = false);
     MNN::Express::VARPS eagleForward(MNN::Express::VARP inputEmbeds, MNN::Express::VARP hiddenStates, bool allLogits = false);
-    DraftInfo topkGenerate(const std::vector<int>& inputIds, MNN::Express::VARP hiddenStates, MNN::Express::VARP inputEmbeds = nullptr);
+    void loadPackedDraftModule();
+    MNN::Express::VARPS eagleForwardRawPacked(const std::vector<PackedDraftKVInfo>& kvInfos, const MNN::Express::VARPS& inputs);
+    MNN::Express::VARP eagleFCForward(const MNN::Express::VARPS& hiddenStates);
+    DraftInfo topkGenerate(const std::vector<int>& inputIds, MNN::Express::VARP hiddenStates, MNN::Express::VARP inputEmbeds = nullptr, int reqId = 0);
+    std::vector<DraftInfo> topkGeneratePacked(const std::vector<PackedDraftInput>& inputs);
     VARPS treeDecoding(const DraftInfo& draftInfo);
+    VARPS treeDecodingPacked(const DraftInfo& draftInfo);
     AcceptInfo evaluatePosterior(const DraftInfo& drafInfo, VARP logits);
     DraftInfo updateDraft(const AcceptInfo& accpetInfo, VARP hiddenStates);
+    void updatePackedBaseKV(const AcceptInfo& acceptInfo);
     MNN::Express::VARP getMask(std::vector<std::vector<bool>> mask, int seqLen);
+    MNN::Express::VARP getPackedMask(const std::vector<DraftInfo>& draftInfos);
     bool processTokens(const std::vector<int>& accpetTokens);
     void setPosition(int position);
-    std::string tokenStr(int token);
     std::vector<std::shared_ptr<MNN::Express::Module>> mEagleModules;
+    Module::Config mEagleModuleConfig;
     std::shared_ptr<KVMeta> mEagleMeta;
+    std::shared_ptr<BatchKVMeta> mEagleBatchMeta;
+    std::shared_ptr<MNN::Express::Module> mEaglePackedRootModule;
+    std::map<std::pair<int, int>, std::shared_ptr<MNN::Express::Module>> mEaglePackedModulePool;
     MNN::Express::VARP mD2t, mTreePosition;
     int mTopK, mDepth;
     int mEaglePastLen = 0, mEagleRemove = 0;
+    std::map<int, PendingBaseKV> mBasePendingKV;
 };
 
 

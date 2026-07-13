@@ -39,6 +39,93 @@ std::shared_ptr<Generation> GenerationStrategyFactory::create(Llm* llm, std::sha
 ArGeneration::ArGeneration(Llm* llm, std::shared_ptr<LlmContext> context, std::shared_ptr<LlmConfig> config) : Generation(llm, context) {
     // do nothing
 }
+
+std::vector<std::vector<int>> Generation::generateBatch(const std::vector<std::vector<int>>& inputIds, std::ostream* os, int maxNewTokens) {
+    ArGeneration ar(mLlm, mContext, mLlm->mConfig);
+    return ar.generateBatch(inputIds, os, maxNewTokens);
+}
+
+std::vector<std::vector<int>> ArGeneration::generateBatch(const std::vector<std::vector<int>>& inputIds, std::ostream* os, int maxNewTokens) {
+    int bs = inputIds.size();
+    std::vector<std::vector<int>> ret(bs, std::vector<int>{});
+
+    mContext->prompt_len = 0;
+    mContext->gen_seq_len = 0;
+    mContext->all_seq_len = 0;
+
+    std::vector<int> reqIds = mLlm->mScheduler->addRequest(inputIds);
+    mLlm->mScheduler->setMaxNewTokens(maxNewTokens > 0 ? maxNewTokens : mLlm->mConfig->max_new_tokens());
+    mLlm->applyKVCacheRuntimeHint(mLlm->mRuntimeManager, true);
+
+    while (std::shared_ptr<BatchScheduler::Chunk> chunk = mLlm->mScheduler->schedule(-1, 4)) {
+        Express::VARP hidden_states = mLlm->embedding(chunk->inputs, chunk->calLen, chunk->culLen);
+        Express::VARP attention_mask = mLlm->gen_attention_mask(chunk->calLen);
+        Express::VARP position_ids = mLlm->gen_position_ids(chunk->pos, chunk->calLen, chunk->culLen);
+        Express::VARP logitsIndex = mLlm->logitsAllIdx;
+        for(int i = 0; i < chunk->pos.size() ; i++) {
+            int req_id = chunk->reqId[i];
+            mLlm->mBatchMeta->setKVCacheInfo(req_id, chunk->calLen[i], 0, nullptr, 0);
+            mLlm->mBatchMeta->setKVMetaInfo(req_id, mLlm->mConfig->layer_nums(), 0, 0, "", KVMeta::NoChange);
+        }
+        auto moduleKey = std::make_pair(chunk->culLen, false);
+        std::shared_ptr<Module> selectModule = mLlm->mModule;
+        if(mLlm->mModulePool.find(moduleKey) == mLlm->mModulePool.end()) {
+            mLlm->mModulePool[moduleKey].reset(Module::clone(mLlm->mModule.get()));
+        }
+        selectModule = mLlm->mModulePool[moduleKey];
+
+        std::vector<Express::VARP> res = selectModule->onForward({hidden_states, attention_mask, position_ids, logitsIndex});
+        if (res.empty()) {
+            mContext->status = LlmStatus::INTERNAL_ERROR;
+            break;
+        }
+        Express::VARP logits = _Squeeze(res[0], {0});
+
+        int sumLen = 0;
+        for (int i = 0; i < chunk->pos.size(); ++i) {
+            sumLen += chunk->calLen[i];
+
+            if(chunk->calLen[i] > 1) {
+                mLlm->updateContext(chunk->calLen[i], 0);
+                mContext->prompt_len += chunk->calLen[i];
+            }
+
+            auto state = mLlm->mScheduler->state(chunk->reqId[i]);
+            if (!BatchScheduler::judgeState(state, BatchScheduler::RequestState::DECODE)) {
+                continue;
+            }
+
+            mLlm->updateContext(1, 1);
+            Express::VARP logit = MNN::Express::_Gather(logits, _Scalar(sumLen - 1));
+            int token  = mLlm->sample(logit);
+
+            int id = chunk->reqId[i];
+            mLlm->mScheduler->update(id, token, chunk->calLen[i], mLlm->is_stop(token));
+            if(mLlm->mScheduler->isFinished(id)) {
+                mLlm->mScheduler->releaseKVCache(id);
+            }
+        }
+        mLlm->mBatchMeta->sync();
+    }
+    for(int id: reqIds){
+        const auto result = mLlm->mScheduler->getResult(id);
+        for(int j = 0; j < bs; j++) {
+            if(reqIds[j] == id) {
+                ret[j] = result;
+                break;
+            }
+        }
+        if(os!= nullptr){
+            *os<<"\n=============================\nReqId: "<<id<<"\n";
+            for(int token: result){
+                *os<<mLlm->tokenizer_decode(token);
+            }
+        }
+        mLlm->mScheduler->releaseReq(id);
+    }
+    return ret;
+}
+
 void ArGeneration::generate(GenerationParams& param) {
     int max_token = param.max_new_tokens;
     int len = 0;
