@@ -80,19 +80,10 @@ public:
         GraphRequest();
     };
 
-    struct EvictPlan {
-        std::string graphId;
-        std::string reason;
-        uint64_t sequence;
-
-        EvictPlan();
-    };
-
     struct GraphRecord {
         std::string graphId;
         bool resident;
         bool pinned;
-        bool inUse;
         bool pendingRelease;
         int activeUseCount;
         uint64_t lastUseSequence;
@@ -101,42 +92,20 @@ public:
     };
 
     struct Snapshot {
-        bool running;
-        bool stopRequested;
-        size_t queuedTasks;
         size_t residentGraphs;
-        size_t maxResidentGraphs;
-        uint64_t scheduledTasks;
-        uint64_t completedExecutions;
-        uint64_t evictionBlockedCount;
         std::vector<GraphRecord> graphs;
-        std::vector<EvictPlan> evictPlans;
 
         Snapshot();
     };
 
-    struct Status {
-        bool running;
-        size_t queuedTasks;
-        size_t residentGraphs;
-        size_t maxResidentGraphs;
-        uint64_t scheduledTasks;
-        uint64_t completedExecutions;
-        uint64_t evictionBlockedCount;
-
-        Status();
-    };
-
     struct Callbacks {
         std::function<void(const PrefetchResizeRequest&)> onPrefetchResize;
-        std::function<void(const GraphRequest&)> onGraphLoad;
+        std::function<bool(const GraphRequest&)> onGraphLoad;
         std::function<void(const GraphRequest&)> onGraphRelease;
-        std::function<void(const EvictPlan&)> onEvictPlan;
     };
 
     struct Config {
         size_t maxResidentGraphs;
-        size_t maxEvictPlanHistory;
         Callbacks callbacks;
 
         Config();
@@ -151,10 +120,10 @@ public:
 
     bool enqueueRequestGraph(const GraphRequest& request);
     bool enqueuePrefetchWindow(const PrefetchWindow& window);
+    bool waitForGraphsReady(const std::vector<std::string>& graphIds);
     void markExecutionComplete(const std::string& graphId);
 
     Snapshot snapshot() const;
-    Status status() const;
 
 private:
     struct Task {
@@ -162,7 +131,6 @@ private:
         PrefetchWindow prefetchWindow;
         GraphRequest graphRequest;
         std::string graphId;
-        uint64_t sequence;
 
         Task();
     };
@@ -171,6 +139,7 @@ private:
         GraphRecord record;
         GraphRequest lastRequest;
         GraphRequest pendingReleaseRequest;
+        bool loadFinished;
 
         GraphState();
     };
@@ -181,11 +150,9 @@ private:
     void _processGraphRequest(const GraphRequest& request);
     void _processGraphComplete(const std::string& graphId);
     void _planEvictionsLocked(const std::string& incomingGraphId,
-                              std::vector<EvictPlan>* plans,
                               std::vector<GraphRequest>* releaseRequests);
     GraphRequest _mergeReleaseRequestLocked(const GraphState& state, const GraphRequest& request) const;
     size_t _residentGraphCountLocked() const;
-    void _rememberEvictPlanLocked(const EvictPlan& plan);
     Snapshot _snapshotLocked() const;
 
     mutable std::mutex mMutex;
@@ -194,12 +161,7 @@ private:
     std::thread mWorker;
     Config mConfig;
     std::map<std::string, GraphState> mGraphs;
-    std::vector<EvictPlan> mEvictPlans;
     uint64_t mNextSequence;
-    uint64_t mScheduledTasks;
-    uint64_t mCompletedExecutions;
-    uint64_t mEvictionBlockedCount;
-    bool mConfigured;
     bool mRunning;
     bool mStopRequested;
 };

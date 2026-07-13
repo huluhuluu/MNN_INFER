@@ -28,6 +28,7 @@ struct QnnGraphInfo {
     uint64_t offset;
     uint64_t size;
     std::vector<std::string> allGraphName;
+    std::vector<int> bucketSizes;
     std::string targetGraphName;
     int shapeIndex;
     bool pin;
@@ -58,17 +59,10 @@ struct GraphSnapshot {
     std::vector<OpInfo> ops;
 };
 
-struct WindowRequest {
-    int requestId;
-    int start;
-    int maxK;
-
-    WindowRequest();
-};
-
 bool isCpuOp(const OpInfo& op);
 bool isOpenCLOp(const OpInfo& op);
 bool isQnnPluginOp(const OpInfo& op);
+int selectQnnBucketSize(const QnnGraphInfo& qnn, int requestGroupSize);
 
 GraphSnapshot buildGraphSnapshot(const MNN::Session* session,
                                  int pipelineIndex,
@@ -82,7 +76,8 @@ DualPipelineScheduler::PrefetchWindow buildPrefetchWindow(const GraphSnapshot& s
 std::vector<DualPipelineScheduler::GraphRequest> buildQnnGraphRequests(const GraphSnapshot& snapshot,
                                                                        int start,
                                                                        int maxK,
-                                                                       int reqId);
+                                                                       int reqId,
+                                                                       int requestGroupSize = 1);
 
 } // namespace Transformer
 } // namespace MNN

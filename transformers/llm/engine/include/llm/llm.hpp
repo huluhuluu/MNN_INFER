@@ -15,6 +15,7 @@
 #include <sstream>
 #include <iostream>
 #include <streambuf>
+#include <array>
 #include <functional>
 #include <condition_variable>
 #include <mutex>
@@ -173,7 +174,7 @@ public:
     std::vector<std::vector<int>> generate(const std::vector<std::vector<int> >& input_ids, std::ostream* os= &std::cout, int max_new_tokens = -1);
 protected:
     void initRuntime();
-    void setRuntimeHint(std::shared_ptr<Express::Executor::RuntimeManager> &rtg);
+    void setRuntimeHint(const std::shared_ptr<Express::Executor::RuntimeManager>& rtg, BatchKVMeta* batchMeta = nullptr, KVMeta* meta = nullptr);
     std::shared_ptr<LlmContext> mContext;
     std::shared_ptr<KVMeta> mMeta;
     std::shared_ptr<BatchKVMeta> mBatchMeta;
@@ -213,13 +214,24 @@ private:
     void stopDualPipelineRequestThread();
     void dualPipelineRequestLoop();
     void runOnDualPipelineRequestThread(const std::function<void()>& work);
-    std::shared_ptr<BatchScheduler::Chunk> scheduleBatchChunk(int blockSize, int bs);
+    std::vector<std::shared_ptr<BatchScheduler::Chunk>> scheduleBatchWave(int blockSize, int bs);
     void resetDualPipelineGraphState();
     bool refreshDualPipelineGraphSnapshot();
+    int dualPipelinePaddedCulLen(const BatchScheduler::Chunk& chunk);
     void enqueueDualPipelineChunkGraphs(const BatchScheduler::Chunk& chunk, std::vector<std::string>* graphIds);
     void completeDualPipelineChunkGraphs(const std::vector<std::string>& graphIds);
     void releaseDualPipelineRequestGraphs(int requestId);
+    void releaseDualPipelineRequestExecution(int requestId);
+    void resetDualPipelineExecutionState();
+    bool prepareDualPipelineExecutionState();
+    std::shared_ptr<Express::Module> getDualPipelineModule(int pipelineId, const std::pair<int, bool>& moduleKey);
 private:
+    struct DualPipelineRuntime {
+        std::shared_ptr<Express::Executor> executor;
+        std::shared_ptr<Express::Executor::RuntimeManager> runtimeManager;
+        std::shared_ptr<BatchKVMeta> batchMeta;
+        std::map<std::pair<int, bool>, std::shared_ptr<Express::Module>> modulePool;
+    };
     bool mInSpec = false;
     int mDraftLength = 4;
     std::shared_ptr<GenerationParams> mGenerateParam;
@@ -239,9 +251,15 @@ private:
     bool mDualPipelineRequestStop = false;
     bool mDualPipelineRequestHasWork = false;
     bool mDualPipelineRequestDone = false;
+    std::array<DualPipelineRuntime, 2> mDualPipelineRuntimes;
+    bool mDualPipelineExecutionReady = false;
+    std::vector<std::string> mDualPipelineInputNames;
+    std::vector<std::string> mDualPipelineOutputNames;
+    Express::Module::Config mDualPipelineModuleConfig;
+    std::string mDualPipelineModelPath;
     GraphSnapshot mDualPipelineGraphSnapshot;
     bool mDualPipelineGraphSnapshotReady = false;
-    int mDualPipelinePrefetchOpCursor = 0;
+    std::unordered_map<int, int> mDualPipelineRequestOpCursor;
     std::unordered_map<int, std::vector<std::string>> mDualPipelineRequestGraphs;
 };
 

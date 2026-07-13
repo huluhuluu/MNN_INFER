@@ -8,9 +8,11 @@
 #include "../../transformers/llm/engine/include/llm/DualPipelineScheduler.hpp"
 
 #include <chrono>
+#include <atomic>
 #include <condition_variable>
 #include <mutex>
 #include <string>
+#include <thread>
 #include <vector>
 
 using namespace MNN::Transformer;
@@ -35,19 +37,10 @@ struct GraphRecorder {
         DualPipelineScheduler::Callbacks cb;
         cb.onGraphLoad = [this](const DualPipelineScheduler::GraphRequest& request) {
             recordGraph("load", request);
+            return true;
         };
         cb.onGraphRelease = [this](const DualPipelineScheduler::GraphRequest& request) {
             recordGraph("release", request);
-        };
-        cb.onEvictPlan = [this](const DualPipelineScheduler::EvictPlan& plan) {
-            GraphEvent event;
-            event.type = "evict";
-            event.graphId = plan.graphId;
-            event.reason = plan.reason;
-            event.offset = 0;
-            event.size = 0;
-            event.shapeIndex = -1;
-            record(event);
         };
         return cb;
     }
@@ -201,6 +194,82 @@ public:
     }
 };
 
+class DualPipelineSchedulerGraphLoadFailureTest : public MNNTestCase {
+public:
+    virtual bool run(int precision) {
+        DualPipelineScheduler scheduler;
+        bool releaseCalled = false;
+        DualPipelineScheduler::Config config;
+        config.callbacks.onGraphLoad = [](const DualPipelineScheduler::GraphRequest&) {
+            return false;
+        };
+        config.callbacks.onGraphRelease = [&releaseCalled](const DualPipelineScheduler::GraphRequest&) {
+            releaseCalled = true;
+        };
+        MNNTEST_ASSERT(scheduler.configure(config));
+        MNNTEST_ASSERT(scheduler.start());
+
+        MNNTEST_ASSERT(scheduler.enqueueRequestGraph(makeLoadRequest("missing_graph", 9)));
+        MNNTEST_ASSERT(!scheduler.waitForGraphsReady(std::vector<std::string>({"missing_graph"})));
+        MNNTEST_ASSERT(scheduler.enqueueRequestGraph(makeReleaseRequest("missing_graph", "after_failed_load")));
+        scheduler.stop();
+
+        const DualPipelineScheduler::Snapshot snapshot = scheduler.snapshot();
+        MNNTEST_ASSERT(snapshot.residentGraphs == 0);
+        MNNTEST_ASSERT(snapshot.graphs.size() == 1);
+        MNNTEST_ASSERT(snapshot.graphs[0].graphId == "missing_graph");
+        MNNTEST_ASSERT(!snapshot.graphs[0].resident);
+        MNNTEST_ASSERT(snapshot.graphs[0].activeUseCount == 0);
+        MNNTEST_ASSERT(!releaseCalled);
+        return true;
+    }
+};
+
+class DualPipelineSchedulerWaitForGraphReadyTest : public MNNTestCase {
+public:
+    virtual bool run(int precision) {
+        DualPipelineScheduler scheduler;
+        std::mutex gateMutex;
+        std::condition_variable gateCondition;
+        bool loadEntered = false;
+        bool allowLoad = false;
+        DualPipelineScheduler::Config config;
+        config.callbacks.onGraphLoad = [&](const DualPipelineScheduler::GraphRequest&) {
+            std::unique_lock<std::mutex> lock(gateMutex);
+            loadEntered = true;
+            gateCondition.notify_all();
+            gateCondition.wait(lock, [&]() { return allowLoad; });
+            return true;
+        };
+        MNNTEST_ASSERT(scheduler.configure(config));
+        MNNTEST_ASSERT(scheduler.start());
+        MNNTEST_ASSERT(scheduler.enqueueRequestGraph(makeLoadRequest("ready_graph", 10)));
+        {
+            std::unique_lock<std::mutex> lock(gateMutex);
+            MNNTEST_ASSERT(gateCondition.wait_for(lock, std::chrono::seconds(1), [&]() { return loadEntered; }));
+        }
+
+        std::atomic<bool> waitFinished(false);
+        bool ready = false;
+        std::thread waiter([&]() {
+            ready = scheduler.waitForGraphsReady(std::vector<std::string>({"ready_graph"}));
+            waitFinished.store(true);
+        });
+        std::this_thread::sleep_for(std::chrono::milliseconds(20));
+        const bool finishedEarly = waitFinished.load();
+        {
+            std::lock_guard<std::mutex> lock(gateMutex);
+            allowLoad = true;
+        }
+        gateCondition.notify_all();
+        waiter.join();
+        scheduler.stop();
+        MNNTEST_ASSERT(!finishedEarly);
+        MNNTEST_ASSERT(ready);
+        return true;
+    }
+};
+
 class DualPipelineSchedulerSharedGraphUseCountTest : public MNNTestCase {
 public:
     virtual bool run(int precision) {
@@ -304,31 +373,30 @@ public:
         scheduler.markExecutionComplete("lru_b");
 
         MNNTEST_ASSERT(scheduler.enqueueRequestGraph(makeLoadRequest("lru_c", 3)));
-        MNNTEST_ASSERT(recorder.waitForCount(5));
+        MNNTEST_ASSERT(recorder.waitForCount(4));
         scheduler.markExecutionComplete("lru_c");
         MNNTEST_ASSERT(scheduler.enqueueRequestGraph(makeLoadRequest("lru_d", 4)));
-        MNNTEST_ASSERT(recorder.waitForCount(8));
+        MNNTEST_ASSERT(recorder.waitForCount(6));
 
         scheduler.stop();
         const std::vector<GraphEvent> events = recorder.snapshot();
-        MNNTEST_ASSERT(events.size() == 8);
+        MNNTEST_ASSERT(events.size() == 6);
         MNNTEST_ASSERT(events[0].type == "load" && events[0].graphId == "lru_a");
         MNNTEST_ASSERT(events[1].type == "load" && events[1].graphId == "lru_b");
-        MNNTEST_ASSERT(events[2].type == "evict" && events[2].graphId == "lru_a");
-        MNNTEST_ASSERT(events[3].type == "release" && events[3].graphId == "lru_a");
-        MNNTEST_ASSERT(events[4].type == "load" && events[4].graphId == "lru_c");
-        MNNTEST_ASSERT(events[5].type == "evict" && events[5].graphId == "lru_b");
-        MNNTEST_ASSERT(events[6].type == "release" && events[6].graphId == "lru_b");
-        MNNTEST_ASSERT(events[7].type == "load" && events[7].graphId == "lru_d");
+        MNNTEST_ASSERT(events[2].type == "release" && events[2].graphId == "lru_a");
+        MNNTEST_ASSERT(events[3].type == "load" && events[3].graphId == "lru_c");
+        MNNTEST_ASSERT(events[4].type == "release" && events[4].graphId == "lru_b");
+        MNNTEST_ASSERT(events[5].type == "load" && events[5].graphId == "lru_d");
         MNNTEST_ASSERT(events[2].reason == "maxResidentGraphs");
-        MNNTEST_ASSERT(events[3].reason == "maxResidentGraphs");
-        MNNTEST_ASSERT(events[6].relativePath == "graphs/lru_b.serialized");
+        MNNTEST_ASSERT(events[4].relativePath == "graphs/lru_b.serialized");
         return true;
     }
 };
 
 MNNTestSuiteRegister(DualPipelineSchedulerGraphLoadCompleteReleaseTest, "llm/dual_pipeline_scheduler_load_complete_release");
 MNNTestSuiteRegister(DualPipelineSchedulerQueuedCompleteAfterLoadTest, "llm/dual_pipeline_scheduler_queued_complete_after_load");
+MNNTestSuiteRegister(DualPipelineSchedulerGraphLoadFailureTest, "llm/dual_pipeline_scheduler_graph_load_failure");
+MNNTestSuiteRegister(DualPipelineSchedulerWaitForGraphReadyTest, "llm/dual_pipeline_scheduler_wait_for_graph_ready");
 MNNTestSuiteRegister(DualPipelineSchedulerSharedGraphUseCountTest, "llm/dual_pipeline_scheduler_shared_graph_use_count");
 MNNTestSuiteRegister(DualPipelineSchedulerPinnedGraphDefaultReleaseTest, "llm/dual_pipeline_scheduler_pinned_default_release");
 MNNTestSuiteRegister(DualPipelineSchedulerPinnedGraphForcedReleaseTest, "llm/dual_pipeline_scheduler_pinned_forced_release");

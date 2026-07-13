@@ -63,6 +63,8 @@ public:
         std::vector<int> reqId;         // global request id
         std::vector<int> state;         // request state when this chunk was scheduled
         int culLen = 0;                 // cumulative length of the chunk
+        int pipelineId = 0;             // dual-pipeline logical pipeline id
+        int segmentIndex = 0;           // token segment index inside a dual-pipeline wave
     };
 
     BatchScheduler() = default;
@@ -79,6 +81,7 @@ public:
     // blockSize: chunk size for prefill, -1 means use default
     // bs: batch size limit for number of requests per schedule, -1 means no limit (FIFO)
     std::shared_ptr<Chunk> schedule(int blockSize = -1, int bs = -1);
+    std::vector<std::shared_ptr<Chunk>> scheduleWave(int blockSize = -1, int bs = -1);
     void setDualPipelineMode(bool enable, int splitCount = 2);
 
     // update generated token
@@ -104,6 +107,7 @@ private:
     std::shared_ptr<LlmConfig> mConfig;
     std::shared_ptr<BatchKVMeta> mBatchKVMeta;
     std::deque<std::shared_ptr<Chunk>> mPendingChunks;
+    std::map<int, int> mReqIdToPipeline;
     int mBlockSize = 0;
     int mMaxNewTokens = 0;
     int mActiveCount = 0;

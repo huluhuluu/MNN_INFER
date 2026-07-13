@@ -29,6 +29,7 @@ void BatchScheduler::setDualPipelineMode(bool enable, int splitCount) {
     mDualPipelineSplitCount = splitCount > 1 ? splitCount : 2;
     if (!enable) {
         mPendingChunks.clear();
+        mReqIdToPipeline.clear();
     }
 }
 
@@ -85,14 +86,15 @@ std::shared_ptr<BatchScheduler::Chunk> BatchScheduler::schedule(int blockSize, i
 
     // generate inputs with FIFO scheduling
     auto task = std::make_shared<Chunk>();
-    std::vector<std::shared_ptr<Chunk>> splitChunks;
-    if (mDualPipelineMode) {
-        splitChunks.resize(mDualPipelineSplitCount);
-        splitChunks[0] = task;
-        for (int i = 1; i < mDualPipelineSplitCount; ++i) {
-            splitChunks[i].reset(new Chunk);
-        }
-    }
+    struct ScheduledItem {
+        std::shared_ptr<Request> req;
+        std::vector<int> input;
+        int calLen = 0;
+        int pos = 0;
+        int state = 0;
+        bool shouldSplit = false;
+    };
+    std::vector<ScheduledItem> scheduledItems;
     int scheduledCount = 0;
     for (int i = 0; i < mRequests.size(); ++i) {
         auto& req = mRequests[i];
@@ -122,34 +124,111 @@ std::shared_ptr<BatchScheduler::Chunk> BatchScheduler::schedule(int blockSize, i
             chunk.push_back(req->history_tokens.back());
         }
 
-        if (mDualPipelineMode && BatchScheduler::judgeState(reqState, RequestState::PREFILL) && calLen > 1) {
-            // Dual-pipeline test mode splits one logical prefill into ordered sub-chunks.
-            // Each sub-chunk is committed only when it is returned from schedule().
-            int consumed = 0;
-            int remaining = calLen;
-            for (int split = 0; split < mDualPipelineSplitCount && remaining > 0; ++split) {
-                int splitLen = remaining;
-                int partsLeft = mDualPipelineSplitCount - split;
-                if (partsLeft > 1) {
-                    splitLen = (remaining + partsLeft - 1) / partsLeft;
-                }
-                std::vector<int> splitInput(chunk.begin() + consumed, chunk.begin() + consumed + splitLen);
-                _appendToChunk(splitChunks[split], req, splitInput, splitLen, pos + consumed, reqState);
-                consumed += splitLen;
-                remaining -= splitLen;
-            }
-        } else {
-            _appendToChunk(task, req, chunk, calLen, pos, reqState);
-        }
+        ScheduledItem item;
+        item.req = req;
+        item.input = chunk;
+        item.calLen = calLen;
+        item.pos = pos;
+        item.state = reqState;
+        item.shouldSplit = BatchScheduler::judgeState(reqState, RequestState::PREFILL) && calLen > 1;
+        scheduledItems.push_back(item);
         scheduledCount++;
     }
-    for (int i = 1; i < splitChunks.size(); ++i) {
-        if (splitChunks[i]->culLen > 0) {
-            mPendingChunks.push_back(splitChunks[i]);
+    if (mDualPipelineMode && !scheduledItems.empty()) {
+        bool hasSplitRequest = false;
+        for (const auto& item : scheduledItems) {
+            hasSplitRequest = hasSplitRequest || item.shouldSplit;
         }
+        const int pipelineCount = 2;
+        std::vector<std::vector<int>> pipelineItems(pipelineCount);
+        std::vector<int> unassignedItems;
+        for (int i = 0; i < scheduledItems.size(); ++i) {
+            const int reqId = scheduledItems[i].req->id;
+            std::map<int, int>::const_iterator iter = mReqIdToPipeline.find(reqId);
+            if (iter != mReqIdToPipeline.end() && iter->second >= 0 && iter->second < pipelineCount) {
+                pipelineItems[iter->second].push_back(i);
+            } else {
+                unassignedItems.push_back(i);
+            }
+        }
+        int requestBegin = 0;
+        for (int pipeline = 0; pipeline < pipelineCount; ++pipeline) {
+            int requestsLeft = static_cast<int>(unassignedItems.size()) - requestBegin;
+            int pipelinesLeft = pipelineCount - pipeline;
+            int requestCount = requestsLeft > 0 ? (requestsLeft + pipelinesLeft - 1) / pipelinesLeft : 0;
+            for (int i = requestBegin; i < requestBegin + requestCount; ++i) {
+                const int itemIndex = unassignedItems[i];
+                mReqIdToPipeline[scheduledItems[itemIndex].req->id] = pipeline;
+                pipelineItems[pipeline].push_back(itemIndex);
+            }
+            requestBegin += requestCount;
+        }
+
+        const int segmentCount = hasSplitRequest ? mDualPipelineSplitCount : 1;
+        std::vector<std::shared_ptr<Chunk>> orderedChunks;
+        for (int segment = 0; segment < segmentCount; ++segment) {
+            for (int pipeline = 0; pipeline < pipelineCount; ++pipeline) {
+                auto chunk = std::make_shared<Chunk>();
+                chunk->pipelineId = pipeline;
+                chunk->segmentIndex = segment;
+                for (int itemIndex : pipelineItems[pipeline]) {
+                    const auto& item = scheduledItems[itemIndex];
+                    if (!item.shouldSplit && segment > 0) {
+                        continue;
+                    }
+                    int splitBegin = 0;
+                    int splitLen = item.calLen;
+                    if (item.shouldSplit) {
+                        splitBegin = item.calLen * segment / mDualPipelineSplitCount;
+                        int splitEnd = item.calLen * (segment + 1) / mDualPipelineSplitCount;
+                        splitLen = splitEnd - splitBegin;
+                    }
+                    if (splitLen <= 0) {
+                        continue;
+                    }
+                    std::vector<int> splitInput(item.input.begin() + splitBegin, item.input.begin() + splitBegin + splitLen);
+                    _appendToChunk(chunk, item.req, splitInput, splitLen, item.pos + splitBegin, item.state);
+                }
+                if (chunk->culLen > 0) {
+                    orderedChunks.push_back(chunk);
+                }
+            }
+        }
+        if (!orderedChunks.empty()) {
+            task = orderedChunks.front();
+            for (int i = 1; i < orderedChunks.size(); ++i) {
+                mPendingChunks.push_back(orderedChunks[i]);
+            }
+            _commitChunk(task);
+            return task;
+        }
+    }
+    for (const auto& item : scheduledItems) {
+        _appendToChunk(task, item.req, item.input, item.calLen, item.pos, item.state);
     }
     _commitChunk(task);
     return task;
+}
+
+std::vector<std::shared_ptr<BatchScheduler::Chunk>> BatchScheduler::scheduleWave(int blockSize, int bs) {
+    std::vector<std::shared_ptr<Chunk>> wave;
+    auto first = schedule(blockSize, bs);
+    if (!first) {
+        return wave;
+    }
+    wave.push_back(first);
+    if (!mDualPipelineMode) {
+        return wave;
+    }
+    const int segmentIndex = first->segmentIndex;
+    while (!mPendingChunks.empty()) {
+        const auto& next = mPendingChunks.front();
+        if (!next || next->segmentIndex != segmentIndex) {
+            break;
+        }
+        wave.push_back(_popPendingChunk());
+    }
+    return wave;
 }
 
 // update request status
@@ -238,6 +317,7 @@ bool BatchScheduler::releaseReq(int req_id) {
     }
     mRequests.pop_back();
     mReqIdToIndex.erase(req_id);
+    mReqIdToPipeline.erase(req_id);
     return true;
 }
 

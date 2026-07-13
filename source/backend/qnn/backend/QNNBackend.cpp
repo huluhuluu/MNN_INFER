@@ -7,11 +7,14 @@
 //
 
 #include "QNNBackend.hpp"
+#include <MNN/QNNPrefetch.hpp>
 #include "core/MNNFileUtils.h"
 #include "QnnTypeMacros.hpp"
 // #define MNN_OPEN_TIME_TRACE
 #include <MNN/AutoTime.hpp>
 #include "core/FileLoader.hpp"
+
+#include <algorithm>
 
 // #define QNN_PROFILE_OP
 // #define QNN_PROFILE_SUMMARIZE
@@ -39,8 +42,20 @@ static std::mutex gQnnContextMutex;
 
 static void createQnnContext(){
     std::lock_guard<std::mutex> lck(gQnnContextMutex);
+    if (QNN::gContext.deviceHandle != nullptr) {
+        return;
+    }
     QNN_INTERFACE_VER_TYPE qnnInterface{};
 #ifndef ENABLE_QNN_CONVERT_MODE
+    if (QNN::QnnInterface_getProviders == nullptr
+#ifdef MNN_WITH_PLUGIN
+        || QNN::QnnSystemInterface_getProviders == nullptr
+#endif
+        ) {
+        if (!QNN::loadQNNSymbol()) {
+            return;
+        }
+    }
     {
         QnnInterface_t** interfaceProviders = nullptr;
         uint32_t numProviders = 0;
@@ -741,6 +756,7 @@ public:
 
 class RawExecutorWrapper {
 private:
+    std::mutex mInvokeMutex;
     Qnn_ContextHandle_t mQnnContextHandle = nullptr;
     const QnnContext_Config_t** mQnnContextConfig = nullptr;
     std::vector<Qnn_GraphHandle_t> mQnnGraphHandleVec = {};
@@ -749,7 +765,6 @@ private:
     Qnn_ProfileHandle_t mQnnProfileHandle = nullptr;
     GraphInfo **mGraphsInfo = nullptr;
     uint32_t mGraphCount = 0;
-    std::string mPath;
     std::unique_ptr<QNN::QNNPerf> mPerf;
 
 public:
@@ -770,7 +785,6 @@ public:
     }
 
     bool compileModel(const std::string& path, size_t offset, size_t size, const std::vector<std::string>& allGraphName) {
-        mPath = path;
         void* buffer = nullptr;
         std::vector<char> bufferVec(size, 0);
         MMapReader reader;
@@ -841,11 +855,11 @@ public:
         return true;
     }
 
-    void invokModel(const std::vector<std::pair<const MNN::Tensor *, std::string>>& inputs, std::vector<std::pair<const MNN::Tensor *, std::string>>& outputs, int shapeIndex) {
+    bool invokModel(const std::vector<std::pair<const MNN::Tensor *, std::string>>& inputs, std::vector<std::pair<const MNN::Tensor *, std::string>>& outputs, int shapeIndex) {
+        std::lock_guard<std::mutex> lock(mInvokeMutex);
         GraphInfo* graph = mGraphsInfo[shapeIndex];
         Qnn_GraphHandle_t qnnGraphHandle = mQnnGraphHandleVec[shapeIndex];
 
-        // MNN_PRINT("%s, Input:%d, output:%d\n", mPath.c_str(), inputs.size(), outputs.size());
         for (int i=0; i<inputs.size(); ++i) {
             auto t = inputs[i].first;
             bool find = false;
@@ -884,20 +898,164 @@ public:
                 FUNC_PRINT(i);
             }
         }
-        CALL_QNN(QNN::gContext.interface.graphExecute(qnnGraphHandle, graph->inputTensors, graph->numInputTensors, \
-            graph->outputTensors, graph->numOutputTensors, mQnnProfileHandle, nullptr));
+        const int errorCode = (QNN::gContext.interface.graphExecute(qnnGraphHandle, graph->inputTensors, graph->numInputTensors,
+            graph->outputTensors, graph->numOutputTensors, mQnnProfileHandle, nullptr) & 0xFFFF);
+        if (errorCode != QNN_SUCCESS) {
+            MNN_ERROR("MNN_QNN: graphExecute failed for shape index %d, error code %d.\n", shapeIndex, errorCode);
+            return false;
+        }
         MNN::QNN::doProfile(QNN::gContext.interface, mQnnProfileHandle);
+        return true;
     }
 };
 
+struct RawGraphRecord {
+    std::shared_ptr<RawExecutorWrapper> executor;
+    std::string cacheKey;
+    std::vector<std::string> graphIds;
+    bool pinned = false;
+};
+
+static std::mutex gRawGraphPoolMutex;
+static std::map<std::string, std::shared_ptr<RawGraphRecord>> gRawGraphById;
+static std::map<std::string, std::shared_ptr<RawGraphRecord>> gRawGraphByKey;
+
+static std::string normalizeRawGraphPath(const std::string& path) {
+    std::string normalized;
+    normalized.reserve(path.size());
+    bool previousWasSeparator = false;
+    for (size_t i = 0; i < path.size(); ++i) {
+        const char ch = path[i];
+        const bool isSeparator = ch == '/' || ch == '\\';
+        if (isSeparator && previousWasSeparator) {
+            continue;
+        }
+        normalized.push_back(ch);
+        previousWasSeparator = isSeparator;
+    }
+    return normalized;
+}
+
+static std::string makeRawGraphCacheKey(const std::string& path,
+                                        uint64_t offset,
+                                        uint64_t size,
+                                        const std::vector<std::string>& allGraphName) {
+    std::string key = normalizeRawGraphPath(path) + "#" + std::to_string(offset) + "#" + std::to_string(size);
+    for (size_t i = 0; i < allGraphName.size(); ++i) {
+        key += "#" + allGraphName[i];
+    }
+    return key;
+}
+
+static void addGraphIdAliasLocked(const std::string& graphId, const std::shared_ptr<RawGraphRecord>& record) {
+    if (graphId.empty() || !record) {
+        return;
+    }
+    if (std::find(record->graphIds.begin(), record->graphIds.end(), graphId) == record->graphIds.end()) {
+        record->graphIds.push_back(graphId);
+    }
+    gRawGraphById[graphId] = record;
+}
+
+static std::shared_ptr<RawExecutorWrapper> findRawGraphExecutor(const std::string& path,
+                                                               uint64_t offset,
+                                                               uint64_t size,
+                                                               const std::vector<std::string>& allGraphName) {
+    const std::string cacheKey = makeRawGraphCacheKey(path, offset, size, allGraphName);
+    std::lock_guard<std::mutex> lock(gRawGraphPoolMutex);
+    std::map<std::string, std::shared_ptr<RawGraphRecord>>::iterator iter = gRawGraphByKey.find(cacheKey);
+    if (iter == gRawGraphByKey.end() || !iter->second) {
+        return nullptr;
+    }
+    return iter->second->executor;
+}
+
+static bool preloadRawGraphInternal(const MNN::QNN::RawGraphPrefetchConfig& config) {
+    if (config.graphId.empty() || config.path.empty() || config.allGraphName.empty()) {
+        return false;
+    }
+    if (QNN::gContext.deviceHandle == nullptr) {
+        QNN::createQnnContext();
+    }
+    if (QNN::gContext.deviceHandle == nullptr) {
+        return false;
+    }
+
+    const std::string cacheKey = makeRawGraphCacheKey(config.path, config.offset, config.size, config.allGraphName);
+    std::lock_guard<std::mutex> lock(gRawGraphPoolMutex);
+    {
+        std::map<std::string, std::shared_ptr<RawGraphRecord>>::iterator iter = gRawGraphById.find(config.graphId);
+        if (iter != gRawGraphById.end() && iter->second) {
+            iter->second->pinned = iter->second->pinned || config.pinResident;
+            return true;
+        }
+    }
+    {
+        std::map<std::string, std::shared_ptr<RawGraphRecord>>::iterator iter = gRawGraphByKey.find(cacheKey);
+        if (iter != gRawGraphByKey.end() && iter->second) {
+            iter->second->pinned = iter->second->pinned || config.pinResident;
+            addGraphIdAliasLocked(config.graphId, iter->second);
+            return true;
+        }
+    }
+
+    std::shared_ptr<RawExecutorWrapper> executor(new RawExecutorWrapper);
+    if (!executor->compileModel(config.path,
+                                static_cast<size_t>(config.offset),
+                                static_cast<size_t>(config.size),
+                                config.allGraphName)) {
+        return false;
+    }
+
+    std::shared_ptr<RawGraphRecord> record(new RawGraphRecord);
+    record->executor = executor;
+    record->cacheKey = cacheKey;
+    record->pinned = config.pinResident;
+    gRawGraphByKey[cacheKey] = record;
+    addGraphIdAliasLocked(config.graphId, record);
+    return true;
+}
+
+static void releaseRawGraphInternal(const std::string& graphId, bool forceRelease, bool unpinAfterRelease) {
+    if (graphId.empty()) {
+        return;
+    }
+    std::lock_guard<std::mutex> lock(gRawGraphPoolMutex);
+    std::map<std::string, std::shared_ptr<RawGraphRecord>>::iterator iter = gRawGraphById.find(graphId);
+    if (iter == gRawGraphById.end() || !iter->second) {
+        return;
+    }
+    std::shared_ptr<RawGraphRecord> record = iter->second;
+    if (unpinAfterRelease) {
+        record->pinned = false;
+    }
+    if (record->pinned && !forceRelease) {
+        return;
+    }
+    record->graphIds.erase(std::remove(record->graphIds.begin(), record->graphIds.end(), graphId), record->graphIds.end());
+    gRawGraphById.erase(iter);
+    if (record->graphIds.empty()) {
+        gRawGraphByKey.erase(record->cacheKey);
+    }
+}
+
+static void releaseAllRawGraphsInternal() {
+    std::map<std::string, std::shared_ptr<RawGraphRecord>> rawGraphById;
+    std::map<std::string, std::shared_ptr<RawGraphRecord>> rawGraphByKey;
+    {
+        std::lock_guard<std::mutex> lock(gRawGraphPoolMutex);
+        rawGraphById.swap(gRawGraphById);
+        rawGraphByKey.swap(gRawGraphByKey);
+    }
+}
+
 class PluginExecuteRaw : public CPUComputeKernel {
 private:
-    std::unique_ptr<RawExecutorWrapper> mRawExecutor;
+    std::shared_ptr<RawExecutorWrapper> mRawExecutor;
     std::vector<std::pair<const MNN::Tensor *, std::string>> mInputs;
     std::vector<std::pair<const MNN::Tensor *, std::string>> mOutputs;
     std::vector<std::shared_ptr<MNN::Tensor>> mRealInputs;
     std::vector<std::shared_ptr<MNN::Tensor>> mRealOutputs;
-    int mShapeIndex;
 public:
     ~ PluginExecuteRaw() {
         mRealInputs.clear();
@@ -907,6 +1065,9 @@ public:
     bool init(CPUKernelContext* ctx) override {
         if (QNN::gContext.deviceHandle == nullptr){
             QNN::createQnnContext();
+        }
+        if (QNN::gContext.deviceHandle == nullptr) {
+            return false;
         }
         auto path = MNNFilePathConcat(ctx->dir_path(), ctx->getAttr("path")->s()->str());
 
@@ -949,6 +1110,10 @@ public:
 
             binarySize = (static_cast<size_t>(highDst) << 32) | static_cast<size_t>(lowDst);
         }
+        mRawExecutor = findRawGraphExecutor(path, binaryOffset, binarySize, allGraphName);
+        if (mRawExecutor) {
+            return true;
+        }
         mRawExecutor.reset(new RawExecutorWrapper());
         return mRawExecutor->compileModel(path, binaryOffset, binarySize, allGraphName);
     }
@@ -959,8 +1124,6 @@ public:
             MNN_ERROR("MNN_QNN: Failed to execute Plugin Op.\n");
             return false;
         }
-        mShapeIndex = shapeIndex;
-
         auto inputs = ctx->getAttr("inputs")->list();
         auto inputTensor = ctx->inputs();
         MNN_ASSERT(inputs->s()->size() == inputTensor.size());
@@ -992,8 +1155,6 @@ public:
             MNN_ERROR("MNN_QNN: Failed to execute Plugin Op.\n");
             return false;
         }
-        std::string graphName = ctx->getAttr("allGraphName")->list()->s()->GetAsString(shapeIndex)->str();
-
         // compute and alloc real in-time inputs and outputs tensor
         {
             auto inputs = ctx->getAttr("inputs")->list();
@@ -1019,6 +1180,7 @@ public:
         }
 
         #ifdef QNN_VERBOSE
+        std::string graphName = ctx->getAttr("allGraphName")->list()->s()->GetAsString(shapeIndex)->str();
         MNN_PRINT("Graph name:%s, %d\n", graphName.c_str(), shapeIndex);
         #endif
         auto inputTensor = ctx->inputs();
@@ -1027,7 +1189,9 @@ public:
         for (int i=0; i<mInputs.size(); ++i) {
             ctx->backend()->onCopyBuffer(inputTensor[i], mRealInputs[i].get());
         }
-        mRawExecutor->invokModel(mInputs, mOutputs, mShapeIndex);
+        if (!mRawExecutor->invokModel(mInputs, mOutputs, shapeIndex)) {
+            return false;
+        }
         for (int i=0; i<mOutputs.size(); ++i) {
             ctx->backend()->onCopyBuffer(mRealOutputs[i].get(), outputTensor[i]);
         }
@@ -1038,8 +1202,42 @@ public:
 
 } // namespace backend
 }
+
+namespace QNN {
+
+bool preloadRawGraph(const RawGraphPrefetchConfig& config) {
+    return plugin::backend::preloadRawGraphInternal(config);
 }
 
+void releaseRawGraph(const std::string& graphId, bool forceRelease, bool unpinAfterRelease) {
+    plugin::backend::releaseRawGraphInternal(graphId, forceRelease, unpinAfterRelease);
+}
+
+void releaseAllRawGraphs() {
+    plugin::backend::releaseAllRawGraphsInternal();
+}
+
+} // namespace QNN
+}
+
+#endif
+
+#ifndef MNN_WITH_PLUGIN
+namespace MNN {
+namespace QNN {
+
+bool preloadRawGraph(const RawGraphPrefetchConfig&) {
+    return false;
+}
+
+void releaseRawGraph(const std::string&, bool, bool) {
+}
+
+void releaseAllRawGraphs() {
+}
+
+} // namespace QNN
+} // namespace MNN
 #endif
 
 namespace MNN {

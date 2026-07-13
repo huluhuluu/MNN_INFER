@@ -34,59 +34,32 @@ DualPipelineScheduler::GraphRequest::GraphRequest()
       unpinAfterRelease(false) {
 }
 
-DualPipelineScheduler::EvictPlan::EvictPlan()
-    : sequence(0) {
-}
-
 DualPipelineScheduler::GraphRecord::GraphRecord()
     : resident(false),
       pinned(false),
-      inUse(false),
       pendingRelease(false),
       activeUseCount(0),
       lastUseSequence(0) {
 }
 
 DualPipelineScheduler::Snapshot::Snapshot()
-    : running(false),
-      stopRequested(false),
-      queuedTasks(0),
-      residentGraphs(0),
-      maxResidentGraphs(0),
-      scheduledTasks(0),
-      completedExecutions(0),
-      evictionBlockedCount(0) {
-}
-
-DualPipelineScheduler::Status::Status()
-    : running(false),
-      queuedTasks(0),
-      residentGraphs(0),
-      maxResidentGraphs(0),
-      scheduledTasks(0),
-      completedExecutions(0),
-      evictionBlockedCount(0) {
+    : residentGraphs(0) {
 }
 
 DualPipelineScheduler::Config::Config()
-    : maxResidentGraphs(5),
-      maxEvictPlanHistory(64) {
+    : maxResidentGraphs(5) {
 }
 
 DualPipelineScheduler::Task::Task()
-    : type(TASK_PREFETCH_RESIZE),
-      sequence(0) {
+    : type(TASK_PREFETCH_RESIZE) {
 }
 
-DualPipelineScheduler::GraphState::GraphState() {
+DualPipelineScheduler::GraphState::GraphState()
+    : loadFinished(false) {
 }
 
 DualPipelineScheduler::DualPipelineScheduler()
     : mNextSequence(1),
-      mScheduledTasks(0),
-      mCompletedExecutions(0),
-      mEvictionBlockedCount(0),
-      mConfigured(false),
       mRunning(false),
       mStopRequested(false) {
 }
@@ -101,7 +74,6 @@ bool DualPipelineScheduler::configure(const Config& config) {
     if (mConfig.maxResidentGraphs <= 0) {
         mConfig.maxResidentGraphs = 5;
     }
-    mConfigured = true;
     return true;
 }
 
@@ -109,9 +81,6 @@ bool DualPipelineScheduler::start() {
     std::lock_guard<std::mutex> lock(mMutex);
     if (mRunning) {
         return true;
-    }
-    if (!mConfigured) {
-        mConfigured = true;
     }
     mStopRequested = false;
     mWorker = std::thread(&DualPipelineScheduler::_workerLoop, this);
@@ -147,7 +116,6 @@ bool DualPipelineScheduler::enqueueRequestGraph(const GraphRequest& request) {
         Task task;
         task.type = request.action == GRAPH_RELEASE ? TASK_GRAPH_RELEASE : TASK_GRAPH_LOAD;
         task.graphRequest = request;
-        task.sequence = mNextSequence++;
         mTasks.push_back(task);
     }
     mCondition.notify_one();
@@ -160,10 +128,38 @@ bool DualPipelineScheduler::enqueuePrefetchWindow(const PrefetchWindow& window) 
         Task task;
         task.type = TASK_PREFETCH_RESIZE;
         task.prefetchWindow = window;
-        task.sequence = mNextSequence++;
         mTasks.push_back(task);
     }
     mCondition.notify_one();
+    return true;
+}
+
+bool DualPipelineScheduler::waitForGraphsReady(const std::vector<std::string>& graphIds) {
+    if (graphIds.empty()) {
+        return true;
+    }
+    std::unique_lock<std::mutex> lock(mMutex);
+    mCondition.wait(lock, [this, &graphIds]() {
+        if (mStopRequested) {
+            return true;
+        }
+        for (size_t i = 0; i < graphIds.size(); ++i) {
+            std::map<std::string, GraphState>::const_iterator iter = mGraphs.find(graphIds[i]);
+            if (iter == mGraphs.end() || !iter->second.loadFinished) {
+                return false;
+            }
+        }
+        return true;
+    });
+    if (mStopRequested) {
+        return false;
+    }
+    for (size_t i = 0; i < graphIds.size(); ++i) {
+        std::map<std::string, GraphState>::const_iterator iter = mGraphs.find(graphIds[i]);
+        if (iter == mGraphs.end() || !iter->second.record.resident) {
+            return false;
+        }
+    }
     return true;
 }
 
@@ -177,7 +173,6 @@ void DualPipelineScheduler::markExecutionComplete(const std::string& graphId) {
         Task task;
         task.type = TASK_GRAPH_COMPLETE;
         task.graphId = graphId;
-        task.sequence = mNextSequence++;
         mTasks.push_back(task);
     }
     mCondition.notify_one();
@@ -186,19 +181,6 @@ void DualPipelineScheduler::markExecutionComplete(const std::string& graphId) {
 DualPipelineScheduler::Snapshot DualPipelineScheduler::snapshot() const {
     std::lock_guard<std::mutex> lock(mMutex);
     return _snapshotLocked();
-}
-
-DualPipelineScheduler::Status DualPipelineScheduler::status() const {
-    std::lock_guard<std::mutex> lock(mMutex);
-    Status status;
-    status.running = mRunning;
-    status.queuedTasks = mTasks.size();
-    status.residentGraphs = _residentGraphCountLocked();
-    status.maxResidentGraphs = mConfig.maxResidentGraphs;
-    status.scheduledTasks = mScheduledTasks;
-    status.completedExecutions = mCompletedExecutions;
-    status.evictionBlockedCount = mEvictionBlockedCount;
-    return status;
 }
 
 void DualPipelineScheduler::_workerLoop() {
@@ -215,7 +197,6 @@ void DualPipelineScheduler::_workerLoop() {
             }
             task = mTasks.front();
             mTasks.pop_front();
-            ++mScheduledTasks;
         }
         _processTask(task);
     }
@@ -255,7 +236,6 @@ void DualPipelineScheduler::_processPrefetchWindow(const PrefetchWindow& window)
 
 void DualPipelineScheduler::_processGraphRequest(const GraphRequest& request) {
     Callbacks callbacks;
-    std::vector<EvictPlan> evictPlans;
     std::vector<GraphRequest> evictReleaseRequests;
     GraphRequest callbackRequest = request;
     bool shouldLoad = false;
@@ -275,12 +255,14 @@ void DualPipelineScheduler::_processGraphRequest(const GraphRequest& request) {
                 } else if (request.forceRelease) {
                     iter->second.record.resident = false;
                     iter->second.record.pinned = false;
-                    iter->second.record.inUse = false;
                     iter->second.record.activeUseCount = 0;
                     iter->second.record.pendingRelease = false;
                     iter->second.record.lastUseSequence = mNextSequence++;
                     shouldRelease = true;
-                } else if (iter->second.record.inUse) {
+                } else if (!iter->second.record.resident) {
+                    iter->second.record.activeUseCount = 0;
+                    iter->second.record.pendingRelease = false;
+                } else if (iter->second.record.activeUseCount > 0) {
                     if (request.unpinAfterRelease) {
                         iter->second.record.pinned = false;
                     }
@@ -299,34 +281,49 @@ void DualPipelineScheduler::_processGraphRequest(const GraphRequest& request) {
             GraphState& state = mGraphs[request.graphId];
             bool wasResident = state.record.resident;
             if (!wasResident) {
-                _planEvictionsLocked(request.graphId, &evictPlans, &evictReleaseRequests);
+                _planEvictionsLocked(request.graphId, &evictReleaseRequests);
             }
             state.lastRequest = request;
             state.record.graphId = request.graphId;
-            state.record.resident = true;
             state.record.pinned = state.record.pinned || request.draftGraph || request.pinResident;
             // The same resident QNN graph can be shared by two requests.
             ++state.record.activeUseCount;
-            state.record.inUse = state.record.activeUseCount > 0;
             state.record.pendingRelease = false;
             state.record.lastUseSequence = mNextSequence++;
             shouldLoad = !wasResident;
+            if (shouldLoad) {
+                state.loadFinished = false;
+            } else {
+                state.loadFinished = true;
+            }
         }
     }
 
-    for (size_t i = 0; i < evictPlans.size(); ++i) {
-        if (callbacks.onEvictPlan) {
-            callbacks.onEvictPlan(evictPlans[i]);
-        }
-        if (callbacks.onGraphRelease && i < evictReleaseRequests.size()) {
+    if (callbacks.onGraphRelease) {
+        for (size_t i = 0; i < evictReleaseRequests.size(); ++i) {
             callbacks.onGraphRelease(evictReleaseRequests[i]);
         }
     }
     if (shouldRelease && callbacks.onGraphRelease) {
         callbacks.onGraphRelease(callbackRequest);
     }
-    if (shouldLoad && callbacks.onGraphLoad) {
-        callbacks.onGraphLoad(callbackRequest);
+    if (shouldLoad) {
+        const bool loadSucceeded = !callbacks.onGraphLoad || callbacks.onGraphLoad(callbackRequest);
+        {
+            std::lock_guard<std::mutex> lock(mMutex);
+            std::map<std::string, GraphState>::iterator iter = mGraphs.find(callbackRequest.graphId);
+            if (iter != mGraphs.end()) {
+                iter->second.loadFinished = true;
+                iter->second.record.resident = loadSucceeded;
+                if (!loadSucceeded) {
+                    iter->second.record.pinned = false;
+                    iter->second.record.activeUseCount = 0;
+                    iter->second.record.pendingRelease = false;
+                    iter->second.record.lastUseSequence = mNextSequence++;
+                }
+            }
+        }
+        mCondition.notify_all();
     }
 }
 
@@ -342,14 +339,12 @@ void DualPipelineScheduler::_processGraphComplete(const std::string& graphId) {
         if (iter == mGraphs.end()) {
             return;
         }
-        ++mCompletedExecutions;
         // Release only after all requests using this graph have reported completion.
         if (iter->second.record.activeUseCount > 0) {
             --iter->second.record.activeUseCount;
         }
-        iter->second.record.inUse = iter->second.record.activeUseCount > 0;
         iter->second.record.lastUseSequence = mNextSequence++;
-        if (!iter->second.record.inUse && iter->second.record.pendingRelease && !iter->second.record.pinned) {
+        if (iter->second.record.activeUseCount == 0 && iter->second.record.pendingRelease && !iter->second.record.pinned) {
             iter->second.record.resident = false;
             iter->second.record.pendingRelease = false;
             releaseRequest = _mergeReleaseRequestLocked(iter->second, iter->second.pendingReleaseRequest);
@@ -363,19 +358,14 @@ void DualPipelineScheduler::_processGraphComplete(const std::string& graphId) {
 }
 
 void DualPipelineScheduler::_planEvictionsLocked(const std::string& incomingGraphId,
-                                                 std::vector<EvictPlan>* plans,
                                                  std::vector<GraphRequest>* releaseRequests) {
-    if (mConfig.maxResidentGraphs == 0) {
-        return;
-    }
-
     size_t residentCount = _residentGraphCountLocked();
     while (residentCount >= mConfig.maxResidentGraphs) {
         std::map<std::string, GraphState>::iterator candidate = mGraphs.end();
         uint64_t oldest = std::numeric_limits<uint64_t>::max();
         for (std::map<std::string, GraphState>::iterator iter = mGraphs.begin(); iter != mGraphs.end(); ++iter) {
             const GraphRecord& record = iter->second.record;
-            if (!record.resident || record.pinned || record.inUse || iter->first == incomingGraphId) {
+            if (!record.resident || record.pinned || record.activeUseCount > 0 || iter->first == incomingGraphId) {
                 continue;
             }
             if (record.lastUseSequence < oldest) {
@@ -384,28 +374,19 @@ void DualPipelineScheduler::_planEvictionsLocked(const std::string& incomingGrap
             }
         }
         if (candidate == mGraphs.end()) {
-            ++mEvictionBlockedCount;
             break;
         }
 
-        EvictPlan plan;
-        plan.graphId = candidate->first;
-        plan.reason = "maxResidentGraphs";
-        plan.sequence = mNextSequence++;
-
         GraphRequest releaseRequest = candidate->second.lastRequest;
         releaseRequest.action = GRAPH_RELEASE;
-        releaseRequest.reason = plan.reason;
+        releaseRequest.reason = "maxResidentGraphs";
         releaseRequest.forceRelease = true;
         releaseRequest.unpinAfterRelease = true;
 
         candidate->second.record.resident = false;
         candidate->second.record.pendingRelease = false;
-        candidate->second.record.inUse = false;
         candidate->second.record.activeUseCount = 0;
-        plans->push_back(plan);
         releaseRequests->push_back(releaseRequest);
-        _rememberEvictPlanLocked(plan);
         --residentCount;
     }
 }
@@ -461,27 +442,9 @@ size_t DualPipelineScheduler::_residentGraphCountLocked() const {
     return count;
 }
 
-void DualPipelineScheduler::_rememberEvictPlanLocked(const EvictPlan& plan) {
-    if (mConfig.maxEvictPlanHistory == 0) {
-        return;
-    }
-    mEvictPlans.push_back(plan);
-    while (mEvictPlans.size() > mConfig.maxEvictPlanHistory) {
-        mEvictPlans.erase(mEvictPlans.begin());
-    }
-}
-
 DualPipelineScheduler::Snapshot DualPipelineScheduler::_snapshotLocked() const {
     Snapshot snapshot;
-    snapshot.running = mRunning;
-    snapshot.stopRequested = mStopRequested;
-    snapshot.queuedTasks = mTasks.size();
     snapshot.residentGraphs = _residentGraphCountLocked();
-    snapshot.maxResidentGraphs = mConfig.maxResidentGraphs;
-    snapshot.scheduledTasks = mScheduledTasks;
-    snapshot.completedExecutions = mCompletedExecutions;
-    snapshot.evictionBlockedCount = mEvictionBlockedCount;
-    snapshot.evictPlans = mEvictPlans;
     for (std::map<std::string, GraphState>::const_iterator iter = mGraphs.begin(); iter != mGraphs.end(); ++iter) {
         snapshot.graphs.push_back(iter->second.record);
     }

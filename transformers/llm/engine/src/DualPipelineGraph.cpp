@@ -14,6 +14,7 @@
 
 #include <algorithm>
 #include <cstring>
+#include <limits>
 
 namespace MNN {
 namespace Transformer {
@@ -139,6 +140,120 @@ std::vector<std::string> attrStringList(const Plugin* plugin, const char* key) {
     return result;
 }
 
+std::vector<int> attrIntList(const Plugin* plugin, const char* key) {
+    std::vector<int> result;
+    const Attribute* attr = findAttr(plugin, key);
+    if (attr == nullptr || attr->list() == nullptr || attr->list()->i() == nullptr) {
+        return result;
+    }
+    const auto values = attr->list()->i();
+    result.reserve(values->size());
+    for (flatbuffers::uoffset_t i = 0; i < values->size(); ++i) {
+        result.push_back(values->Get(i));
+    }
+    return result;
+}
+
+std::vector<int> inferQnnBucketSizes(const Plugin* plugin,
+                                     const std::vector<TensorShape>& inputShapes,
+                                     const std::vector<std::string>& graphNames) {
+    std::vector<int> result;
+    if (graphNames.empty() || inputShapes.empty()) {
+        return result;
+    }
+    const std::vector<int> allInputShape = attrIntList(plugin, "allInputShape");
+    size_t inputShapeLength = 0;
+    for (size_t i = 0; i < inputShapes.size(); ++i) {
+        if (inputShapes[i].dims.empty()) {
+            inputShapeLength = 0;
+            break;
+        }
+        inputShapeLength += inputShapes[i].dims.size();
+    }
+    if (inputShapeLength == 0 || allInputShape.size() != inputShapeLength * graphNames.size()) {
+        if (allInputShape.size() % graphNames.size() != 0) {
+            return result;
+        }
+        inputShapeLength = allInputShape.size() / graphNames.size();
+    }
+    if (inputShapeLength == 0) {
+        return result;
+    }
+
+    int bestRange = 0;
+    for (size_t dimIndex = 0; dimIndex < inputShapeLength; ++dimIndex) {
+        std::vector<int> candidate;
+        candidate.reserve(graphNames.size());
+        int minValue = std::numeric_limits<int>::max();
+        int maxValue = 0;
+        bool valid = true;
+        for (size_t variant = 0; variant < graphNames.size(); ++variant) {
+            const int value = allInputShape[variant * inputShapeLength + dimIndex];
+            if (value <= 0) {
+                valid = false;
+                break;
+            }
+            candidate.push_back(value);
+            minValue = std::min(minValue, value);
+            maxValue = std::max(maxValue, value);
+        }
+        if (!valid || maxValue == minValue) {
+            continue;
+        }
+        const int range = maxValue - minValue;
+        if (range > bestRange) {
+            bestRange = range;
+            result = candidate;
+        }
+    }
+    return result;
+}
+
+int selectQnnShapeIndex(const QnnGraphInfo& qnn, int requestGroupSize) {
+    int shapeIndex = qnn.shapeIndex;
+    if (qnn.bucketSizes.empty() || qnn.bucketSizes.size() != qnn.allGraphName.size()) {
+        return shapeIndex;
+    }
+    const int groupSize = requestGroupSize > 0 ? requestGroupSize : 1;
+    int selectedIndex = -1;
+    int selectedBucket = std::numeric_limits<int>::max();
+    int largestIndex = -1;
+    int largestBucket = 0;
+    for (size_t i = 0; i < qnn.bucketSizes.size(); ++i) {
+        const int bucket = qnn.bucketSizes[i];
+        if (bucket <= 0) {
+            continue;
+        }
+        if (bucket >= groupSize && bucket < selectedBucket) {
+            selectedBucket = bucket;
+            selectedIndex = static_cast<int>(i);
+        }
+        if (bucket > largestBucket) {
+            largestBucket = bucket;
+            largestIndex = static_cast<int>(i);
+        }
+    }
+    if (selectedIndex >= 0) {
+        return selectedIndex;
+    }
+    if (largestIndex >= 0) {
+        return largestIndex;
+    }
+    return shapeIndex;
+}
+
+std::string qnnGraphResourceId(const OpInfo& op) {
+    std::string graphId = !op.qnn.path.empty() ? op.qnn.path : op.opName;
+    if (graphId.empty()) {
+        graphId = op.qnn.targetGraphName;
+    }
+    graphId += "#" + std::to_string(op.qnn.offset) + "#" + std::to_string(op.qnn.size);
+    for (size_t i = 0; i < op.qnn.allGraphName.size(); ++i) {
+        graphId += "#" + op.qnn.allGraphName[i];
+    }
+    return graphId;
+}
+
 uint64_t attrUint64FromIntPair(const Plugin* plugin, const char* key) {
     const Attribute* attr = findAttr(plugin, key);
     if (attr == nullptr || attr->list() == nullptr || attr->list()->i() == nullptr || attr->list()->i()->size() != 2) {
@@ -182,7 +297,9 @@ void fillQnnInfo(const Op* op, const std::string& baseDir, const std::string& np
     if (plugin->type() != nullptr) {
         info->pluginType = plugin->type()->str();
     }
-    if (!isQnnPluginOp(*info)) {
+    const bool hasQnnGraphAttrs = findAttr(plugin, "path") != nullptr && findAttr(plugin, "allGraphName") != nullptr;
+    const bool hasQnnTypeHint = containsToken(info->pluginType, "qnn") || containsToken(effectiveBackend(*info), "qnn");
+    if (!hasQnnTypeHint && !hasQnnGraphAttrs) {
         return;
     }
 
@@ -196,6 +313,7 @@ void fillQnnInfo(const Op* op, const std::string& baseDir, const std::string& np
     info->qnn.offset = attrUint64FromIntPair(plugin, "offset");
     info->qnn.size = attrUint64FromIntPair(plugin, "size");
     info->qnn.allGraphName = attrStringList(plugin, "allGraphName");
+    info->qnn.bucketSizes = inferQnnBucketSizes(plugin, info->inputShapes, info->qnn.allGraphName);
     info->qnn.shapeIndex = -1;
     if (!info->qnn.allGraphName.empty()) {
         info->qnn.shapeIndex = 0;
@@ -241,12 +359,6 @@ OpInfo::OpInfo()
       isPlugin(false) {
 }
 
-WindowRequest::WindowRequest()
-    : requestId(-1),
-      start(0),
-      maxK(0) {
-}
-
 bool isCpuOp(const OpInfo& op) {
     const std::string backend = effectiveBackend(op);
     return containsToken(backend, "cpu");
@@ -261,7 +373,18 @@ bool isQnnPluginOp(const OpInfo& op) {
     if (!op.isPlugin) {
         return false;
     }
-    return containsToken(op.pluginType, "qnn") || containsToken(effectiveBackend(op), "qnn");
+    if (containsToken(op.pluginType, "qnn") || containsToken(effectiveBackend(op), "qnn")) {
+        return true;
+    }
+    return !op.qnn.allGraphName.empty() && (!op.qnn.relativePath.empty() || !op.qnn.path.empty());
+}
+
+int selectQnnBucketSize(const QnnGraphInfo& qnn, int requestGroupSize) {
+    const int shapeIndex = selectQnnShapeIndex(qnn, requestGroupSize);
+    if (shapeIndex >= 0 && shapeIndex < static_cast<int>(qnn.bucketSizes.size())) {
+        return qnn.bucketSizes[shapeIndex];
+    }
+    return requestGroupSize > 0 ? requestGroupSize : 1;
 }
 
 GraphSnapshot buildGraphSnapshot(const MNN::Session* session,
@@ -333,7 +456,8 @@ DualPipelineScheduler::PrefetchWindow buildPrefetchWindow(const GraphSnapshot& s
 std::vector<DualPipelineScheduler::GraphRequest> buildQnnGraphRequests(const GraphSnapshot& snapshot,
                                                                        int start,
                                                                        int maxK,
-                                                                       int reqId) {
+                                                                       int reqId,
+                                                                       int requestGroupSize) {
     std::vector<DualPipelineScheduler::GraphRequest> requests;
     if (start < 0 || maxK <= 0 || start >= static_cast<int>(snapshot.ops.size())) {
         return requests;
@@ -346,7 +470,7 @@ std::vector<DualPipelineScheduler::GraphRequest> buildQnnGraphRequests(const Gra
         DualPipelineScheduler::GraphRequest request;
         request.action = DualPipelineScheduler::GRAPH_LOAD;
         request.requestId = reqId;
-        request.graphId = !op.qnn.targetGraphName.empty() ? op.qnn.targetGraphName : op.opName;
+        request.graphId = qnnGraphResourceId(op);
         request.graphPath = op.qnn.path;
         request.baseDir = op.qnn.baseDir;
         request.npuDir = op.qnn.npuDir;
@@ -354,8 +478,13 @@ std::vector<DualPipelineScheduler::GraphRequest> buildQnnGraphRequests(const Gra
         request.offset = op.qnn.offset;
         request.size = op.qnn.size;
         request.allGraphName = op.qnn.allGraphName;
-        request.targetGraphName = op.qnn.targetGraphName;
-        request.shapeIndex = op.qnn.shapeIndex;
+        int shapeIndex = selectQnnShapeIndex(op.qnn, requestGroupSize);
+        if (shapeIndex >= 0 && shapeIndex < static_cast<int>(op.qnn.allGraphName.size())) {
+            request.targetGraphName = op.qnn.allGraphName[shapeIndex];
+        } else {
+            request.targetGraphName = op.qnn.targetGraphName;
+        }
+        request.shapeIndex = shapeIndex;
         request.draftGraph = op.qnn.draft;
         request.pinResident = op.qnn.pin;
         requests.push_back(request);
