@@ -129,10 +129,11 @@ private:
     MNN::Express::VARPS eagleForward(const std::vector<int>& inputEmbeds, MNN::Express::VARP hiddenStates, bool allLogits = false);
     MNN::Express::VARPS eagleForward(MNN::Express::VARP inputEmbeds, MNN::Express::VARP hiddenStates, bool allLogits = false);
     void loadPackedDraftModule();
-    MNN::Express::VARPS eagleForwardRawPacked(const std::vector<PackedDraftKVInfo>& kvInfos, const MNN::Express::VARPS& inputs);
+    MNN::Express::VARPS eagleForwardRawPacked(const std::vector<PackedDraftKVInfo>& kvInfos, const MNN::Express::VARPS& inputs, bool waitAllOutputs = true);
     MNN::Express::VARP eagleFCForward(const MNN::Express::VARPS& hiddenStates);
     DraftInfo topkGenerate(const std::vector<int>& inputIds, MNN::Express::VARP hiddenStates, MNN::Express::VARP inputEmbeds = nullptr, int reqId = 0);
     std::vector<DraftInfo> topkGeneratePacked(const std::vector<PackedDraftInput>& inputs);
+    bool prefillDraftPacked(const std::vector<PackedDraftInput>& inputs);
     VARPS treeDecoding(const DraftInfo& draftInfo);
     VARPS treeDecodingPacked(const DraftInfo& draftInfo);
     AcceptInfo evaluatePosterior(const DraftInfo& drafInfo, VARP logits);
@@ -147,6 +148,7 @@ private:
     std::shared_ptr<KVMeta> mEagleMeta;
     std::shared_ptr<BatchKVMeta> mEagleBatchMeta;
     std::shared_ptr<MNN::Express::Module> mEaglePackedRootModule;
+    std::shared_ptr<MNN::Express::Module> mEaglePackedCacheOwner;
     std::map<std::pair<int, int>, std::shared_ptr<MNN::Express::Module>> mEaglePackedModulePool;
     MNN::Express::VARP mD2t, mTreePosition;
     int mTopK, mDepth;

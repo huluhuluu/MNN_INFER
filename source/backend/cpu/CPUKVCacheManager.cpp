@@ -507,8 +507,9 @@ void CPUKVCacheManager::onRealloc(KVMeta* meta) {
         }
     }
     // Remove
+    auto previousLength = mPastLength;
     auto start = mPastLength - meta->remove;
-    if (0 == meta->n_reserve || mQuantKey || mQuantValue) { // n_reserve > 0 is not currently supported when K or V is quantized.
+    if (0 == meta->n_reserve) {
         mPastLength = start;
         return;
     }
@@ -518,7 +519,9 @@ void CPUKVCacheManager::onRealloc(KVMeta* meta) {
         auto begin = meta->reserve[2 * n];
         auto size  = meta->reserve[2 * n + 1];
         auto srcIndex = start + begin;
-        if (mBytes == 2) {
+        if (mQuantKey || mQuantValue) {
+            moveQuantizedKV(srcIndex, dstIndex, size);
+        } else if (mBytes == 2) {
             moveKV<FLOAT16_T>(srcIndex, dstIndex, size);
         } else {
             moveKV<float>(srcIndex, dstIndex, size);
@@ -526,6 +529,9 @@ void CPUKVCacheManager::onRealloc(KVMeta* meta) {
         dstIndex += size;
     }
     mPastLength = dstIndex;
+    if (mQuantValue) {
+        rebuildQuantizedValueSum(start, mPastLength, previousLength);
+    }
 #else
     // Don't support not align reserve
     auto align = hP;
@@ -766,6 +772,101 @@ void CPUKVCacheManager::moveKV(int src, int dst, int size) {
             for (int j = 0; j < mHeadDim; j++) {
                 kPtr[keyIndex(dst + i, j)]   = kPtr[keyIndex(src + i, j)];
                 vPtr[valueIndex(dst + i, j)] = vPtr[valueIndex(src + i, j)];
+            }
+        }
+    }
+}
+
+void CPUKVCacheManager::moveQuantizedKV(int src, int dst, int size) {
+    auto keyBlockL = UP_DIV(mHeadDim, mConfig.mBlockNum);
+    auto keyWeightStride1 = ROUND_UP(keyBlockL, lP8) * hP8;
+    auto keyPackedStride1 = keyWeightStride1 + 2 * QUANT_INFO_BYTES * hP8;
+    auto valueWeightStride1 = UP_DIV((int32_t)mFlashAttentionUpperKv, lP8) * hP8 * lP8;
+    auto valuePackedStride1 = valueWeightStride1 + 2 * QUANT_INFO_BYTES * hP8;
+    auto quantValueIndex = [&](int seq, int dim) {
+        auto stride0 = valuePackedStride1 * UP_DIV(mHeadDim, hP8);
+        auto seqInBlock = seq % (int32_t)mFlashAttentionUpperKv;
+        return (seq / (int32_t)mFlashAttentionUpperKv) * stride0
+             + (dim / hP8) * valuePackedStride1
+             + (seqInBlock / lP8) * hP8 * lP8
+             + (dim % hP8) * lP8
+             + (seqInBlock % lP8);
+    };
+    for (int h = 0; h < mKvNumHead; ++h) {
+        auto keyPtr = addrOfKey(h);
+        auto valuePtr = addrOfValue(h);
+        auto keySum = reinterpret_cast<float*>(addrOfKeySum(h));
+        for (int i = 0; i < size; ++i) {
+            int srcSeq = src + i;
+            int dstSeq = dst + i;
+            if (mQuantKey) {
+                int srcOuter = srcSeq / hP8;
+                int srcInner = srcSeq % hP8;
+                int dstOuter = dstSeq / hP8;
+                int dstInner = dstSeq % hP8;
+                for (int k = 0; k < mConfig.mBlockNum; ++k) {
+                    auto srcBlock = keyPtr + (srcOuter * mConfig.mBlockNum + k) * keyPackedStride1;
+                    auto dstBlock = keyPtr + (dstOuter * mConfig.mBlockNum + k) * keyPackedStride1;
+                    for (int d = 0; d < keyBlockL; ++d) {
+                        auto srcIndex = (d / lP8) * lP8 * hP8 + srcInner * lP8 + d % lP8;
+                        auto dstIndex = (d / lP8) * lP8 * hP8 + dstInner * lP8 + d % lP8;
+                        dstBlock[dstIndex] = srcBlock[srcIndex];
+                    }
+                    auto srcScale = reinterpret_cast<float*>(srcBlock + keyWeightStride1);
+                    auto dstScale = reinterpret_cast<float*>(dstBlock + keyWeightStride1);
+                    dstScale[dstInner] = srcScale[srcInner];
+                    dstScale[hP8 + dstInner] = srcScale[hP8 + srcInner];
+                }
+                keySum[dstSeq] = keySum[srcSeq];
+            } else {
+                for (int d = 0; d < mHeadDim; ++d) {
+                    ::memcpy(keyPtr + keyIndex(dstSeq, d) * mBytes,
+                             keyPtr + keyIndex(srcSeq, d) * mBytes, mBytes);
+                }
+            }
+            if (mQuantValue) {
+                for (int d = 0; d < mHeadDim; ++d) {
+                    valuePtr[quantValueIndex(dstSeq, d)] = valuePtr[quantValueIndex(srcSeq, d)];
+                }
+            } else {
+                for (int d = 0; d < mHeadDim; ++d) {
+                    ::memcpy(valuePtr + valueIndex(dstSeq, d) * mBytes,
+                             valuePtr + valueIndex(srcSeq, d) * mBytes, mBytes);
+                }
+            }
+        }
+    }
+}
+
+void CPUKVCacheManager::rebuildQuantizedValueSum(int changedFrom, int validLength, int previousLength) {
+    auto weightStride1 = UP_DIV((int32_t)mFlashAttentionUpperKv, lP8) * lP8 * hP8;
+    auto packedStride1 = weightStride1 + 2 * hP8 * QUANT_INFO_BYTES;
+    auto sumStride = ROUND_UP(mHeadDim, hP8);
+    int firstBlock = changedFrom / (int)mFlashAttentionUpperKv;
+    int clearBlocks = UP_DIV(previousLength, (int)mFlashAttentionUpperKv) - firstBlock;
+    auto quantValueIndex = [&](int seq, int dim) {
+        auto stride0 = packedStride1 * UP_DIV(mHeadDim, hP8);
+        auto seqInBlock = seq % (int32_t)mFlashAttentionUpperKv;
+        return (seq / (int32_t)mFlashAttentionUpperKv) * stride0
+             + (dim / hP8) * packedStride1
+             + (seqInBlock / lP8) * hP8 * lP8
+             + (dim % hP8) * lP8
+             + (seqInBlock % lP8);
+    };
+    for (int h = 0; h < mKvNumHead; ++h) {
+        auto valuePtr = addrOfValue(h);
+        auto valueSum = reinterpret_cast<float*>(addrOfValueSum(h));
+        if (clearBlocks > 0) {
+            ::memset(valueSum + firstBlock * sumStride, 0, clearBlocks * sumStride * sizeof(float));
+        }
+        int firstSeq = firstBlock * (int)mFlashAttentionUpperKv;
+        for (int seq = firstSeq; seq < validLength; ++seq) {
+            int block = seq / (int)mFlashAttentionUpperKv;
+            for (int d = 0; d < mHeadDim; ++d) {
+                auto quantInfo = reinterpret_cast<float*>(valuePtr + block * UP_DIV(mHeadDim, hP8) * packedStride1
+                                + (d / hP8) * packedStride1 + weightStride1);
+                valueSum[block * sumStride + d] += valuePtr[quantValueIndex(seq, d)] * quantInfo[d % hP8]
+                                                + quantInfo[hP8 + d % hP8];
             }
         }
     }

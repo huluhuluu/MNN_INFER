@@ -40,6 +40,8 @@ private:
     template <typename T> void ProcessKey(const Tensor* key, int seq_len, int kv_h, int bias = 0);
     template <typename T> void ProcessValue(const Tensor* value, int seq_len, int kv_h, int bias = 0);
     template <typename T> void moveKV(int src, int dst, int size);
+    void moveQuantizedKV(int src, int dst, int size);
+    void rebuildQuantizedValueSum(int changedFrom, int validLength, int previousLength);
     size_t keyIndex(int seq, int dim) const;
     size_t valueIndex(int seq, int dim) const;
     void saveKVCacheInDisk();

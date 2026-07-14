@@ -108,6 +108,7 @@ static std::shared_ptr<Module> _loadPackedEagleModule(const std::string& modelPa
 void EagleGeneration::loadPackedDraftModule() {
     mEagleBatchMeta.reset(new BatchKVMeta);
     mEaglePackedRootModule.reset();
+    mEaglePackedCacheOwner.reset();
     mEaglePackedModulePool.clear();
     mLlm->mRuntimeManager->setHint(MNN::Interpreter::PACKED_ATTENTION_MODE, true);
     mLlm->mRuntimeManager->setHintPtr(Interpreter::KVCACHE_INFO, mEagleBatchMeta.get());
@@ -116,7 +117,7 @@ void EagleGeneration::loadPackedDraftModule() {
                                                     mEagleModuleConfig);
 }
 
-std::vector<MNN::Express::VARP> EagleGeneration::eagleForwardRawPacked(const std::vector<PackedDraftKVInfo>& kvInfos, const std::vector<MNN::Express::VARP>& inputs) {
+std::vector<MNN::Express::VARP> EagleGeneration::eagleForwardRawPacked(const std::vector<PackedDraftKVInfo>& kvInfos, const std::vector<MNN::Express::VARP>& inputs, bool waitAllOutputs) {
     if (mEagleBatchMeta == nullptr) {
         mEagleBatchMeta.reset(new BatchKVMeta);
     }
@@ -162,8 +163,14 @@ std::vector<MNN::Express::VARP> EagleGeneration::eagleForwardRawPacked(const std
         mLlm->applyKVCacheRuntimeHint(mLlm->mRuntimeManager, mLlm->mConfig->packed_attention());
         return outputs;
     }
+    // PackedAttention clones share KV managers. Keep the first executing
+    // clone alive because those managers retain its backend pointer.
+    if (mEaglePackedCacheOwner == nullptr) {
+        mEaglePackedCacheOwner = iter->second;
+    }
     outputs = iter->second->onForward(inputs);
     if (outputs.empty()) {
+        auto failedModule = iter->second;
         mEaglePackedModulePool.erase(moduleKey);
         auto module = createPackedModule();
         if (module == nullptr) {
@@ -177,10 +184,17 @@ std::vector<MNN::Express::VARP> EagleGeneration::eagleForwardRawPacked(const std
             mLlm->applyKVCacheRuntimeHint(mLlm->mRuntimeManager, mLlm->mConfig->packed_attention());
             return outputs;
         }
+        if (mEaglePackedCacheOwner == failedModule) {
+            mEaglePackedCacheOwner = module;
+        }
         mEaglePackedModulePool[moduleKey] = std::move(module);
     }
     if (outputs.size() > 1) {
-        waitModuleOutputs(outputs);
+        if (waitAllOutputs) {
+            waitModuleOutputs(outputs);
+        } else {
+            outputs[0]->readMap<float>();
+        }
     }
     mEagleBatchMeta->sync();
     mLlm->applyKVCacheRuntimeHint(mLlm->mRuntimeManager, mLlm->mConfig->packed_attention());
@@ -415,6 +429,52 @@ std::vector<EagleGeneration::DraftInfo> EagleGeneration::topkGeneratePacked(cons
     return results;
 }
 
+bool EagleGeneration::prefillDraftPacked(const std::vector<PackedDraftInput>& inputs) {
+    if (inputs.empty()) {
+        return true;
+    }
+    std::vector<VARP> embedsList;
+    std::vector<VARP> hiddenList;
+    std::vector<int> calLen;
+    std::vector<int> positionHost;
+    std::vector<PackedDraftKVInfo> kvInfos;
+    for (auto& input : inputs) {
+        if (input.state == nullptr || input.inputIds.empty() || _packedSeqLen(input.hiddenStates) != input.inputIds.size()) {
+            mContext->status = LlmStatus::INTERNAL_ERROR;
+            return false;
+        }
+        int inputLen = static_cast<int>(input.inputIds.size());
+        embedsList.push_back(mLlm->embedding(input.inputIds));
+        hiddenList.push_back(input.hiddenStates);
+        calLen.push_back(inputLen);
+        for (int i = 0; i < inputLen; ++i) {
+            positionHost.push_back(input.state->pastLen + i);
+        }
+        PackedDraftKVInfo kvInfo;
+        kvInfo.reqId = input.reqId;
+        kvInfo.add = static_cast<size_t>(inputLen);
+        kvInfo.remove = static_cast<size_t>(input.state->remove);
+        kvInfos.push_back(kvInfo);
+    }
+    auto hidden = eagleFCForward(hiddenList);
+    if (hidden == nullptr) {
+        mContext->status = LlmStatus::INTERNAL_ERROR;
+        return false;
+    }
+    auto embeds = embedsList.size() == 1 ? embedsList[0] : _Concat(embedsList, 0);
+    auto outputs = eagleForwardRawPacked(kvInfos, {embeds, hidden, mLlm->gen_attention_mask(calLen),
+                                                  _makePositionIds(positionHost), mLlm->logitsLastIdx}, false);
+    if (outputs.size() < 2) {
+        mContext->status = LlmStatus::INTERNAL_ERROR;
+        return false;
+    }
+    for (auto& input : inputs) {
+        input.state->pastLen += static_cast<int>(input.inputIds.size());
+        input.state->remove = 0;
+    }
+    return true;
+}
+
 void EagleGeneration::updatePackedBaseKV(const AcceptInfo& acceptInfo) {
     int acceptLen = static_cast<int>(acceptInfo.acceptTokens.size());
     auto& pending = mBasePendingKV[acceptInfo.reqId];
@@ -439,6 +499,10 @@ std::vector<std::vector<int>> EagleGeneration::generateBatch(const std::vector<s
     mContext->all_seq_len = 0;
 
     std::vector<int> reqIds = mLlm->mScheduler->addRequest(inputIds);
+    std::map<int, int> inputIndexByReqId;
+    for (int i = 0; i < reqIds.size(); ++i) {
+        inputIndexByReqId[reqIds[i]] = i;
+    }
     mLlm->mScheduler->setMaxNewTokens(maxTokens);
     mLlm->applyKVCacheRuntimeHint(mLlm->mRuntimeManager, true);
 
@@ -697,12 +761,38 @@ std::vector<std::vector<int>> EagleGeneration::generateBatch(const std::vector<s
         }
 
         if (chunk != nullptr) {
+            std::set<int> finalChunkIndices(base.chunkDraftIndices.begin(), base.chunkDraftIndices.end());
+            std::vector<PackedDraftInput> draftPrefillInputs;
             for (int i = 0; i < chunk->pos.size(); ++i) {
                 int reqLen = chunk->calLen[i];
                 if(reqLen > 1) {
                     mLlm->updateContext(reqLen, 0);
                     mContext->prompt_len += reqLen;
                 }
+                if (finalChunkIndices.find(i) == finalChunkIndices.end()) {
+                    int id = chunk->reqId[i];
+                    auto inputIter = inputIndexByReqId.find(id);
+                    int pos = chunk->pos[i];
+                    if (inputIter == inputIndexByReqId.end() || pos < 0 || reqLen <= 0 ||
+                        pos + reqLen >= inputIds[inputIter->second].size()) {
+                        mContext->status = LlmStatus::INTERNAL_ERROR;
+                        break;
+                    }
+                    int inputIndex = inputIter->second;
+                    PackedDraftInput draftInput;
+                    draftInput.reqId = id;
+                    draftInput.state = &eagleStates[id];
+                    draftInput.inputIds.assign(inputIds[inputIndex].begin() + pos + 1,
+                                               inputIds[inputIndex].begin() + pos + reqLen + 1);
+                    draftInput.hiddenStates = _slicePackedRows(base.hiddenStates, base.chunkOffsets[i], reqLen);
+                    draftPrefillInputs.push_back(std::move(draftInput));
+                }
+            }
+            if (mContext->status == LlmStatus::INTERNAL_ERROR) {
+                break;
+            }
+            if (!prefillDraftPacked(draftPrefillInputs)) {
+                break;
             }
             for (int i : base.chunkDraftIndices) {
                 int id = chunk->reqId[i];
@@ -730,7 +820,6 @@ std::vector<std::vector<int>> EagleGeneration::generateBatch(const std::vector<s
                 std::vector<int> draftInputIds = chunk->inputs[i];
                 draftInputIds.push_back(sampleToken);
                 auto& stateInfo = eagleStates[id];
-                stateInfo.pastLen = 0;
                 stateInfo.remove = 0;
                 PackedDraftInput draftInput;
                 draftInput.reqId = id;
