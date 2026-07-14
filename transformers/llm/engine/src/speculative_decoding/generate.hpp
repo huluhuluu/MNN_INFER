@@ -124,6 +124,8 @@ private:
         size_t remove = 0;
     };
     MNN::Express::VARPS eagleForwardRaw(const MNN::Express::VARPS& inputs);
+    static MNN::Express::VARP gatherHiddenRows(MNN::Express::VARP hiddenStates, const std::vector<int>& indices);
+    static void waitModuleOutputs(const MNN::Express::VARPS& outputs);
     MNN::Express::VARPS eagleForward(const std::vector<int>& inputEmbeds, MNN::Express::VARP hiddenStates, bool allLogits = false);
     MNN::Express::VARPS eagleForward(MNN::Express::VARP inputEmbeds, MNN::Express::VARP hiddenStates, bool allLogits = false);
     void loadPackedDraftModule();

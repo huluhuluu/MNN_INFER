@@ -243,15 +243,22 @@ ErrorCode CPUPackedAttention::onExecute(const std::vector<Tensor*>& inputs, cons
     auto value = inputs[2];
     const int8_t* mask = nullptr;
 
+    if (mBatchMeta == nullptr || mBatchMeta->calId.empty()) {
+        MNN_ERROR("CPUPackedAttention::onExecute: missing batch KV metadata\n");
+        return INVALID_VALUE;
+    }
+
     // KVcache settings
     int sumLen=0, maxKvSeqLen = 0, maxReqLen = 0, allReqLen = query->length(1), bs = mBatchMeta->calId.size();
     CPUPackedAttention::setKVCache(maxReqLen);
     for(int id: mBatchMeta->calId){
         CPUKVCacheManager* mKVCacheManager = static_cast<CPUKVCacheManager*>(mKVCacheManagers->getCacheManager(id));
-        if (mKVCacheManager == nullptr) {
-            MNN_ERROR("CPUPackedAttention::onExecute: KVCacheManager for id=%d is nullptr! calId has %zu elements.\n", id, mBatchMeta->calId.size());
+        auto metaIter = mBatchMeta->mMetas.find(id);
+        if (mKVCacheManager == nullptr || metaIter == mBatchMeta->mMetas.end() || metaIter->second == nullptr) {
+            MNN_ERROR("CPUPackedAttention::onExecute: invalid KV metadata for id=%d\n", id);
+            return INVALID_VALUE;
         }
-        KVMeta* mMeta = mBatchMeta->mMetas[id];
+        KVMeta* mMeta = metaIter->second;
         
         int reqLen = (int)mMeta->add;
         // Update KV Cache

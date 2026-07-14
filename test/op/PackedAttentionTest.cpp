@@ -18,8 +18,8 @@
 using namespace MNN::Express;
 
 // Test parameters (use different names to avoid conflict with AttentionTest.cpp)
-static int gPackedNumHead   = 16;
-static int gPackedKvNumHead = 2;
+static int gPackedNumHead   = 32;
+static int gPackedKvNumHead = 8;
 static int gPackedHeadDim   = 128;
 static const float gPackedDiffThreshold = 0.01;
 static const float gPackedDiffPercentThreshold = 0.1;
@@ -122,6 +122,21 @@ static std::vector<std::vector<std::vector<float>>> generateRandTensor(int seqLe
                 } else {
                     a[i][j][k] = ((i + j + k) % 10) * 0.16 - 0.8;
                 }
+            }
+        }
+    }
+    return a;
+}
+
+static std::vector<std::vector<std::vector<float>>> generateSensitiveTensor(int seqLen, int numHead, int headDim, int seed) {
+    std::vector<std::vector<std::vector<float>>> a(seqLen, std::vector<std::vector<float>>(numHead, std::vector<float>(headDim)));
+    uint32_t state = static_cast<uint32_t>(seed);
+    for (int i = 0; i < seqLen; i++) {
+        for (int j = 0; j < numHead; j++) {
+            for (int k = 0; k < headDim; k++) {
+                state = state * 1664525u + 1013904223u;
+                int v = static_cast<int>((state >> 8) & 0xFFFF);
+                a[i][j][k] = (static_cast<float>(v) / 32768.0f - 1.0f) * 0.35f;
             }
         }
     }
@@ -267,6 +282,98 @@ VARP generateBlockDiagonalMask(const std::vector<int>& seqLens) {
     return maskVar;
 }
 
+VARP generateBlockDiagonalIntMask(const std::vector<int>& seqLens) {
+    int maskSize = 0;
+    for (int len : seqLens) {
+        maskSize += len * len;
+    }
+
+    VARP maskVar = _Input({1, 1, 1, maskSize}, NCHW, halide_type_of<int>());
+    int* ptr = maskVar->writeMap<int>();
+    int offset = 0;
+    for (int len : seqLens) {
+        for (int i = 0; i < len; i++) {
+            for (int j = 0; j < len; j++) {
+                ptr[offset + i * len + j] = j <= i ? 1 : 0;
+            }
+        }
+        offset += len * len;
+    }
+    maskVar->unMap();
+    return maskVar;
+}
+
+VARP generatePackedFullCausalMask(const std::vector<int>& seqLens, const std::vector<int>& kvSeqLens) {
+    int maskSize = 0;
+    for (int i = 0; i < seqLens.size(); ++i) {
+        maskSize += seqLens[i] * kvSeqLens[i];
+    }
+
+    VARP maskVar = _Input({1, 1, 1, maskSize}, NCHW, halide_type_of<float>());
+    float* ptr = maskVar->writeMap<float>();
+    int offset = 0;
+    for (int r = 0; r < seqLens.size(); ++r) {
+        const int seqLen = seqLens[r];
+        const int kvSeqLen = kvSeqLens[r];
+        const int historyLen = kvSeqLen - seqLen;
+        for (int i = 0; i < seqLen; ++i) {
+            for (int j = 0; j < kvSeqLen; ++j) {
+                ptr[offset + i * kvSeqLen + j] = (j <= historyLen + i) ? 0.0f : std::numeric_limits<float>::lowest();
+            }
+        }
+        offset += seqLen * kvSeqLen;
+    }
+    maskVar->unMap();
+    return maskVar;
+}
+
+VARP generatePackedFloatMask(const std::vector<std::vector<std::vector<int>>>& masks) {
+    int maskSize = 0;
+    for (auto& mask : masks) {
+        maskSize += static_cast<int>(mask.size() * mask[0].size());
+    }
+
+    VARP maskVar = _Input({1, 1, 1, maskSize}, NCHW, halide_type_of<float>());
+    float* ptr = maskVar->writeMap<float>();
+    const float minVal = std::numeric_limits<float>::lowest();
+    int offset = 0;
+    for (auto& mask : masks) {
+        const int rows = static_cast<int>(mask.size());
+        const int cols = static_cast<int>(mask[0].size());
+        for (int i = 0; i < rows; ++i) {
+            for (int j = 0; j < cols; ++j) {
+                ptr[offset + i * cols + j] = mask[i][j] ? 0.0f : minVal;
+            }
+        }
+        offset += rows * cols;
+    }
+    maskVar->unMap();
+    return maskVar;
+}
+
+VARP generatePackedIntMask(const std::vector<std::vector<std::vector<int>>>& masks) {
+    int maskSize = 0;
+    for (auto& mask : masks) {
+        maskSize += static_cast<int>(mask.size() * mask[0].size());
+    }
+
+    VARP maskVar = _Input({1, 1, 1, maskSize}, NCHW, halide_type_of<int>());
+    int* ptr = maskVar->writeMap<int>();
+    int offset = 0;
+    for (auto& mask : masks) {
+        const int rows = static_cast<int>(mask.size());
+        const int cols = static_cast<int>(mask[0].size());
+        for (int i = 0; i < rows; ++i) {
+            for (int j = 0; j < cols; ++j) {
+                ptr[offset + i * cols + j] = mask[i][j] ? 1 : 0;
+            }
+        }
+        offset += rows * cols;
+    }
+    maskVar->unMap();
+    return maskVar;
+}
+
 static std::vector<std::vector<int>> generateCausalMaskHost(int seqLen, int kvSeqLen) {
     std::vector<std::vector<int>> mask(seqLen, std::vector<int>(kvSeqLen, 0));
     const int historyLen = kvSeqLen - seqLen;
@@ -301,15 +408,68 @@ static bool compareRequestOutput(const float* outPtr,
     return true;
 }
 
+static bool compareRequestOutputStrict(const float* outPtr,
+                                       int packedOffset,
+                                       const std::vector<std::vector<std::vector<float>>>& expected,
+                                       const std::string& reqName,
+                                       float threshold) {
+    for (int i = 0; i < expected.size(); ++i) {
+        for (int j = 0; j < gPackedNumHead; ++j) {
+            for (int k = 0; k < gPackedHeadDim; ++k) {
+                const int packedIndex = (packedOffset + i) * gPackedNumHead * gPackedHeadDim + j * gPackedHeadDim + k;
+                const float actual = outPtr[packedIndex];
+                const float target = expected[i][j][k];
+                const float diff = fabs(actual - target);
+                if (diff > threshold) {
+                    MNN_PRINT("%s strict mismatch at [%d][%d][%d]: expected %f, got %f, diff %f\n",
+                              reqName.c_str(), i, j, k, target, actual, diff);
+                    return false;
+                }
+            }
+        }
+    }
+    return true;
+}
+
 class PackedAttentionTest : public MNNTestCase {
 public:
     virtual bool run(int precision) {
         srand(2025);
-        
+
+        // Test 0: Single Qwen-shaped prefill with non-periodic input.
+        // This catches layout/softmax mistakes that periodic data can hide.
+        {
+            const int reqLen = 14;
+            clearBatchMeta(gBatchMeta);
+
+            auto query = generateSensitiveTensor(reqLen, gPackedNumHead, gPackedHeadDim, 17);
+            auto key = generateSensitiveTensor(reqLen, gPackedKvNumHead, gPackedHeadDim, 29);
+            auto value = generateSensitiveTensor(reqLen, gPackedKvNumHead, gPackedHeadDim, 41);
+
+            VARP packedQ = packRequests(std::vector<std::vector<std::vector<std::vector<float>>>>{query});
+            VARP packedK = packRequests(std::vector<std::vector<std::vector<std::vector<float>>>>{key});
+            VARP packedV = packRequests(std::vector<std::vector<std::vector<std::vector<float>>>>{value});
+            VARP mask = generateBlockDiagonalMask(std::vector<int>{reqLen});
+
+            setKVCacheInfo(gBatchMeta, 0, reqLen);
+            auto module = _makePackedAttentionModule();
+            auto output = module->onForward({packedQ, packedK, packedV, mask})[0];
+            syncBatchMeta(gBatchMeta);
+
+            auto ref = computeSingleAttention(query, key, value, generateCausalMaskHost(reqLen, reqLen), reqLen, reqLen);
+            const float* outPtr = output->readMap<float>();
+            float threshold = precision == 2 ? 0.02f : 0.002f;
+            bool pass = compareRequestOutputStrict(outPtr, 0, ref, "SensitivePrefill", threshold);
+            output->unMap();
+            if (!pass) {
+                return false;
+            }
+        }
+
         // Test 1: Two requests with different lengths
         {
-            int req0Len = 256;
-            int req1Len = 152;
+            int req0Len = 14;
+            int req1Len = 7;
             std::vector<int> seqLens = {req0Len, req1Len};
             int totalLen = req0Len + req1Len;
             
@@ -330,7 +490,7 @@ public:
             VARP packedQ = packRequests(queries);
             VARP packedK = packRequests(keys);
             VARP packedV = packRequests(values);
-            VARP mask = generateBlockDiagonalMask(seqLens);
+            VARP mask = generateBlockDiagonalIntMask(seqLens);
             
             // Setup BatchKVMeta
             clearBatchMeta(gBatchMeta);
@@ -604,6 +764,328 @@ public:
                 if (!pass) {
                     return false;
                 }
+            }
+        }
+
+        // Test 5: Full KV mask after history prefill.
+        // Eagle draft/tree steps can pass rectangular reqLen x kvSeqLen masks.
+        {
+            const int historyLen = 32;
+            const int stepLen = 5;
+            clearBatchMeta(gBatchMeta);
+
+            auto module = _makePackedAttentionModule();
+
+            auto allQuery = generateRandTensor(historyLen + stepLen, gPackedNumHead, gPackedHeadDim, precision);
+            auto allKey = generateRandTensor(historyLen + stepLen, gPackedKvNumHead, gPackedHeadDim, precision);
+            auto allValue = generateRandTensor(historyLen + stepLen, gPackedKvNumHead, gPackedHeadDim, precision);
+
+            auto historyQuery = sliceTensor(allQuery, 0, historyLen);
+            auto historyKey = sliceTensor(allKey, 0, historyLen);
+            auto historyValue = sliceTensor(allValue, 0, historyLen);
+            auto stepQuery = sliceTensor(allQuery, historyLen, stepLen);
+            auto stepKey = sliceTensor(allKey, historyLen, stepLen);
+            auto stepValue = sliceTensor(allValue, historyLen, stepLen);
+
+            setKVCacheInfo(gBatchMeta, 0, historyLen);
+            auto seedOutput = module->onForward({
+                packRequests(std::vector<std::vector<std::vector<std::vector<float>>>>{historyQuery}),
+                packRequests(std::vector<std::vector<std::vector<std::vector<float>>>>{historyKey}),
+                packRequests(std::vector<std::vector<std::vector<std::vector<float>>>>{historyValue}),
+                generateBlockDiagonalMask(std::vector<int>{historyLen})
+            })[0];
+            (void)seedOutput;
+            syncBatchMeta(gBatchMeta);
+
+            setKVCacheInfo(gBatchMeta, 0, stepLen);
+            auto output = module->onForward({
+                packRequests(std::vector<std::vector<std::vector<std::vector<float>>>>{stepQuery}),
+                packRequests(std::vector<std::vector<std::vector<std::vector<float>>>>{stepKey}),
+                packRequests(std::vector<std::vector<std::vector<std::vector<float>>>>{stepValue}),
+                generatePackedFullCausalMask(std::vector<int>{stepLen}, std::vector<int>{historyLen + stepLen})
+            })[0];
+            syncBatchMeta(gBatchMeta);
+
+            auto expectedKey = concatTensor(historyKey, stepKey);
+            auto expectedValue = concatTensor(historyValue, stepValue);
+            auto ref = computeSingleAttention(stepQuery, expectedKey, expectedValue,
+                                              generateCausalMaskHost(stepLen, historyLen + stepLen),
+                                              stepLen, historyLen + stepLen);
+
+            const float* outPtr = output->readMap<float>();
+            bool pass = compareRequestOutput(outPtr, 0, ref, "FullMaskStep");
+            output->unMap();
+            if (!pass) {
+                return false;
+            }
+        }
+
+        // Test 6: Full-KV tree mask with irregular KV length.
+        // Eagle draft verification needs a non-causal tree mask over current
+        // tokens while all retained history remains visible.
+        {
+            const int historyLen = 6;
+            const int stepLen = 5;
+            const int kvSeqLen = historyLen + stepLen;
+            clearBatchMeta(gBatchMeta);
+
+            auto module = _makePackedAttentionModule();
+
+            auto allQuery = generateRandTensor(kvSeqLen, gPackedNumHead, gPackedHeadDim, precision);
+            auto allKey = generateRandTensor(kvSeqLen, gPackedKvNumHead, gPackedHeadDim, precision);
+            auto allValue = generateRandTensor(kvSeqLen, gPackedKvNumHead, gPackedHeadDim, precision);
+
+            auto historyQuery = sliceTensor(allQuery, 0, historyLen);
+            auto historyKey = sliceTensor(allKey, 0, historyLen);
+            auto historyValue = sliceTensor(allValue, 0, historyLen);
+            auto stepQuery = sliceTensor(allQuery, historyLen, stepLen);
+            auto stepKey = sliceTensor(allKey, historyLen, stepLen);
+            auto stepValue = sliceTensor(allValue, historyLen, stepLen);
+
+            setKVCacheInfo(gBatchMeta, 0, historyLen);
+            auto seedOutput = module->onForward({
+                packRequests(std::vector<std::vector<std::vector<std::vector<float>>>>{historyQuery}),
+                packRequests(std::vector<std::vector<std::vector<std::vector<float>>>>{historyKey}),
+                packRequests(std::vector<std::vector<std::vector<std::vector<float>>>>{historyValue}),
+                generateBlockDiagonalMask(std::vector<int>{historyLen})
+            })[0];
+            (void)seedOutput;
+            syncBatchMeta(gBatchMeta);
+
+            std::vector<std::vector<int>> treeMask(stepLen, std::vector<int>(kvSeqLen, 0));
+            for (int i = 0; i < stepLen; ++i) {
+                for (int j = 0; j < historyLen; ++j) {
+                    treeMask[i][j] = 1;
+                }
+                treeMask[i][historyLen + i] = 1;
+            }
+            treeMask[1][historyLen + 0] = 1;
+            treeMask[3][historyLen + 1] = 1;
+            treeMask[4][historyLen + 0] = 1;
+            treeMask[4][historyLen + 2] = 1;
+
+            setKVCacheInfo(gBatchMeta, 0, stepLen);
+            auto output = module->onForward({
+                packRequests(std::vector<std::vector<std::vector<std::vector<float>>>>{stepQuery}),
+                packRequests(std::vector<std::vector<std::vector<std::vector<float>>>>{stepKey}),
+                packRequests(std::vector<std::vector<std::vector<std::vector<float>>>>{stepValue}),
+                generatePackedIntMask(std::vector<std::vector<std::vector<int>>>{treeMask})
+            })[0];
+            syncBatchMeta(gBatchMeta);
+
+            auto expectedKey = concatTensor(historyKey, stepKey);
+            auto expectedValue = concatTensor(historyValue, stepValue);
+            auto ref = computeSingleAttention(stepQuery, expectedKey, expectedValue, treeMask, stepLen, kvSeqLen);
+
+            const float* outPtr = output->readMap<float>();
+            bool pass = compareRequestOutput(outPtr, 0, ref, "FullTreeMaskStep");
+            output->unMap();
+            if (!pass) {
+                return false;
+            }
+        }
+
+        // Test 7: Reserve draft KV tokens before decode.
+        // This covers CPUKVCacheManager::moveKV value-cache indexing used by Eagle.
+        {
+            const int historyLen = 160;
+            const int draftLen = 7;
+            const int decodeLen = 1;
+            const int reservedCount = 2;
+            int reserve[reservedCount * 2] = {
+                2, 1,
+                5, 1,
+            };
+            clearBatchMeta(gBatchMeta);
+
+            auto module = _makePackedAttentionModule();
+
+            auto allQuery = generateRandTensor(historyLen + draftLen + decodeLen, gPackedNumHead, gPackedHeadDim, precision);
+            auto allKey = generateRandTensor(historyLen + draftLen + decodeLen, gPackedKvNumHead, gPackedHeadDim, precision);
+            auto allValue = generateRandTensor(historyLen + draftLen + decodeLen, gPackedKvNumHead, gPackedHeadDim, precision);
+
+            auto seedQuery = sliceTensor(allQuery, 0, historyLen + draftLen);
+            auto seedKey = sliceTensor(allKey, 0, historyLen + draftLen);
+            auto seedValue = sliceTensor(allValue, 0, historyLen + draftLen);
+            auto decodeQuery = sliceTensor(allQuery, historyLen + draftLen, decodeLen);
+            auto decodeKey = sliceTensor(allKey, historyLen + draftLen, decodeLen);
+            auto decodeValue = sliceTensor(allValue, historyLen + draftLen, decodeLen);
+
+            setKVCacheInfo(gBatchMeta, 0, historyLen + draftLen);
+            auto seedOutput = module->onForward({
+                packRequests(std::vector<std::vector<std::vector<std::vector<float>>>>{seedQuery}),
+                packRequests(std::vector<std::vector<std::vector<std::vector<float>>>>{seedKey}),
+                packRequests(std::vector<std::vector<std::vector<std::vector<float>>>>{seedValue}),
+                generateBlockDiagonalMask(std::vector<int>{historyLen + draftLen})
+            })[0];
+            (void)seedOutput;
+            syncBatchMeta(gBatchMeta);
+
+            setKVCacheInfo(gBatchMeta, 0, decodeLen, draftLen, reserve, reservedCount);
+            auto output = module->onForward({
+                packRequests(std::vector<std::vector<std::vector<std::vector<float>>>>{decodeQuery}),
+                packRequests(std::vector<std::vector<std::vector<std::vector<float>>>>{decodeKey}),
+                packRequests(std::vector<std::vector<std::vector<std::vector<float>>>>{decodeValue}),
+                generateBlockDiagonalMask(std::vector<int>{decodeLen})
+            })[0];
+            syncBatchMeta(gBatchMeta);
+
+            auto expectedKey = sliceTensor(allKey, 0, historyLen);
+            auto expectedValue = sliceTensor(allValue, 0, historyLen);
+            for (int i = 0; i < reservedCount; ++i) {
+                expectedKey = concatTensor(expectedKey, sliceTensor(allKey, historyLen + reserve[2 * i], reserve[2 * i + 1]));
+                expectedValue = concatTensor(expectedValue, sliceTensor(allValue, historyLen + reserve[2 * i], reserve[2 * i + 1]));
+            }
+            expectedKey = concatTensor(expectedKey, decodeKey);
+            expectedValue = concatTensor(expectedValue, decodeValue);
+            auto ref = computeSingleAttention(decodeQuery, expectedKey, expectedValue,
+                                              generateCausalMaskHost(decodeLen, (int)expectedKey.size()),
+                                              decodeLen, (int)expectedKey.size());
+
+            const float* outPtr = output->readMap<float>();
+            bool pass = compareRequestOutput(outPtr, 0, ref, "ReserveDecode");
+            output->unMap();
+            if (!pass) {
+                return false;
+            }
+            const size_t expectedPrevious = historyLen + reservedCount + decodeLen;
+            if (gBatchMeta.mMetas[0] == nullptr || gBatchMeta.mMetas[0]->previous != expectedPrevious) {
+                MNN_PRINT("Error: Test5 KV cache length mismatch, expected %zu, got %zu\n",
+                          expectedPrevious, gBatchMeta.mMetas[0] == nullptr ? 0 : gBatchMeta.mMetas[0]->previous);
+                return false;
+            }
+        }
+
+        // Test 8: Reserve draft KV tokens before another multi-token tree step.
+        // Eagle verifies a draft tree, compacts accepted draft tokens, then appends
+        // the next draft tree with a square mask over only the newly appended rows.
+        {
+            const int historyLen = 96;
+            const int draftLen = 7;
+            const int nextTreeLen = 5;
+            const int reservedCount = 3;
+            int reserve[reservedCount * 2] = {
+                0, 1,
+                2, 1,
+                5, 1,
+            };
+            clearBatchMeta(gBatchMeta);
+
+            auto module = _makePackedAttentionModule();
+
+            auto allQuery = generateRandTensor(historyLen + draftLen + nextTreeLen, gPackedNumHead, gPackedHeadDim, precision);
+            auto allKey = generateRandTensor(historyLen + draftLen + nextTreeLen, gPackedKvNumHead, gPackedHeadDim, precision);
+            auto allValue = generateRandTensor(historyLen + draftLen + nextTreeLen, gPackedKvNumHead, gPackedHeadDim, precision);
+
+            auto seedQuery = sliceTensor(allQuery, 0, historyLen + draftLen);
+            auto seedKey = sliceTensor(allKey, 0, historyLen + draftLen);
+            auto seedValue = sliceTensor(allValue, 0, historyLen + draftLen);
+            auto nextQuery = sliceTensor(allQuery, historyLen + draftLen, nextTreeLen);
+            auto nextKey = sliceTensor(allKey, historyLen + draftLen, nextTreeLen);
+            auto nextValue = sliceTensor(allValue, historyLen + draftLen, nextTreeLen);
+
+            setKVCacheInfo(gBatchMeta, 0, historyLen + draftLen);
+            auto seedOutput = module->onForward({
+                packRequests(std::vector<std::vector<std::vector<std::vector<float>>>>{seedQuery}),
+                packRequests(std::vector<std::vector<std::vector<std::vector<float>>>>{seedKey}),
+                packRequests(std::vector<std::vector<std::vector<std::vector<float>>>>{seedValue}),
+                generateBlockDiagonalMask(std::vector<int>{historyLen + draftLen})
+            })[0];
+            (void)seedOutput;
+            syncBatchMeta(gBatchMeta);
+
+            setKVCacheInfo(gBatchMeta, 0, nextTreeLen, draftLen, reserve, reservedCount);
+            auto output = module->onForward({
+                packRequests(std::vector<std::vector<std::vector<std::vector<float>>>>{nextQuery}),
+                packRequests(std::vector<std::vector<std::vector<std::vector<float>>>>{nextKey}),
+                packRequests(std::vector<std::vector<std::vector<std::vector<float>>>>{nextValue}),
+                generateBlockDiagonalMask(std::vector<int>{nextTreeLen})
+            })[0];
+            syncBatchMeta(gBatchMeta);
+
+            auto expectedKey = sliceTensor(allKey, 0, historyLen);
+            auto expectedValue = sliceTensor(allValue, 0, historyLen);
+            for (int i = 0; i < reservedCount; ++i) {
+                expectedKey = concatTensor(expectedKey, sliceTensor(allKey, historyLen + reserve[2 * i], reserve[2 * i + 1]));
+                expectedValue = concatTensor(expectedValue, sliceTensor(allValue, historyLen + reserve[2 * i], reserve[2 * i + 1]));
+            }
+            expectedKey = concatTensor(expectedKey, nextKey);
+            expectedValue = concatTensor(expectedValue, nextValue);
+            auto ref = computeSingleAttention(nextQuery, expectedKey, expectedValue,
+                                              generateCausalMaskHost(nextTreeLen, (int)expectedKey.size()),
+                                              nextTreeLen, (int)expectedKey.size());
+
+            const float* outPtr = output->readMap<float>();
+            bool pass = compareRequestOutput(outPtr, 0, ref, "ReserveTreeStep");
+            output->unMap();
+            if (!pass) {
+                return false;
+            }
+            const size_t expectedPrevious = historyLen + reservedCount + nextTreeLen;
+            if (gBatchMeta.mMetas[0] == nullptr || gBatchMeta.mMetas[0]->previous != expectedPrevious) {
+                MNN_PRINT("Error: Test7 KV cache length mismatch, expected %zu, got %zu\n",
+                          expectedPrevious, gBatchMeta.mMetas[0] == nullptr ? 0 : gBatchMeta.mMetas[0]->previous);
+                return false;
+            }
+        }
+
+        // Test 9: A single-token step with a full-KV mask must not use the
+        // maskless decode fast path. Eagle can produce this shape for narrow trees.
+        {
+            const int historyLen = 6;
+            const int stepLen = 1;
+            const int kvSeqLen = historyLen + stepLen;
+            clearBatchMeta(gBatchMeta);
+
+            auto module = _makePackedAttentionModule();
+            auto allQuery = generateSensitiveTensor(kvSeqLen, gPackedNumHead, gPackedHeadDim, 101);
+            auto allKey = generateSensitiveTensor(kvSeqLen, gPackedKvNumHead, gPackedHeadDim, 103);
+            auto allValue = generateSensitiveTensor(kvSeqLen, gPackedKvNumHead, gPackedHeadDim, 107);
+            for (int i = 0; i < kvSeqLen; ++i) {
+                for (int h = 0; h < gPackedKvNumHead; ++h) {
+                    for (int d = 0; d < gPackedHeadDim; ++d) {
+                        allKey[i][h][d] = 0.0f;
+                        allValue[i][h][d] = i == 1 ? 1.0f : -1.0f;
+                    }
+                }
+            }
+            auto historyQuery = sliceTensor(allQuery, 0, historyLen);
+            auto historyKey = sliceTensor(allKey, 0, historyLen);
+            auto historyValue = sliceTensor(allValue, 0, historyLen);
+            auto stepQuery = sliceTensor(allQuery, historyLen, stepLen);
+            auto stepKey = sliceTensor(allKey, historyLen, stepLen);
+            auto stepValue = sliceTensor(allValue, historyLen, stepLen);
+
+            setKVCacheInfo(gBatchMeta, 0, historyLen);
+            auto seedOutput = module->onForward({
+                packRequests(std::vector<std::vector<std::vector<std::vector<float>>>>{historyQuery}),
+                packRequests(std::vector<std::vector<std::vector<std::vector<float>>>>{historyKey}),
+                packRequests(std::vector<std::vector<std::vector<std::vector<float>>>>{historyValue}),
+                generateBlockDiagonalMask(std::vector<int>{historyLen})
+            })[0];
+            (void)seedOutput;
+            syncBatchMeta(gBatchMeta);
+
+            std::vector<std::vector<int>> fullMask(stepLen, std::vector<int>(kvSeqLen, 0));
+            fullMask[0][1] = 1;
+            setKVCacheInfo(gBatchMeta, 0, stepLen);
+            auto output = module->onForward({
+                packRequests(std::vector<std::vector<std::vector<std::vector<float>>>>{stepQuery}),
+                packRequests(std::vector<std::vector<std::vector<std::vector<float>>>>{stepKey}),
+                packRequests(std::vector<std::vector<std::vector<std::vector<float>>>>{stepValue}),
+                generatePackedFloatMask(std::vector<std::vector<std::vector<int>>>{fullMask})
+            })[0];
+            syncBatchMeta(gBatchMeta);
+
+            auto expectedKey = concatTensor(historyKey, stepKey);
+            auto expectedValue = concatTensor(historyValue, stepValue);
+            auto ref = computeSingleAttention(stepQuery, expectedKey, expectedValue,
+                                              fullMask, stepLen, kvSeqLen);
+            const float* outPtr = output->readMap<float>();
+            bool pass = compareRequestOutputStrict(outPtr, 0, ref, "SingleTokenFullMask", 0.002f);
+            output->unMap();
+            if (!pass) {
+                return false;
             }
         }
         

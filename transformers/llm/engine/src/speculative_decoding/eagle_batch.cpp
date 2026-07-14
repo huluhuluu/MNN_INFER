@@ -50,6 +50,9 @@ static int _varElementSize(VARP var) {
 
 static VARP _cloneHiddenToInput(VARP hiddenStates) {
     auto info = hiddenStates->getInfo();
+    if (info == nullptr) {
+        return nullptr;
+    }
     std::vector<int> dims = info->dim;
     if (dims.size() == 3 && dims[0] == 1) {
         dims = {dims[1], 1, dims[2]};
@@ -57,52 +60,11 @@ static VARP _cloneHiddenToInput(VARP hiddenStates) {
     auto input = _Input(dims, NCHW, halide_type_of<float>());
     auto src = hiddenStates->readMap<float>();
     auto dst = input->writeMap<float>();
-    if (src != nullptr && dst != nullptr) {
-        ::memcpy(dst, src, info->size * sizeof(float));
+    if (src == nullptr || dst == nullptr) {
+        return nullptr;
     }
+    ::memcpy(dst, src, info->size * sizeof(float));
     return input;
-}
-
-static VARP _cloneFloatVar(VARP var, const float* src) {
-    auto info = var->getInfo();
-    auto input = _Input(info->dim, NCHW, halide_type_of<float>());
-    auto dst = input->writeMap<float>();
-    if (src != nullptr && dst != nullptr) {
-        ::memcpy(dst, src, info->size * sizeof(float));
-    }
-    return input;
-}
-
-static void _waitModuleOutputs(const std::vector<MNN::Express::VARP>& outputs) {
-    for (auto& output : outputs) {
-        ((MNN::Tensor*)(output->getTensor()))->wait(Tensor::MAP_TENSOR_READ, true);
-    }
-}
-
-static VARP _gatherHiddenRows(VARP hiddenStates, const std::vector<int>& indices) {
-    auto info = hiddenStates->getInfo();
-    if (info == nullptr || info->dim.empty()) {
-        return nullptr;
-    }
-    auto src = hiddenStates->readMap<float>();
-    if (src == nullptr) {
-        return nullptr;
-    }
-    int hiddenSize = info->dim.back();
-    int seqLen = info->dim.size() == 3 && info->dim[0] == 1 ? info->dim[1] : info->dim[0];
-    auto output = _Input({1, static_cast<int>(indices.size()), hiddenSize}, NCHW, halide_type_of<float>());
-    auto dst = output->writeMap<float>();
-    if (dst == nullptr) {
-        return nullptr;
-    }
-    for (int i = 0; i < indices.size(); ++i) {
-        int index = indices[i];
-        if (index < 0 || index >= seqLen) {
-            return nullptr;
-        }
-        ::memcpy(dst + i * hiddenSize, src + index * hiddenSize, hiddenSize * sizeof(float));
-    }
-    return output;
 }
 
 static VARP _makePositionIds(const std::vector<int>& positions) {
@@ -218,7 +180,7 @@ std::vector<MNN::Express::VARP> EagleGeneration::eagleForwardRawPacked(const std
         mEaglePackedModulePool[moduleKey] = std::move(module);
     }
     if (outputs.size() > 1) {
-        _waitModuleOutputs(outputs);
+        waitModuleOutputs(outputs);
     }
     mEagleBatchMeta->sync();
     mLlm->applyKVCacheRuntimeHint(mLlm->mRuntimeManager, mLlm->mConfig->packed_attention());
@@ -243,19 +205,6 @@ VARPS EagleGeneration::treeDecodingPacked(const EagleGeneration::DraftInfo& draf
         mLlm->mModulePool[moduleKey].reset(Module::clone(mLlm->mModule.get()));
     }
     auto outputs = mLlm->mModulePool[moduleKey]->onForward({inputEmbeds, treeMask, draftInfo.positionIds, mLlm->logitsAllIdx});
-    std::vector<const float*> outputPtrs(outputs.size(), nullptr);
-    for (int i = 0; i < outputs.size(); ++i) {
-        auto ptr = outputs[i]->readMap<float>();
-        outputPtrs[i] = ptr;
-        if (ptr == nullptr) {
-            mContext->status = LlmStatus::INTERNAL_ERROR;
-            outputs.clear();
-            break;
-        }
-    }
-    for (int i = 0; i < outputs.size(); ++i) {
-        outputs[i] = _cloneFloatVar(outputs[i], outputPtrs[i]);
-    }
     mLlm->mBatchMeta->sync();
     mBasePendingKV.erase(draftInfo.reqId);
     return outputs;
@@ -320,7 +269,6 @@ std::vector<EagleGeneration::DraftInfo> EagleGeneration::topkGeneratePacked(cons
     auto d2tPtr = mD2t->readMap<int>();
     std::vector<PackedWork> works;
     std::vector<VARP> inputEmbedsList;
-    std::vector<VARP> inputHiddenList;
     std::vector<VARP> fcInputList;
     std::vector<int> calLen;
     std::vector<int> positionHost;
@@ -369,14 +317,8 @@ std::vector<EagleGeneration::DraftInfo> EagleGeneration::topkGeneratePacked(cons
         mContext->status = LlmStatus::INTERNAL_ERROR;
         return {};
     }
-    int fcOffset = 0;
-    for (int len : calLen) {
-        inputHiddenList.push_back(_cloneHiddenToInput(_slicePackedRows(packedFcHidden, fcOffset, len)));
-        fcOffset += len;
-    }
-
     auto inputEmbeds = inputEmbedsList.size() == 1 ? inputEmbedsList[0] : _Concat(inputEmbedsList, 0);
-    auto inputHidden = inputHiddenList.size() == 1 ? inputHiddenList[0] : _Concat(inputHiddenList, 0);
+    auto inputHidden = packedFcHidden;
     auto attentionMask = mLlm->gen_attention_mask(calLen);
     auto positionIds = _makePositionIds(positionHost);
     auto outputs = eagleForwardRawPacked(kvInfos, {inputEmbeds, inputHidden, attentionMask, positionIds, mLlm->logitsAllIdx});
@@ -618,12 +560,27 @@ std::vector<std::vector<int>> EagleGeneration::generateBatch(const std::vector<s
                 auto chunkMask = mLlm->gen_attention_mask(chunkCalLenOrdered);
                 auto chunkMaskInfo = chunkMask == nullptr ? nullptr : chunkMask->getInfo();
                 if (chunkMaskInfo != nullptr && !chunkMaskInfo->dim.empty() && chunkMaskInfo->size == chunkMaskSize) {
-                    auto chunkMaskSrc = chunkMask->readMap<float>();
-                    if (chunkMaskSrc == nullptr) {
+                    if (chunkMaskInfo->type == halide_type_of<float>()) {
+                        auto chunkMaskSrc = chunkMask->readMap<float>();
+                        if (chunkMaskSrc == nullptr) {
+                            mContext->status = LlmStatus::INTERNAL_ERROR;
+                            return result;
+                        }
+                        ::memcpy(maskDst + maskOffset, chunkMaskSrc, chunkMaskSize * sizeof(float));
+                    } else if (chunkMaskInfo->type.code == halide_type_int) {
+                        auto chunkMaskSrc = chunkMask->readMap<int>();
+                        if (chunkMaskSrc == nullptr) {
+                            mContext->status = LlmStatus::INTERNAL_ERROR;
+                            return result;
+                        }
+                        float minVal = std::numeric_limits<float>::lowest();
+                        for (int i = 0; i < chunkMaskSize; ++i) {
+                            maskDst[maskOffset + i] = chunkMaskSrc[i] == 0 ? minVal : 0.0f;
+                        }
+                    } else {
                         mContext->status = LlmStatus::INTERNAL_ERROR;
                         return result;
                     }
-                    ::memcpy(maskDst + maskOffset, chunkMaskSrc, chunkMaskSize * sizeof(float));
                 } else {
                     float minVal = std::numeric_limits<float>::lowest();
                     for (int len : chunkCalLenOrdered) {
@@ -651,18 +608,6 @@ std::vector<std::vector<int>> EagleGeneration::generateBatch(const std::vector<s
         if (outputs.size() < 2) {
             mContext->status = LlmStatus::INTERNAL_ERROR;
             return result;
-        }
-        std::vector<const float*> outputPtrs(outputs.size(), nullptr);
-        for (int i = 0; i < outputs.size(); ++i) {
-            auto ptr = outputs[i]->readMap<float>();
-            outputPtrs[i] = ptr;
-            if (ptr == nullptr) {
-                mContext->status = LlmStatus::INTERNAL_ERROR;
-                return result;
-            }
-        }
-        for (int i = 0; i < outputs.size(); ++i) {
-            outputs[i] = _cloneFloatVar(outputs[i], outputPtrs[i]);
         }
         mLlm->mBatchMeta->sync();
         for (auto& info : activeDrafts) {
@@ -708,6 +653,7 @@ std::vector<std::vector<int>> EagleGeneration::generateBatch(const std::vector<s
             auto logitsSlice = _Slice(base.logits, _var<int>({base.draftOffsets[i], 0}, {2}), _var<int>({len, -1}, {2}));
             auto acceptInfo = evaluatePosterior(draft, logitsSlice);
             std::vector<int> accepted;
+            const size_t generatedSize = mLlm->mScheduler->getResultSize(id);
             bool stop = false;
             int acceptLimit = 0;
             for (auto token : acceptInfo.acceptTokens) {
@@ -717,7 +663,7 @@ std::vector<std::vector<int>> EagleGeneration::generateBatch(const std::vector<s
                     stop = true;
                     break;
                 }
-                if (mLlm->mScheduler->getResult(id).size() + accepted.size() >= maxTokens) {
+                if (generatedSize + accepted.size() >= maxTokens) {
                     break;
                 }
             }
@@ -736,15 +682,8 @@ std::vector<std::vector<int>> EagleGeneration::generateBatch(const std::vector<s
                 continue;
             }
             auto hiddenSlice = _slicePackedRows(base.hiddenStates, base.draftOffsets[i], len);
-            int acceptLen = static_cast<int>(acceptInfo.acceptTokens.size());
-            auto& pending = mBasePendingKV[id];
-            pending.remove = acceptInfo.sampleTokens.size();
-            pending.reserveHost.resize(acceptLen * 2);
-            for (int j = 0; j < acceptLen; j++) {
-                pending.reserveHost[2 * j] = acceptInfo.acceptIndices[j];
-                pending.reserveHost[2 * j + 1] = 1;
-            }
-            auto acceptHiddenState = _gatherHiddenRows(hiddenSlice, acceptInfo.acceptIndices);
+            updatePackedBaseKV(acceptInfo);
+            auto acceptHiddenState = gatherHiddenRows(hiddenSlice, acceptInfo.acceptIndices);
             if (acceptHiddenState == nullptr) {
                 mContext->status = LlmStatus::INTERNAL_ERROR;
                 continue;

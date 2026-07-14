@@ -203,6 +203,12 @@ std::vector<int> BatchScheduler::getResult(int req_id) const {
     if (ind < 0 || ind >= mRequests.size()) return {};
     return mRequests[ind]->output_tokens;
 }
+
+size_t BatchScheduler::getResultSize(int req_id) const {
+    int ind = mReqIdToIndex.count(req_id) ? mReqIdToIndex.at(req_id) : -1;
+    if (ind < 0 || ind >= mRequests.size()) return 0;
+    return mRequests[ind]->output_tokens.size();
+}
     
 bool BatchScheduler::releaseReq(int req_id) {
     int ind = mReqIdToIndex.count(req_id) ? mReqIdToIndex.at(req_id) : -1;

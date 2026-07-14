@@ -91,6 +91,7 @@ public:
 
     // get results
     std::vector<int> getResult(int req_id) const;
+    size_t getResultSize(int req_id) const;
     
     // remove finished request
     bool releaseReq(int req_id);

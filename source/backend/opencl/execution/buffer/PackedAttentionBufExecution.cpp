@@ -385,6 +385,7 @@ ErrorCode PackedAttentionBufExecution::onExecute(const std::vector<Tensor *> &in
         }
     }
     const bool useFullMask = maskElementSize > 0 && maskElementSize == fullMaskSize && fullMaskSize != squareMaskSize;
+    allDecode = allDecode && !useFullMask;
 
     for (size_t i = 0; i < reqIds.size(); ++i) {
         const int reqId = reqIds[i];

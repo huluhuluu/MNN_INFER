@@ -7,8 +7,8 @@
 
 #include "generate.hpp"
 #include "tokentree.hpp"
-#include <numeric>
-#include <algorithm>
+#include <cstring>
+#include <limits>
 
 using namespace MNN::Express;
 namespace MNN {
@@ -19,7 +19,7 @@ static inline VARP _var(std::vector<T> vec, const std::vector<int> &dims) {
     return _Const(vec.data(), dims, NHWC, halide_type_of<T>());
 }
 
-static VARP _gatherHiddenRows(VARP hiddenStates, const std::vector<int>& indices) {
+VARP EagleGeneration::gatherHiddenRows(VARP hiddenStates, const std::vector<int>& indices) {
     auto info = hiddenStates->getInfo();
     if (info == nullptr || info->dim.empty()) {
         return nullptr;
@@ -45,7 +45,7 @@ static VARP _gatherHiddenRows(VARP hiddenStates, const std::vector<int>& indices
     return output;
 }
 
-static void _waitModuleOutputs(const std::vector<MNN::Express::VARP>& outputs) {
+void EagleGeneration::waitModuleOutputs(const std::vector<MNN::Express::VARP>& outputs) {
     for (auto& output : outputs) {
         ((MNN::Tensor*)(output->getTensor()))->wait(Tensor::MAP_TENSOR_READ, true);
     }
@@ -125,7 +125,7 @@ std::vector<MNN::Express::VARP> EagleGeneration::eagleForwardRaw(const std::vect
     mLlm->mRuntimeManager->setHintPtr(Interpreter::KVCACHE_INFO, mEagleMeta.get());
     auto outputs    = mEagleModules[0]->onForward(inputs);
     if (outputs.size() > 1) {
-        _waitModuleOutputs(outputs);
+        waitModuleOutputs(outputs);
     }
     mEagleMeta->sync();
     mLlm->applyKVCacheRuntimeHint(mLlm->mRuntimeManager, mLlm->mConfig->packed_attention());
@@ -267,7 +267,7 @@ EagleGeneration::DraftInfo EagleGeneration::updateDraft(const AcceptInfo& accept
             }
         }
     }
-    auto acceptHiddenState = _gatherHiddenRows(hiddenStates, acceptInfo.acceptIndices);
+    auto acceptHiddenState = gatherHiddenRows(hiddenStates, acceptInfo.acceptIndices);
     if (acceptHiddenState == nullptr) {
         mContext->status = LlmStatus::INTERNAL_ERROR;
         return {};

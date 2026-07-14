@@ -1268,7 +1268,6 @@ VARP Llm::gen_attention_mask(const std::vector<int>& calLen){
         attentionMask = _Input({1, 1, 1, mask_size}, NCHW, halide_type_of<float>());
         auto ptr = attentionMask->writeMap<float>();
         
-        float min_val = std::numeric_limits<float>::lowest();
         int ind = 0;
         for (int b = 0; b < bs; b++) {
             float* batch_ptr = ptr + ind;
