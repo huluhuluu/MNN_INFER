@@ -17,9 +17,6 @@
 #include <streambuf>
 #include <array>
 #include <functional>
-#include <condition_variable>
-#include <mutex>
-#include <thread>
 #include <unordered_map>
 
 #include <llm/BatchScheduler.hpp>
@@ -210,17 +207,9 @@ private:
     void setSpeculativeConfig();
     void updateContext(int seq_len, int gen_len);
     void configureDualPipelineMode();
-    void startDualPipelineRequestThread();
-    void stopDualPipelineRequestThread();
-    void dualPipelineRequestLoop();
-    void runOnDualPipelineRequestThread(const std::function<void()>& work);
-    std::vector<std::shared_ptr<BatchScheduler::Chunk>> scheduleBatchWave(int blockSize, int bs);
     void resetDualPipelineGraphState();
     bool refreshDualPipelineGraphSnapshot();
     int dualPipelinePaddedCulLen(const BatchScheduler::Chunk& chunk);
-    void enqueueDualPipelineChunkGraphs(const BatchScheduler::Chunk& chunk, std::vector<std::string>* graphIds);
-    void completeDualPipelineChunkGraphs(const std::vector<std::string>& graphIds);
-    void releaseDualPipelineRequestGraphs(int requestId);
     void releaseDualPipelineRequestExecution(int requestId);
     void resetDualPipelineExecutionState();
     bool prepareDualPipelineExecutionState();
@@ -244,13 +233,6 @@ private:
     int mPrefixLength;
     bool mIsPrefixFileExist = false;
     std::shared_ptr<DualPipelineScheduler> mDualPipelineScheduler;
-    std::thread mDualPipelineRequestThread;
-    std::mutex mDualPipelineRequestMutex;
-    std::condition_variable mDualPipelineRequestCondition;
-    std::function<void()> mDualPipelineRequestWork;
-    bool mDualPipelineRequestStop = false;
-    bool mDualPipelineRequestHasWork = false;
-    bool mDualPipelineRequestDone = false;
     std::array<DualPipelineRuntime, 2> mDualPipelineRuntimes;
     bool mDualPipelineExecutionReady = false;
     std::vector<std::string> mDualPipelineInputNames;
@@ -259,8 +241,8 @@ private:
     std::string mDualPipelineModelPath;
     GraphSnapshot mDualPipelineGraphSnapshot;
     bool mDualPipelineGraphSnapshotReady = false;
-    std::unordered_map<int, int> mDualPipelineRequestOpCursor;
-    std::unordered_map<int, std::vector<std::string>> mDualPipelineRequestGraphs;
+    std::vector<DualPipelineScheduler::GraphRequest> mDualPipelineQnnGraphRequests;
+    std::unordered_map<std::string, int> mDualPipelineQnnOpIndices;
 };
 
 // Embedding start

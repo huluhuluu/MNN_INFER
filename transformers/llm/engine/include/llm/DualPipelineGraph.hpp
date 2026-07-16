@@ -29,8 +29,6 @@ struct QnnGraphInfo {
     uint64_t size;
     std::vector<std::string> allGraphName;
     std::vector<int> bucketSizes;
-    std::string targetGraphName;
-    int shapeIndex;
     bool pin;
     bool draft;
 
@@ -38,16 +36,11 @@ struct QnnGraphInfo {
 };
 
 struct OpInfo {
-    int layerIndex;
-    int opIndex;
     std::string opName;
-    int opTypeId;
-    std::string opTypeName;
     std::string plannedBackend;
     bool actualBackendKnown;
     std::string actualBackend;
     std::vector<TensorShape> inputShapes;
-    std::vector<TensorShape> outputShapes;
     bool isPlugin;
     std::string pluginType;
     QnnGraphInfo qnn;
@@ -59,25 +52,26 @@ struct GraphSnapshot {
     std::vector<OpInfo> ops;
 };
 
-bool isCpuOp(const OpInfo& op);
-bool isOpenCLOp(const OpInfo& op);
 bool isQnnPluginOp(const OpInfo& op);
 int selectQnnBucketSize(const QnnGraphInfo& qnn, int requestGroupSize);
+int selectQnnCompatibleBucketSize(const GraphSnapshot& snapshot, int requiredSize);
 
 GraphSnapshot buildGraphSnapshot(const MNN::Session* session,
                                  int pipelineIndex,
                                  const std::string& baseDir,
                                  const std::string& npuDir);
 
-DualPipelineScheduler::PrefetchWindow buildPrefetchWindow(const GraphSnapshot& snapshot,
-                                                          int start,
-                                                          int maxK,
-                                                          int reqId);
+GraphSnapshot buildQnnGraphSnapshotFromModel(const std::string& modelPath,
+                                             const std::string& baseDir,
+                                             const std::string& npuDir);
+
+GraphSnapshot mergeQnnGraphSnapshotsInExecutionOrder(const GraphSnapshot& executionSnapshot,
+                                                     const GraphSnapshot& modelSnapshot);
+
 std::vector<DualPipelineScheduler::GraphRequest> buildQnnGraphRequests(const GraphSnapshot& snapshot,
                                                                        int start,
                                                                        int maxK,
-                                                                       int reqId,
-                                                                       int requestGroupSize = 1);
+                                                                       int reqId);
 
 } // namespace Transformer
 } // namespace MNN

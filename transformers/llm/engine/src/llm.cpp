@@ -11,7 +11,7 @@
 #include <iostream>
 #include <limits>
 #include <sstream>
-#include <unordered_set>
+#include <thread>
 
 #include <MNN/AutoTime.hpp>
 #include <MNN/expr/ExecutorScope.hpp>
@@ -55,31 +55,6 @@ const StaticModule* getStaticModuleForDualPipeline(const Module* module) {
         return nullptr;
     }
     return getStaticModuleForDualPipeline(children[0].get());
-}
-
-std::string joinDualPipelinePath(const std::string& dir, const std::string& path) {
-    if (path.empty()) {
-        return "";
-    }
-    if (path[0] == '/' || path[0] == '\\') {
-        return path;
-    }
-    if (dir.empty()) {
-        return path;
-    }
-    const char tail = dir[dir.size() - 1];
-    if (tail == '/' || tail == '\\') {
-        return dir + path;
-    }
-    return dir + "/" + path;
-}
-
-std::string resolveQnnGraphPath(const DualPipelineScheduler::GraphRequest& request) {
-    if (!request.graphPath.empty()) {
-        return request.graphPath;
-    }
-    const std::string graphDir = !request.npuDir.empty() ? request.npuDir : request.baseDir;
-    return joinDualPipelinePath(graphDir, request.relativePath);
 }
 
 void copyBatchKVMetaEntry(BatchKVMeta* dst, const BatchKVMeta* src, int reqId, bool appendCalId) {
@@ -233,7 +208,6 @@ void Llm::configureDualPipelineMode() {
     if (!enabled) {
         resetDualPipelineGraphState();
         resetDualPipelineExecutionState();
-        stopDualPipelineRequestThread();
         if (mDualPipelineScheduler) {
             mDualPipelineScheduler->stop();
             mDualPipelineScheduler.reset();
@@ -249,15 +223,12 @@ void Llm::configureDualPipelineMode() {
     if (maxResidentGraphs > 0) {
         config.maxResidentGraphs = static_cast<size_t>(maxResidentGraphs);
     }
-    // CPU/OpenCL resize prefetch must use an isolated runtime or backend callback,
-    // never the live session that is executing onForward.
-    config.callbacks.onPrefetchResize = [](const DualPipelineScheduler::PrefetchResizeRequest&) {
-    };
+    config.graphPrefetchLookahead = std::max(0, mConfig->dual_pipeline_prefetch_window());
     config.callbacks.onGraphLoad = [](const DualPipelineScheduler::GraphRequest& request) {
 #ifdef MNN_QNN_ENABLED
         QNN::RawGraphPrefetchConfig prefetchConfig;
         prefetchConfig.graphId = request.graphId;
-        prefetchConfig.path = resolveQnnGraphPath(request);
+        prefetchConfig.path = request.graphPath;
         prefetchConfig.offset = request.offset;
         prefetchConfig.size = request.size;
         prefetchConfig.allGraphName = request.allGraphName;
@@ -282,104 +253,19 @@ void Llm::configureDualPipelineMode() {
     };
     mDualPipelineScheduler->configure(config);
     mDualPipelineScheduler->start();
-    startDualPipelineRequestThread();
-}
-
-void Llm::startDualPipelineRequestThread() {
-    std::lock_guard<std::mutex> lock(mDualPipelineRequestMutex);
-    if (mDualPipelineRequestThread.joinable()) {
-        return;
-    }
-    mDualPipelineRequestStop = false;
-    mDualPipelineRequestHasWork = false;
-    mDualPipelineRequestDone = false;
-    mDualPipelineRequestThread = std::thread(&Llm::dualPipelineRequestLoop, this);
-}
-
-void Llm::stopDualPipelineRequestThread() {
-    {
-        std::lock_guard<std::mutex> lock(mDualPipelineRequestMutex);
-        if (!mDualPipelineRequestThread.joinable()) {
-            return;
-        }
-        mDualPipelineRequestStop = true;
-    }
-    mDualPipelineRequestCondition.notify_all();
-    mDualPipelineRequestThread.join();
-    {
-        std::lock_guard<std::mutex> lock(mDualPipelineRequestMutex);
-        mDualPipelineRequestStop = false;
-        mDualPipelineRequestHasWork = false;
-        mDualPipelineRequestDone = false;
-        mDualPipelineRequestWork = std::function<void()>();
-    }
-}
-
-void Llm::dualPipelineRequestLoop() {
-    while (true) {
-        std::function<void()> work;
-        {
-            std::unique_lock<std::mutex> lock(mDualPipelineRequestMutex);
-            while (!mDualPipelineRequestStop && !mDualPipelineRequestHasWork) {
-                mDualPipelineRequestCondition.wait(lock);
-            }
-            if (mDualPipelineRequestStop) {
-                mDualPipelineRequestHasWork = false;
-                mDualPipelineRequestDone = true;
-                mDualPipelineRequestCondition.notify_all();
-                break;
-            }
-            work = mDualPipelineRequestWork;
-            mDualPipelineRequestHasWork = false;
-        }
-        if (work) {
-            work();
-        }
-        {
-            std::lock_guard<std::mutex> lock(mDualPipelineRequestMutex);
-            mDualPipelineRequestWork = std::function<void()>();
-            mDualPipelineRequestDone = true;
-        }
-        mDualPipelineRequestCondition.notify_all();
-    }
-}
-
-void Llm::runOnDualPipelineRequestThread(const std::function<void()>& work) {
-    if (!mConfig->dual_pipeline_mode() || !mDualPipelineRequestThread.joinable() ||
-        mDualPipelineRequestThread.get_id() == std::this_thread::get_id()) {
-        work();
-        return;
-    }
-
-    {
-        std::unique_lock<std::mutex> lock(mDualPipelineRequestMutex);
-        while (mDualPipelineRequestHasWork) {
-            mDualPipelineRequestCondition.wait(lock);
-        }
-        mDualPipelineRequestWork = work;
-        mDualPipelineRequestDone = false;
-        mDualPipelineRequestHasWork = true;
-    }
-    mDualPipelineRequestCondition.notify_all();
-
-    {
-        std::unique_lock<std::mutex> lock(mDualPipelineRequestMutex);
-        while (!mDualPipelineRequestDone && !mDualPipelineRequestStop) {
-            mDualPipelineRequestCondition.wait(lock);
-        }
-    }
-}
-
-std::vector<std::shared_ptr<BatchScheduler::Chunk>> Llm::scheduleBatchWave(int blockSize, int bs) {
-    std::vector<std::shared_ptr<BatchScheduler::Chunk>> wave;
-    runOnDualPipelineRequestThread([&]() {
-        wave = mScheduler->scheduleWave(blockSize, bs);
-    });
-    return wave;
 }
 
 void Llm::resetDualPipelineExecutionState() {
+    if (mDualPipelineScheduler) {
+        mDualPipelineScheduler->cancelStageWave();
+        if (mDualPipelineScheduler->stageSnapshot().waveActive) {
+            mDualPipelineScheduler->finishStageWave();
+        }
+    }
     for (auto& runtime : mDualPipelineRuntimes) {
+        if (runtime.executor) {
+            runtime.executor->setCallBack(nullptr, nullptr);
+        }
         runtime.executor.reset();
         runtime.runtimeManager.reset();
         runtime.batchMeta.reset();
@@ -425,8 +311,36 @@ bool Llm::prepareDualPipelineExecutionState() {
             resetDualPipelineExecutionState();
             return false;
         }
+        runtime.runtimeManager->setMode(MNN::Interpreter::Session_Debug);
         runtime.batchMeta.reset(new BatchKVMeta);
         setRuntimeHint(runtime.runtimeManager, runtime.batchMeta.get(), mMeta.get());
+
+        const int pipelineId = static_cast<int>(i);
+        TensorCallBackWithInfo before = [this, pipelineId](const std::vector<Tensor*>&,
+                                                           const OperatorInfo* info) {
+            if (!mDualPipelineScheduler || info == nullptr) {
+                return true;
+            }
+            std::unordered_map<std::string, int>::const_iterator graph = mDualPipelineQnnOpIndices.find(info->name());
+            if (graph != mDualPipelineQnnOpIndices.end()) {
+                return mDualPipelineScheduler->enterGraphStage(pipelineId, graph->second);
+            }
+            return mDualPipelineScheduler->enterStage(pipelineId, DualPipelineScheduler::STAGE_HOST);
+        };
+        TensorCallBackWithInfo after = [this, pipelineId](const std::vector<Tensor*>&,
+                                                          const OperatorInfo* info) {
+            if (!mDualPipelineScheduler) {
+                return true;
+            }
+            if (info != nullptr) {
+                std::unordered_map<std::string, int>::const_iterator graph = mDualPipelineQnnOpIndices.find(info->name());
+                if (graph != mDualPipelineQnnOpIndices.end()) {
+                    return mDualPipelineScheduler->leaveGraphStage(pipelineId, graph->second);
+                }
+            }
+            return mDualPipelineScheduler->leaveStage(pipelineId);
+        };
+        runtime.executor->setCallBack(std::move(before), std::move(after));
     }
     mDualPipelineExecutionReady = true;
     return true;
@@ -453,16 +367,21 @@ std::shared_ptr<Express::Module> Llm::getDualPipelineModule(int pipelineId, cons
     }
 
     std::shared_ptr<Express::Module> module;
-    runtime.runtimeManager->setExternalFile(mConfig->llm_weight());
-    {
+    if (!runtime.modulePool.empty()) {
         Express::ExecutorScope scope(runtime.executor);
-        module.reset(Express::Module::load(mDualPipelineInputNames,
-                                           mDualPipelineOutputNames,
-                                           mDualPipelineModelPath.c_str(),
-                                           runtime.runtimeManager,
-                                           &mDualPipelineModuleConfig));
+        module.reset(Express::Module::clone(runtime.modulePool.begin()->second.get()));
+    } else {
+        runtime.runtimeManager->setExternalFile(mConfig->llm_weight());
+        {
+            Express::ExecutorScope scope(runtime.executor);
+            module.reset(Express::Module::load(mDualPipelineInputNames,
+                                               mDualPipelineOutputNames,
+                                               mDualPipelineModelPath.c_str(),
+                                               runtime.runtimeManager,
+                                               &mDualPipelineModuleConfig));
+        }
+        runtime.runtimeManager->setExternalFile("");
     }
-    runtime.runtimeManager->setExternalFile("");
     if (!module) {
         return std::shared_ptr<Express::Module>();
     }
@@ -473,8 +392,8 @@ std::shared_ptr<Express::Module> Llm::getDualPipelineModule(int pipelineId, cons
 void Llm::resetDualPipelineGraphState() {
     mDualPipelineGraphSnapshot.ops.clear();
     mDualPipelineGraphSnapshotReady = false;
-    mDualPipelineRequestOpCursor.clear();
-    mDualPipelineRequestGraphs.clear();
+    mDualPipelineQnnGraphRequests.clear();
+    mDualPipelineQnnOpIndices.clear();
 }
 
 bool Llm::refreshDualPipelineGraphSnapshot() {
@@ -487,9 +406,31 @@ bool Llm::refreshDualPipelineGraphSnapshot() {
         MNN_PRINT("MNN_DUAL_PIPELINE: StaticModule session is not available for graph snapshot.\n");
         return false;
     }
-    // Snapshot copies Session metadata once; the prefetch worker must not mutate live Session state.
-    mDualPipelineGraphSnapshot = buildGraphSnapshot(staticModule->getSession(), 0, mConfig->base_dir_, mConfig->npu_model_dir());
+    // Prefer the observable Session command order; model metadata completes commands absent before first execution.
+    const GraphSnapshot executionSnapshot = buildGraphSnapshot(
+        staticModule->getSession(), 0, mConfig->base_dir_, mConfig->npu_model_dir());
+    const GraphSnapshot modelSnapshot = buildQnnGraphSnapshotFromModel(
+        mDualPipelineModelPath, mConfig->base_dir_, mConfig->npu_model_dir());
+    mDualPipelineGraphSnapshot = mergeQnnGraphSnapshotsInExecutionOrder(executionSnapshot, modelSnapshot);
     mDualPipelineGraphSnapshotReady = !mDualPipelineGraphSnapshot.ops.empty();
+    mDualPipelineQnnGraphRequests = buildQnnGraphRequests(
+        mDualPipelineGraphSnapshot, 0, static_cast<int>(mDualPipelineGraphSnapshot.ops.size()), -1);
+    int graphIndex = 0;
+    for (size_t i = 0; i < mDualPipelineGraphSnapshot.ops.size(); ++i) {
+        const OpInfo& op = mDualPipelineGraphSnapshot.ops[i];
+        if (isQnnPluginOp(op)) {
+            if (graphIndex >= static_cast<int>(mDualPipelineQnnGraphRequests.size()) ||
+                mDualPipelineQnnOpIndices.find(op.opName) != mDualPipelineQnnOpIndices.end()) {
+                resetDualPipelineGraphState();
+                return false;
+            }
+            mDualPipelineQnnOpIndices[op.opName] = graphIndex++;
+        }
+    }
+    if (graphIndex != static_cast<int>(mDualPipelineQnnGraphRequests.size())) {
+        resetDualPipelineGraphState();
+        return false;
+    }
     return mDualPipelineGraphSnapshotReady;
 }
 
@@ -501,92 +442,8 @@ int Llm::dualPipelinePaddedCulLen(const BatchScheduler::Chunk& chunk) {
         return chunk.culLen;
     }
     const int requiredSize = std::max(chunk.culLen, static_cast<int>(chunk.reqId.size()));
-    for (int i = 0; i < static_cast<int>(mDualPipelineGraphSnapshot.ops.size()); ++i) {
-        const OpInfo& op = mDualPipelineGraphSnapshot.ops[i];
-        if (!isQnnPluginOp(op)) {
-            continue;
-        }
-        return std::max(chunk.culLen, selectQnnBucketSize(op.qnn, requiredSize));
-    }
-    return chunk.culLen;
-}
-
-void Llm::enqueueDualPipelineChunkGraphs(const BatchScheduler::Chunk& chunk, std::vector<std::string>* graphIds) {
-    if (!mConfig->dual_pipeline_mode() || !mDualPipelineScheduler) {
-        return;
-    }
-    if (!mDualPipelineGraphSnapshotReady && !refreshDualPipelineGraphSnapshot()) {
-        return;
-    }
-    if (mDualPipelineGraphSnapshot.ops.empty()) {
-        return;
-    }
-
-    const int windowK = std::max(1, mConfig->dual_pipeline_prefetch_window());
-    for (size_t i = 0; i < chunk.reqId.size(); ++i) {
-        const int requestId = chunk.reqId[i];
-        int& cursor = mDualPipelineRequestOpCursor[requestId];
-        const int start = cursor;
-        // One scheduled chunk may contain two requests; enqueue future CPU/OpenCL and QNN work for each request.
-        DualPipelineScheduler::PrefetchWindow window = buildPrefetchWindow(mDualPipelineGraphSnapshot, start, windowK, requestId);
-        if (!window.requests.empty()) {
-            mDualPipelineScheduler->enqueuePrefetchWindow(window);
-        }
-
-        const int requestGroupSize = static_cast<int>(chunk.reqId.size());
-        const std::vector<DualPipelineScheduler::GraphRequest> requests =
-            buildQnnGraphRequests(mDualPipelineGraphSnapshot, 0,
-                                  static_cast<int>(mDualPipelineGraphSnapshot.ops.size()),
-                                  requestId, requestGroupSize);
-        for (size_t j = 0; j < requests.size(); ++j) {
-            if (mDualPipelineScheduler->enqueueRequestGraph(requests[j])) {
-                if (graphIds != nullptr) {
-                    graphIds->push_back(requests[j].graphId);
-                }
-                std::vector<std::string>& requestGraphs = mDualPipelineRequestGraphs[requestId];
-                if (std::find(requestGraphs.begin(), requestGraphs.end(), requests[j].graphId) == requestGraphs.end()) {
-                    requestGraphs.push_back(requests[j].graphId);
-                }
-            }
-        }
-
-        // Move this request's future-op cursor after the chunk. This is an ordered window, not a DAG scheduler yet.
-        cursor += windowK;
-        if (cursor >= static_cast<int>(mDualPipelineGraphSnapshot.ops.size())) {
-            cursor = 0;
-        }
-    }
-}
-
-void Llm::completeDualPipelineChunkGraphs(const std::vector<std::string>& graphIds) {
-    if (!mConfig->dual_pipeline_mode() || !mDualPipelineScheduler) {
-        return;
-    }
-    for (size_t i = 0; i < graphIds.size(); ++i) {
-        mDualPipelineScheduler->markExecutionComplete(graphIds[i]);
-    }
-}
-
-void Llm::releaseDualPipelineRequestGraphs(int requestId) {
-    if (!mConfig->dual_pipeline_mode() || !mDualPipelineScheduler) {
-        return;
-    }
-    std::unordered_set<std::string> graphIds;
-    std::unordered_map<int, std::vector<std::string>>::iterator iter = mDualPipelineRequestGraphs.find(requestId);
-    if (iter != mDualPipelineRequestGraphs.end()) {
-        graphIds.insert(iter->second.begin(), iter->second.end());
-        mDualPipelineRequestGraphs.erase(iter);
-    }
-    mDualPipelineRequestOpCursor.erase(requestId);
-    // Release requests only need graphId here; scheduler merges metadata from the last load request.
-    for (std::unordered_set<std::string>::const_iterator it = graphIds.begin(); it != graphIds.end(); ++it) {
-        DualPipelineScheduler::GraphRequest release;
-        release.action = DualPipelineScheduler::GRAPH_RELEASE;
-        release.requestId = requestId;
-        release.graphId = *it;
-        release.reason = "request_complete";
-        mDualPipelineScheduler->enqueueRequestGraph(release);
-    }
+    const int bucketSize = selectQnnCompatibleBucketSize(mDualPipelineGraphSnapshot, requiredSize);
+    return bucketSize < requiredSize ? -1 : std::max(chunk.culLen, bucketSize);
 }
 
 void Llm::releaseDualPipelineRequestExecution(int requestId) {
@@ -638,7 +495,7 @@ void Llm::setRuntimeHint(const std::shared_ptr<Express::Executor::RuntimeManager
     rtg->setHint(MNN::Interpreter::CPU_SME_CORES, mConfig->config_.value("cpu_sme_core_num", 2));
 
     // Set PackedAttention mode for continuous batching
-    bool packedMode = mConfig->packed_attention();
+    bool packedMode = mConfig->packed_attention() || mConfig->dual_pipeline_mode();
     rtg->setHint(MNN::Interpreter::PACKED_ATTENTION_MODE, packedMode);
     if(packedMode){
         // Batch mode: use BatchKVMeta for CPUPackedAttention
@@ -1325,13 +1182,10 @@ std::vector<std::vector<int>> Llm::generate(const std::vector<std::vector<int> >
     mContext->all_seq_len = 0;
     
     // add all requests
-    std::vector<int> reqIds;
-    runOnDualPipelineRequestThread([&]() {
-        reqIds = mScheduler->addRequest(input_ids);
-        if(max_new_tokens > 0) {
-            mScheduler->setMaxNewTokens(max_new_tokens);
-        }
-    });
+    std::vector<int> reqIds = mScheduler->addRequest(input_ids);
+    if(max_new_tokens > 0) {
+        mScheduler->setMaxNewTokens(max_new_tokens);
+    }
     // set batch kvcache, but actually works in Llm::setRuntimeHint
     mRuntimeManager->setHintPtr(Interpreter::KVCACHE_INFO, mBatchMeta.get());
 
@@ -1391,16 +1245,13 @@ std::vector<std::vector<int>> Llm::generate(const std::vector<std::vector<int> >
                 int id = chunk->reqId[i];
                 bool requestFinished = false;
                 const int calLen = chunk->calLen[i];
-                runOnDualPipelineRequestThread([&]() {
-                    mScheduler->update(id, token, calLen, is_stop(token));
-                    requestFinished = mScheduler->isFinished(id);
-                    if(requestFinished) {
-                        mScheduler->releaseKVCache(id);
-                    }
-                });
+                mScheduler->update(id, token, calLen, is_stop(token));
+                requestFinished = mScheduler->isFinished(id);
+                if(requestFinished) {
+                    mScheduler->releaseKVCache(id);
+                }
                 if (requestFinished) {
                     releaseDualPipelineRequestExecution(id);
-                    releaseDualPipelineRequestGraphs(id);
                 }
                 // print token str
                 // std::cout<<"ReqId: "<<id<<" | token: "<<token<<" | "<<this->tokenizer_decode(token)<<std::endl;
@@ -1412,7 +1263,6 @@ std::vector<std::vector<int>> Llm::generate(const std::vector<std::vector<int> >
             std::shared_ptr<BatchScheduler::Chunk> chunk;
             std::shared_ptr<Module> module;
             std::shared_ptr<BatchKVMeta> batchMeta;
-            std::vector<std::string> graphIds;
             int paddedCulLen = 0;
             Express::VARP hiddenStates;
             Express::VARP attentionMask;
@@ -1421,7 +1271,7 @@ std::vector<std::vector<int>> Llm::generate(const std::vector<std::vector<int> >
             std::vector<Express::VARP> outputs;
         };
         while (true) {
-            std::vector<std::shared_ptr<BatchScheduler::Chunk>> wave = scheduleBatchWave(-1, 4);
+            std::vector<std::shared_ptr<BatchScheduler::Chunk>> wave = mScheduler->scheduleWave(-1, 4);
             if (wave.empty()) {
                 break;
             }
@@ -1432,11 +1282,27 @@ std::vector<std::vector<int>> Llm::generate(const std::vector<std::vector<int> >
                 mBatchMeta->calId.clear();
             }
             bool buildFailed = false;
+            std::vector<int> paddedCulLens;
+            paddedCulLens.reserve(wave.size());
+            for (size_t waveIndex = 0; waveIndex < wave.size(); ++waveIndex) {
+                const int paddedCulLen = dualPipelinePaddedCulLen(*wave[waveIndex]);
+                if (paddedCulLen < wave[waveIndex]->culLen) {
+                    MNN_ERROR("MNN_DUAL_PIPELINE: no QNN graph bucket can hold packed length %d.\n",
+                              wave[waveIndex]->culLen);
+                    buildFailed = true;
+                    break;
+                }
+                paddedCulLens.push_back(paddedCulLen);
+            }
+            if (buildFailed) {
+                mContext->status = LlmStatus::INTERNAL_ERROR;
+                break;
+            }
             for (size_t waveIndex = 0; waveIndex < wave.size(); ++waveIndex) {
                 const std::shared_ptr<BatchScheduler::Chunk>& chunk = wave[waveIndex];
                 DualWaveTask task;
                 task.chunk = chunk;
-                task.paddedCulLen = dualPipelinePaddedCulLen(*chunk);
+                task.paddedCulLen = paddedCulLens[waveIndex];
                 task.hiddenStates = this->embedding(chunk->inputs, chunk->calLen, task.paddedCulLen);
                 task.attentionMask = this->gen_attention_mask(chunk->calLen);
                 task.positionIds = this->gen_position_ids(chunk->pos, chunk->calLen, task.paddedCulLen);
@@ -1449,7 +1315,6 @@ std::vector<std::vector<int>> Llm::generate(const std::vector<std::vector<int> >
                 }
                 task.batchMeta = mDualPipelineRuntimes[chunk->pipelineId].batchMeta;
                 prepareDualPipelineBatchMeta(mBatchMeta.get(), task.batchMeta.get(), *chunk, mConfig->layer_nums());
-                enqueueDualPipelineChunkGraphs(*chunk, &task.graphIds);
                 tasks.push_back(task);
             }
             if (buildFailed) {
@@ -1460,15 +1325,17 @@ std::vector<std::vector<int>> Llm::generate(const std::vector<std::vector<int> >
                 break;
             }
 
-            std::vector<std::string> waveGraphIds;
+            std::vector<DualPipelineScheduler::PipelineGraphWave> graphWaves;
+            graphWaves.reserve(tasks.size());
             for (size_t i = 0; i < tasks.size(); ++i) {
-                waveGraphIds.insert(waveGraphIds.end(), tasks[i].graphIds.begin(), tasks[i].graphIds.end());
+                DualPipelineScheduler::PipelineGraphWave graphWave;
+                graphWave.pipelineId = tasks[i].chunk->pipelineId;
+                graphWave.ownerRequestIds = tasks[i].chunk->reqId;
+                graphWave.graphs = mDualPipelineQnnGraphRequests;
+                graphWaves.push_back(graphWave);
             }
-            if (mDualPipelineScheduler && !mDualPipelineScheduler->waitForGraphsReady(waveGraphIds)) {
-                MNN_ERROR("MNN_DUAL_PIPELINE: failed to prepare QNN graphs for execution wave.\n");
-                for (size_t i = 0; i < tasks.size(); ++i) {
-                    completeDualPipelineChunkGraphs(tasks[i].graphIds);
-                }
+            if (!mDualPipelineScheduler || !mDualPipelineScheduler->beginGraphPrefetchWave(graphWaves)) {
+                MNN_ERROR("MNN_DUAL_PIPELINE: failed to start dynamic QNN graph prefetch wave.\n");
                 if (mBatchMeta) {
                     mBatchMeta->calId.clear();
                 }
@@ -1486,9 +1353,24 @@ std::vector<std::vector<int>> Llm::generate(const std::vector<std::vector<int> >
                 }
             }
             if (buildFailed) {
-                for (size_t i = 0; i < tasks.size(); ++i) {
-                    completeDualPipelineChunkGraphs(tasks[i].graphIds);
+                mDualPipelineScheduler->cancelGraphPrefetchWave();
+                mDualPipelineScheduler->finishGraphPrefetchWave();
+                if (mBatchMeta) {
+                    mBatchMeta->calId.clear();
                 }
+                mContext->status = LlmStatus::INTERNAL_ERROR;
+                break;
+            }
+
+            std::vector<int> stagePipelineIds;
+            stagePipelineIds.reserve(tasks.size());
+            for (size_t i = 0; i < tasks.size(); ++i) {
+                stagePipelineIds.push_back(tasks[i].chunk->pipelineId);
+            }
+            if (!mDualPipelineScheduler || !mDualPipelineScheduler->beginStageWave(stagePipelineIds)) {
+                MNN_ERROR("MNN_DUAL_PIPELINE: failed to start execution stage wave.\n");
+                mDualPipelineScheduler->cancelGraphPrefetchWave();
+                mDualPipelineScheduler->finishGraphPrefetchWave();
                 if (mBatchMeta) {
                     mBatchMeta->calId.clear();
                 }
@@ -1503,16 +1385,31 @@ std::vector<std::vector<int>> Llm::generate(const std::vector<std::vector<int> >
                     Express::ExecutorScope scope(mDualPipelineRuntimes[tasks[i].chunk->pipelineId].executor);
                     tasks[i].outputs = tasks[i].module->onForward(
                         {tasks[i].hiddenStates, tasks[i].attentionMask, tasks[i].positionIds, tasks[i].logitsIndex});
+                    if (tasks[i].outputs.empty() || tasks[i].outputs[0] == nullptr) {
+                        mDualPipelineScheduler->cancelStageWave();
+                        mDualPipelineScheduler->cancelGraphPrefetchWave();
+                    }
                 });
             }
             for (size_t i = 0; i < workers.size(); ++i) {
                 workers[i].join();
             }
+            const DualPipelineScheduler::StageSnapshot stageSnapshot = mDualPipelineScheduler->stageSnapshot();
+            const bool stageCallbacksExecuted = stageSnapshot.completedStages > 0 &&
+                (mDualPipelineQnnOpIndices.empty() || stageSnapshot.completedQnnStages > 0);
+            const bool stageWaveSucceeded = mDualPipelineScheduler->finishStageWave() && stageCallbacksExecuted;
+            const bool graphWaveSucceeded = mDualPipelineScheduler->finishGraphPrefetchWave();
 
-            bool waveFailed = false;
+            bool waveFailed = !stageWaveSucceeded || !graphWaveSucceeded;
+            if (waveFailed) {
+                MNN_ERROR("MNN_DUAL_PIPELINE: execution stage wave failed.\n");
+                mContext->status = LlmStatus::INTERNAL_ERROR;
+            }
             for (size_t taskIndex = 0; taskIndex < tasks.size(); ++taskIndex) {
                 DualWaveTask& task = tasks[taskIndex];
-                completeDualPipelineChunkGraphs(task.graphIds);
+                if (waveFailed) {
+                    continue;
+                }
                 if (task.outputs.empty() || task.outputs[0] == nullptr) {
                     MNN_ERROR("Llm batch generate failed: module forward returned no logits.\n");
                     mContext->status = LlmStatus::INTERNAL_ERROR;
@@ -1541,16 +1438,13 @@ std::vector<std::vector<int>> Llm::generate(const std::vector<std::vector<int> >
                     int id = task.chunk->reqId[i];
                     bool requestFinished = false;
                     const int calLen = task.chunk->calLen[i];
-                    runOnDualPipelineRequestThread([&]() {
-                        mScheduler->update(id, token, calLen, is_stop(token));
-                        requestFinished = mScheduler->isFinished(id);
-                        if (requestFinished) {
-                            mScheduler->releaseKVCache(id);
-                        }
-                    });
+                    mScheduler->update(id, token, calLen, is_stop(token));
+                    requestFinished = mScheduler->isFinished(id);
+                    if (requestFinished) {
+                        mScheduler->releaseKVCache(id);
+                    }
                     if (requestFinished) {
                         releaseDualPipelineRequestExecution(id);
-                        releaseDualPipelineRequestGraphs(id);
                     }
                 }
             }
@@ -1563,10 +1457,7 @@ std::vector<std::vector<int>> Llm::generate(const std::vector<std::vector<int> >
         }
     }
     for(int id: reqIds){
-        std::vector<int> result;
-        runOnDualPipelineRequestThread([&]() {
-            result = mScheduler->getResult(id);
-        });
+        std::vector<int> result = mScheduler->getResult(id);
         // save result
         for(int j = 0; j < bs; j++) {
             if(reqIds[j] == id) {
@@ -1582,10 +1473,7 @@ std::vector<std::vector<int>> Llm::generate(const std::vector<std::vector<int> >
             }
         }
         releaseDualPipelineRequestExecution(id);
-        releaseDualPipelineRequestGraphs(id);
-        runOnDualPipelineRequestThread([&]() {
-            mScheduler->releaseReq(id);
-        });
+        mScheduler->releaseReq(id);
     }
     return ret;
 }
@@ -1776,7 +1664,6 @@ Llm::~Llm() {
         gTimeTraceInfo->dump();
     }
 #endif
-    stopDualPipelineRequestThread();
     if (mDualPipelineScheduler) {
         mDualPipelineScheduler->stop();
     }

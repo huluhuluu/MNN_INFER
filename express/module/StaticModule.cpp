@@ -648,6 +648,14 @@ Module* StaticModule::clone(CloneContext* ctx) const {
     }
     auto rt = ctx->pRuntimeManager->getInside()->mRuntime;
     module->mSession.reset(mSession->clone(std::move(rt), mResource->mSharedConst));
+    auto& backendCache = module->mSession->getPipelineInfo(0).first.cache;
+    const std::string& npuDir = ctx->pRuntimeManager->getInside()->mContent->mNpuDir;
+    if (backendCache.first) {
+        backendCache.first->pNPUModelDirPath = npuDir;
+    }
+    if (backendCache.second) {
+        backendCache.second->pNPUModelDirPath = npuDir;
+    }
     module->resetInputOutputs();
     return this->cloneBaseTo(ctx, module);
 }

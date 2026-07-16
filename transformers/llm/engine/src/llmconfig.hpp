@@ -351,8 +351,9 @@ public:
     }
 
     int dual_pipeline_prefetch_window() const {
-        return config_.value("dual_pipeline_prefetch_window", 5);
+        return config_.value("dual_pipeline_prefetch_window", 2);
     }
+
     // generate config end >
 
     // < backend config start

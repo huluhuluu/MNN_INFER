@@ -754,9 +754,10 @@ public:
     }
 };
 
+static std::mutex gQnnContextOperationMutex;
+
 class RawExecutorWrapper {
 private:
-    std::mutex mInvokeMutex;
     Qnn_ContextHandle_t mQnnContextHandle = nullptr;
     const QnnContext_Config_t** mQnnContextConfig = nullptr;
     std::vector<Qnn_GraphHandle_t> mQnnGraphHandleVec = {};
@@ -774,6 +775,7 @@ public:
         mPerf->setRpcLatencyAndPolling();
     }
     ~ RawExecutorWrapper() {
+        std::lock_guard<std::mutex> operationLock(gQnnContextOperationMutex);
         if (mQnnProfileHandle) {
             QNN::gContext.interface.profileFree(mQnnProfileHandle);
             mQnnProfileHandle = nullptr;
@@ -785,6 +787,7 @@ public:
     }
 
     bool compileModel(const std::string& path, size_t offset, size_t size, const std::vector<std::string>& allGraphName) {
+        std::lock_guard<std::mutex> operationLock(gQnnContextOperationMutex);
         void* buffer = nullptr;
         std::vector<char> bufferVec(size, 0);
         MMapReader reader;
@@ -856,7 +859,7 @@ public:
     }
 
     bool invokModel(const std::vector<std::pair<const MNN::Tensor *, std::string>>& inputs, std::vector<std::pair<const MNN::Tensor *, std::string>>& outputs, int shapeIndex) {
-        std::lock_guard<std::mutex> lock(mInvokeMutex);
+        std::lock_guard<std::mutex> operationLock(gQnnContextOperationMutex);
         GraphInfo* graph = mGraphsInfo[shapeIndex];
         Qnn_GraphHandle_t qnnGraphHandle = mQnnGraphHandleVec[shapeIndex];
 
@@ -1051,17 +1054,16 @@ static void releaseAllRawGraphsInternal() {
 
 class PluginExecuteRaw : public CPUComputeKernel {
 private:
-    std::shared_ptr<RawExecutorWrapper> mRawExecutor;
+    std::shared_ptr<RawExecutorWrapper> mFallbackExecutor;
+    std::string mGraphPath;
+    size_t mBinaryOffset = 0;
+    size_t mBinarySize = 0;
+    std::vector<std::string> mAllGraphName;
     std::vector<std::pair<const MNN::Tensor *, std::string>> mInputs;
     std::vector<std::pair<const MNN::Tensor *, std::string>> mOutputs;
     std::vector<std::shared_ptr<MNN::Tensor>> mRealInputs;
     std::vector<std::shared_ptr<MNN::Tensor>> mRealOutputs;
 public:
-    ~ PluginExecuteRaw() {
-        mRealInputs.clear();
-        mRealOutputs.clear();
-        mRawExecutor.reset();
-    }
     bool init(CPUKernelContext* ctx) override {
         if (QNN::gContext.deviceHandle == nullptr){
             QNN::createQnnContext();
@@ -1069,21 +1071,21 @@ public:
         if (QNN::gContext.deviceHandle == nullptr) {
             return false;
         }
-        auto path = MNNFilePathConcat(ctx->dir_path(), ctx->getAttr("path")->s()->str());
+        mGraphPath = MNNFilePathConcat(ctx->dir_path(), ctx->getAttr("path")->s()->str());
 
-        std::vector<std::string> allGraphName;
+        mAllGraphName.clear();
         auto allGraphNameAttr = ctx->getAttr("allGraphName");
         if (allGraphNameAttr && allGraphNameAttr->list() && allGraphNameAttr->list()->s()) {
             auto graphNames = allGraphNameAttr->list()->s();
             for (int i = 0; i < graphNames->size(); ++i) {
-                allGraphName.push_back(graphNames->GetAsString(i)->str());
+                mAllGraphName.push_back(graphNames->GetAsString(i)->str());
             }
         } else {
             MNN_ERROR("MNN_QNN: Incorrect Plugin Op, can't find 'allGraphName' attr.\n");
             return false;
         }
 
-        size_t binaryOffset = 0;
+        mBinaryOffset = 0;
         auto offsetAttr = ctx->getAttr("offset");
         if (offsetAttr && offsetAttr->list() && offsetAttr->list()->i()->size() == 2) {
             const int * dataPtr = offsetAttr->list()->i()->data();
@@ -1094,10 +1096,10 @@ public:
             ::memcpy(&lowDst, &lowSrc, sizeof(uint32_t));
             ::memcpy(&highDst, &highSrc, sizeof(uint32_t));
 
-            binaryOffset = (static_cast<size_t>(highDst) << 32) | static_cast<size_t>(lowDst);
+            mBinaryOffset = (static_cast<size_t>(highDst) << 32) | static_cast<size_t>(lowDst);
         }
 
-        size_t binarySize = 0;
+        mBinarySize = 0;
         auto sizeAttr = ctx->getAttr("size");
         if (sizeAttr && sizeAttr->list() && sizeAttr->list()->i()->size() == 2) {
             const int * dataPtr = sizeAttr->list()->i()->data();
@@ -1108,14 +1110,9 @@ public:
             ::memcpy(&lowDst, &lowSrc, sizeof(uint32_t));
             ::memcpy(&highDst, &highSrc, sizeof(uint32_t));
 
-            binarySize = (static_cast<size_t>(highDst) << 32) | static_cast<size_t>(lowDst);
+            mBinarySize = (static_cast<size_t>(highDst) << 32) | static_cast<size_t>(lowDst);
         }
-        mRawExecutor = findRawGraphExecutor(path, binaryOffset, binarySize, allGraphName);
-        if (mRawExecutor) {
-            return true;
-        }
-        mRawExecutor.reset(new RawExecutorWrapper());
-        return mRawExecutor->compileModel(path, binaryOffset, binarySize, allGraphName);
+        return true;
     }
 
     bool resize(CPUKernelContext* ctx) override {
@@ -1124,27 +1121,6 @@ public:
             MNN_ERROR("MNN_QNN: Failed to execute Plugin Op.\n");
             return false;
         }
-        auto inputs = ctx->getAttr("inputs")->list();
-        auto inputTensor = ctx->inputs();
-        MNN_ASSERT(inputs->s()->size() == inputTensor.size());
-        mInputs.resize(inputs->s()->size());
-        mRealInputs.resize(inputTensor.size());
-        for (int i=0; i<inputs->s()->size(); ++i) {
-            mRealInputs[i].reset(new Tensor(inputTensor[i], Tensor::CAFFE));
-            mInputs[i].second = inputs->s()->GetAsString(i)->str();
-            mInputs[i].first = mRealInputs[i].get();
-        }
-        auto outputs = ctx->getAttr("outputs")->list();
-        auto outputTensor = ctx->outputs();
-        mOutputs.resize(outputs->s()->size());
-        MNN_ASSERT(outputs->s()->size() == outputTensor.size());
-        mRealOutputs.resize(outputTensor.size());
-        for (int i=0; i<outputs->s()->size(); ++i) {
-            mRealOutputs[i].reset(new Tensor(outputTensor[i], Tensor::CAFFE));
-            mOutputs[i].second = outputs->s()->GetAsString(i)->str();
-            mOutputs[i].first = mRealOutputs[i].get();
-        }
-
         return true;
     }
 
@@ -1189,7 +1165,19 @@ public:
         for (int i=0; i<mInputs.size(); ++i) {
             ctx->backend()->onCopyBuffer(inputTensor[i], mRealInputs[i].get());
         }
-        if (!mRawExecutor->invokModel(mInputs, mOutputs, shapeIndex)) {
+        std::shared_ptr<RawExecutorWrapper> executor = findRawGraphExecutor(
+            mGraphPath, mBinaryOffset, mBinarySize, mAllGraphName);
+        if (!executor) {
+            if (!mFallbackExecutor) {
+                mFallbackExecutor.reset(new RawExecutorWrapper());
+                if (!mFallbackExecutor->compileModel(mGraphPath, mBinaryOffset, mBinarySize, mAllGraphName)) {
+                    mFallbackExecutor.reset();
+                    return false;
+                }
+            }
+            executor = mFallbackExecutor;
+        }
+        if (!executor->invokModel(mInputs, mOutputs, shapeIndex)) {
             return false;
         }
         for (int i=0; i<mOutputs.size(); ++i) {
