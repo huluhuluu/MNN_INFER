@@ -455,6 +455,9 @@ void Llm::releaseDualPipelineRequestExecution(int requestId) {
             runtime.batchMeta->releaseKV(requestId);
         }
     }
+    if (mDualPipelineScheduler) {
+        mDualPipelineScheduler->releaseRequestGraphs(requestId);
+    }
 }
 
 void Llm::setRuntimeHint(const std::shared_ptr<Express::Executor::RuntimeManager>& rtg, BatchKVMeta* batchMeta, KVMeta* meta) {

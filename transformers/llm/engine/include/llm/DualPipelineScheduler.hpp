@@ -51,8 +51,7 @@ public:
 
     enum TaskType {
         TASK_GRAPH_LOAD = 0,
-        TASK_GRAPH_RELEASE = 1,
-        TASK_GRAPH_COMPLETE = 2
+        TASK_GRAPH_COMPLETE = 1
     };
 
     struct GraphRequest {
@@ -79,7 +78,6 @@ public:
         std::string graphId;
         bool resident;
         bool pinned;
-        bool pendingRelease;
         int activeUseCount;
         uint64_t lastUseSequence;
 
@@ -138,6 +136,7 @@ public:
     bool leaveGraphStage(int pipelineId, int graphIndex);
     void cancelGraphPrefetchWave();
     bool finishGraphPrefetchWave();
+    size_t releaseRequestGraphs(int requestId);
     GraphWindowSnapshot graphWindowSnapshot() const;
 
     bool beginStageWave(const std::vector<int>& pipelineIds);
@@ -160,7 +159,6 @@ private:
     struct GraphState {
         GraphRecord record;
         GraphRequest lastRequest;
-        GraphRequest pendingReleaseRequest;
         std::set<int> requestOwners;
         bool loadFinished;
 
@@ -194,14 +192,13 @@ private:
     void _enqueueTaskLocked(const Task& task);
     void _extendGraphWindowLocked(int pipelineId, int targetGraphIndex);
     void _enqueueGraphIndexLocked(int pipelineId, int graphIndex);
-    void _enqueueGraphCompletionLocked(PipelineGraphState& state, int graphIndex, const std::string& reason);
+    void _enqueueGraphCompletionLocked(PipelineGraphState& state, int graphIndex);
     void _removePendingGraphLoadsLocked(int pipelineId, int firstGraphIndex, int endGraphIndex);
     void _processTask(const Task& task);
     void _processGraphRequest(const GraphRequest& request);
     void _processGraphComplete(const std::string& graphId);
     void _planEvictionsLocked(const std::string& incomingGraphId,
                               std::vector<GraphRequest>* releaseRequests);
-    GraphRequest _mergeReleaseRequestLocked(const GraphState& state, const GraphRequest& request) const;
     size_t _residentGraphCountLocked() const;
     void _grantReadyStagesLocked();
 
@@ -212,6 +209,7 @@ private:
     Config mConfig;
     std::map<std::string, GraphState> mGraphs;
     std::map<int, PipelineGraphState> mPipelineGraphs;
+    std::map<int, std::string> mPendingQnnGraphs;
     uint64_t mNextSequence;
     uint64_t mNextTaskSequence;
     bool mRunning;

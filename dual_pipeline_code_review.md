@@ -1,114 +1,147 @@
-# MNN 双流水线 / QNN Prefetch 改动 Code Review 说明
+# MNN 双流水线、QNN 动态预取与 Resident Cache 代码 Review
 
-本文记录当前 `mnn-pp` 工作区里双流水线相关未提交改动的真实代码路径。主线从 `Llm::configureDualPipelineMode()` 读配置开始，到 `BatchScheduler::scheduleWave()` 生成同一 segment 的两条 pipeline chunk，再到 `Llm::generate(batch)` 用两套 runtime/module 并发执行，期间把 QNN graph prefetch/release 信号交给 `DualPipelineScheduler` worker，最后由 `QNNBackend.cpp` 里的 CPU plugin raw graph pool 复用预加载的 QNN 离线图。
+本文只解释当前仓库的真实代码路径和版本差异。主入口是 `Llm::generate(vector<vector<int>>)`，重点跟踪配置、请求分组、QNN 图预测、预取 worker、Host/QNN stage、两个独立 Module，以及跨 decode wave 的 resident graph 生命周期。
 
-## 1. 改动总览
+## 0. 模块接口调用总图
 
-这组改动分成五层：
+下面先给出接口边界，再按同一条线展开。
 
-| 层级 | 入口 | 主要职责 | 主要文件 |
-|---|---|---|---|
-| 配置层 | `Llm::configureDualPipelineMode()` | 打开/关闭 dual mode，启动 prefetch worker，安装 QNN load/release callback | `llm.cpp` |
-| 请求调度层 | `BatchScheduler::scheduleWave()` | 按同一 `segmentIndex` 返回 disjoint pipeline chunks | `BatchScheduler.*` |
-| 执行资源层 | `prepareDualPipelineExecutionState()` | 为 pipeline 0/1 分别准备 executor、runtime manager、module pool、`BatchKVMeta` | `llm.*`, `Executor.cpp`, `kvmeta.hpp` |
-| 图预取层 | `buildGraphSnapshot()` / `DualPipelineScheduler` | 只读图快照，构造 CPU/OpenCL resize request 和 QNN graph request，串行处理 load/complete/release | `DualPipelineGraph.*`, `DualPipelineScheduler.*` |
-| QNN plugin 层 | `MNN::QNN::preloadRawGraph()` | 预加载 QNN raw graph，CPU plugin `PluginExecuteRaw` 优先复用 resident executor | `QNNPrefetch.hpp`, `QNNBackend.cpp` |
+~~~text
+用户 / llm_demo
+    │
+    ├─ Llm::createLLM(config)
+    │      └─ LlmConfig::dual_pipeline_*()
+    │
+    ├─ Llm::load()
+    │      ├─ 主 Module + RuntimeManager
+    │      ├─ refreshDualPipelineGraphSnapshot()
+    │      │      ├─ Session::getSession() -> buildGraphSnapshot()
+    │      │      ├─ FlatBuffer model -> buildQnnGraphSnapshotFromModel()
+    │      │      └─ mergeQnnGraphSnapshotsInExecutionOrder()
+    │      └─ prepareDualPipelineExecutionState()
+    │             ├─ Executor::newExecutor() x 2
+    │             ├─ RuntimeManager + BatchKVMeta x 2
+    │             └─ Executor::setCallBack(before, after)
+    │
+    └─ Llm::generate(batch)
+           │
+           ├─ BatchScheduler::scheduleWave()
+           │      ├─ request -> stable pipelineId
+           │      └─ same segment -> pipeline 0/1 disjoint chunks
+           │
+           ├─ dualPipelinePaddedCulLen(chunk)
+           │      └─ selectQnnCompatibleBucketSize()
+           │             ├─ pipeline group size=2 -> bucket 8
+           │             └─ pipeline group size=1 -> bucket 1
+           │
+           ├─ prepareDualPipelineBatchMeta()
+           │      └─ upper BatchKVMeta -> pipeline BatchKVMeta
+           │
+           ├─ DualPipelineScheduler::beginGraphPrefetchWave()
+           │      └─ graph worker queue: GRAPH_LOAD
+           │             ├─ distance(cursor) priority
+           │             ├─ resident/loading dedup
+           │             └─ callback -> QNN::preloadRawGraph()
+           │                    └─ RawExecutorWrapper::compileModel()
+           │
+           ├─ getDualPipelineModule()
+           │      ├─ first bucket -> Module::load()
+           │      └─ later bucket -> Module::clone()
+           │             └─ pipeline-local KV cache manager preserved
+           │
+           ├─ DualPipelineScheduler::beginStageWave()
+           │      ├─ Host ready queue
+           │      └─ QNN ready queue
+           │
+           ├─ pipeline worker 0/1: Module::onForward()
+           │      └─ Executor callback
+           │             ├─ Host op -> enterStage(STAGE_HOST)
+           │             └─ QNN Plugin -> enterGraphStage()
+           │                    ├─ wait current graph resident
+           │                    ├─ execution-priority gate
+           │                    └─ enterStage(STAGE_QNN)
+           │
+           ├─ after callback
+           │      ├─ leaveStage()
+           │      └─ leaveGraphStage()
+           │             ├─ clear mQnnExecutionActive
+           │             ├─ TASK_GRAPH_COMPLETE
+           │             └─ activeUseCount-- / LRU touch
+           │
+           ├─ finishStageWave() + finishGraphPrefetchWave()
+           ├─ syncDualPipelineBatchMeta()
+           ├─ sampling / scheduler update
+           └─ releaseDualPipelineRequestExecution(requestId)
+                  ├─ BatchKVMeta::releaseKV()
+                  └─ releaseRequestGraphs()  // 只清 owner，不立即销毁 resident
 
-本轮清理已经去掉几类冗余调试/无用逻辑：
+容量不足 / scheduler stop
+    └─ onGraphRelease()
+           └─ QNN::releaseRawGraph() / releaseAllRawGraphs()
+~~~
 
-- 删除双流水线普通成功路径的 `MNN_DUAL_PIPELINE` enqueue/snapshot 统计日志；
-- 删除 QNN raw graph resident 命中/成功预取/复用的普通 `MNN_PRINT`；
-- 删除非 dual mode batch 路径里实际只会 no-op 的 prefetch/complete 调用；
-- 恢复 Android 脚本中本地验证留下的过高 `make -j256` 改动。
+### 核心并发关系
 
-仍然保留错误路径日志和安全边界代码，例如 QNN preload 失败的 `MNN_ERROR`、`StaticModule` session 缺失诊断、CPU/OpenCL resize callback 的 no-op 边界。
+~~~text
+pipeline 0: Host attention ─────── QNN graph A ───── Host ─── QNN graph B
+pipeline 1:       QNN graph X ─── Host attention ─── QNN graph Y
+                         │
+                         └─ 允许 Host + QNN 重叠
 
-## 2. 逻辑主线
+QNN compile 与 QNN execute:
+    gQnnContextOperationMutex 串行
+    因此当前版本优先做跨 wave resident，避免重复 compile
+~~~
 
-```text
-`dual_pipeline_mode=true`
-    ↓
-`Llm::configureDualPipelineMode()`
-    ↓
-`BatchScheduler::setDualPipelineMode()` + `DualPipelineScheduler::start()`
-    ↓
-`Llm::load()` 缓存模型 IO / Module config，并准备两套 pipeline runtime
-    ↓
-`Llm::generate(vector<vector<int>>)`
-    ↓
-`scheduleBatchWave()` -> `BatchScheduler::scheduleWave()`
-    ↓
-同一 wave 内 pipeline 0 / pipeline 1 chunk 分别绑定独立 Module
-    ↓
-chunk 执行前：`enqueueDualPipelineChunkGraphs()`
-    ↓
-prefetch worker: CPU/OpenCL resize callback + QNN raw graph preload
-    ↓
-两个线程分别 `Module::onForward()`
-    ↓
-chunk 执行后：`completeDualPipelineChunkGraphs()`
-    ↓
-request 完成：release KV / release QNN graph / release scheduler request
-```
+## 1. Review 版本边界
 
-需要先明确边界：当前实现已经做到“两个 logical pipeline 分别跑两个 request chunk 的并发 `onForward()`”，但还没有把一个模型内部切成 CPU/GPU attention stage 和 QNN FFN stage 后做 stage-level 交错执行。QNN 仍通过 CPU plugin raw graph 路径加载和执行，不是把 MNN op 直接改成 QNN backend stage scheduler。
+| 版本 | 基线 | 主要内容 |
+|---|---|---|
+| `v0.1` | `b2f3a713` | 请求分组、图快照、基础 graph scheduler、LLM 双 pipeline 骨架 |
+| `v0.2` | `dd225512` | QNN raw graph prefetch API、QNN pool、动态窗口和 Host/QNN 回调接线 |
+| `v0.3` | `66c72045` | 两套 Executor/Runtime/Module/KV、same-segment wave、stage ready queue、bucket/order 修复 |
+| 当前 worktree | `HEAD + worktree` | resident LRU、请求 owner 清理、执行优先预取、Android 测试/构建辅助 |
 
-## 3. 调度层：同一 segment 的 wave
+`b2f3a713..HEAD` 共涉及 21 个历史实现/测试文件；当前未提交层新增 8 个文件的修改，详见第 12 节。
 
-`Chunk` 增加 `pipelineId` 和 `segmentIndex`。`pipelineId` 标识逻辑执行线，`segmentIndex` 标识 prefill split 后的 token 段。
+## 2. 配置进入运行时
 
-```cpp
-// transformers/llm/engine/include/llm/BatchScheduler.hpp:59
-struct Chunk {
-    std::vector<std::vector<int>> inputs; // only read data to make embedding
-    std::vector<int> calLen;        // calculated lengths for each input token in the chunk
-    std::vector<int> pos;           // position for each input token in the chunk
-    std::vector<int> reqId;         // global request id
-    std::vector<int> state;         // request state when this chunk was scheduled
-    int culLen = 0;                 // cumulative length of the chunk
-    int pipelineId = 0;             // dual-pipeline logical pipeline id
-    int segmentIndex = 0;           // token segment index inside a dual-pipeline wave
-};
-```
+配置 accessor 位于 `transformers/llm/engine/src/llmconfig.hpp:341`：
 
-`schedule()` 仍是兼容接口：它会构造 ordered chunks，把第一个返回，其余放入 `mPendingChunks`。dual mode 下固定两条 execution pipeline；`dual_pipeline_split_count` 现在只决定 prefill token segment 数，不决定 pipeline 数。
-
-```cpp
-// transformers/llm/engine/src/BatchScheduler.cpp:137
-std::shared_ptr<BatchScheduler::Chunk> BatchScheduler::schedule(int blockSize, int bs) {
-    // ...
-    if (mDualPipelineMode && !scheduledItems.empty()) {
-        // ...
-        const int pipelineCount = 2;
-        std::vector<std::vector<int>> pipelineItems(pipelineCount);
-        // existing request keeps its previous pipeline assignment
-        // new requests are partitioned across pipeline 0 / 1
-        // ...
-        const int segmentCount = hasSplitRequest ? mDualPipelineSplitCount : 1;
-        std::vector<std::shared_ptr<Chunk>> orderedChunks;
-        for (int segment = 0; segment < segmentCount; ++segment) {
-            for (int pipeline = 0; pipeline < pipelineCount; ++pipeline) {
-                auto chunk = std::make_shared<Chunk>();
-                chunk->pipelineId = pipeline;
-                chunk->segmentIndex = segment;
-                // ...
-                if (chunk->culLen > 0) {
-                    orderedChunks.push_back(chunk);
-                }
-            }
-        }
-        // ...
-        _commitChunk(task);
-        return task;
-    }
-    // ...
-    return task;
+~~~cpp
+// transformers/llm/engine/src/llmconfig.hpp:341
+bool dual_pipeline_mode() const {
+    return config_.value("dual_pipeline_mode", config_.value("dual_pipeline", false));
 }
-```
+int dual_pipeline_split_count() const {
+    return config_.value("dual_pipeline_split_count", 2);
+}
+int dual_pipeline_max_resident_graphs() const {
+    return config_.value("dual_pipeline_max_resident_graphs", 5);
+}
+int dual_pipeline_prefetch_window() const {
+    return config_.value("dual_pipeline_prefetch_window", 2);
+}
+~~~
 
-`scheduleWave()` 是 true dual execution 新增的关键 API：它先取一个 chunk，然后只弹出同一 `segmentIndex` 的 pending chunks。这样 coordinator 不需要连续调用 `schedule()` 猜测哪些 chunk 可以并发，而是一次拿到同一 wave。
+`Llm::configureDualPipelineMode()` 在 `transformers/llm/engine/src/llm.cpp:205`：
 
-```cpp
+1. 调用 `BatchScheduler::setDualPipelineMode()`。
+2. 创建并配置 `DualPipelineScheduler`。
+3. 把 scheduler 的 load/release callback 绑定到 `QNN::preloadRawGraph()` 和 `QNN::releaseRawGraph()`。
+4. 启动 graph worker。
+
+关闭 dual mode 时，scheduler、图状态和执行资源会被重置；非 dual 路径仍走原有单 Module 流程。
+
+## 3. 请求如何形成双 pipeline wave
+
+### 3.1 `BatchScheduler` 的稳定绑定
+
+`Chunk` 增加 `pipelineId` 和 `segmentIndex`，见 `transformers/llm/engine/include/llm/BatchScheduler.hpp:59`。请求第一次进入 scheduler 时建立 request-to-pipeline 绑定，后续 prefill/decode 保持同一逻辑 pipeline。
+
+`scheduleWave()` 位于 `transformers/llm/engine/src/BatchScheduler.cpp:213`：
+
+~~~cpp
 // transformers/llm/engine/src/BatchScheduler.cpp:213
 std::vector<std::shared_ptr<BatchScheduler::Chunk>> BatchScheduler::scheduleWave(int blockSize, int bs) {
     std::vector<std::shared_ptr<Chunk>> wave;
@@ -130,397 +163,340 @@ std::vector<std::shared_ptr<BatchScheduler::Chunk>> BatchScheduler::scheduleWave
     }
     return wave;
 }
-```
+~~~
 
-测试里已经覆盖同一 wave 返回两条 pipeline、单请求只返回一条 pipeline、decode 阶段 pipeline assignment 保持不变、`split_count > 2` 不会产生 pipeline id 2/3。
+它保证 coordinator 一次拿到同一个 segment 的两个不相交 chunk，而不是调用两次 `schedule()` 后猜测是否属于同一 wave。当前三请求用例是 pipeline 0: 请求 1/2，pipeline 1: 请求 3。
 
-```cpp
-// test/llm/BatchSchedulerTest.cpp:202
-class BatchSchedulerDualPipelineScheduleWaveTest : public MNNTestCase {
-public:
-    virtual bool run(int precision) {
-        BatchScheduler scheduler;
-        scheduler.setDualPipelineMode(true, 2);
-        std::vector<int> reqIds = scheduler.addRequest({{1, 2, 3, 4}, {11, 12, 13, 14}});
+### 3.2 请求大小到 QNN bucket
 
-        std::vector<std::shared_ptr<BatchScheduler::Chunk>> firstWave = scheduler.scheduleWave(4, 2);
-        MNNTEST_ASSERT(firstWave.size() == 2);
-        MNNTEST_ASSERT(firstWave[0]->segmentIndex == 0);
-        MNNTEST_ASSERT(firstWave[1]->segmentIndex == 0);
-        MNNTEST_ASSERT(firstWave[0]->pipelineId == 0);
-        MNNTEST_ASSERT(firstWave[1]->pipelineId == 1);
-        // ...
-        return true;
-    }
-};
-```
+`Llm::dualPipelinePaddedCulLen()` 位于 `llm.cpp:437`，根据 chunk 的 packed 长度调用 `selectQnnCompatibleBucketSize()`。当前测试模型 buckets 为 `1/8/128`：
 
-## 4. LLM 执行层：两套 runtime/module 并发
+~~~text
+pipeline 0: group size 2 -> QNN shape bucket 8
+pipeline 1: group size 1 -> QNN shape bucket 1
+~~~
 
-`configureDualPipelineMode()` 是配置入口。开启时启动 `DualPipelineScheduler`，并把 graph load/release 接到 `MNN::QNN` public prefetch API。CPU/OpenCL resize prefetch 保留 callback 边界，当前不调用 live `Execution::onResize()`。
+如果不存在能容纳当前 packed length 的 bucket，`generate()` 在创建 Module 和启动 worker 前设置 `INTERNAL_ERROR`，避免执行到一半才发现图形状不匹配。
 
-```cpp
-// transformers/llm/engine/src/llm.cpp:182
-void Llm::configureDualPipelineMode() {
-    const bool enabled = mConfig->dual_pipeline_mode();
-    mScheduler->setDualPipelineMode(enabled, mConfig->dual_pipeline_split_count());
-    if (!enabled) {
-        resetDualPipelineGraphState();
-        resetDualPipelineExecutionState();
-        stopDualPipelineRequestThread();
-        // ...
-        return;
-    }
+## 4. 双 pipeline 的执行资源与 KV 状态
 
-    // CPU/OpenCL resize prefetch must use an isolated runtime or backend callback,
-    // never the live session that is executing onForward.
-    config.callbacks.onPrefetchResize = [](const DualPipelineScheduler::PrefetchResizeRequest&) {
-    };
-    config.callbacks.onGraphLoad = [](const DualPipelineScheduler::GraphRequest& request) {
-        // ...
-        if (!QNN::preloadRawGraph(prefetchConfig)) {
-            MNN_ERROR("MNN_QNN: Failed to prefetch graph %s from %s.\n",
-                      request.graphId.c_str(), prefetchConfig.path.c_str());
-            return false;
-        }
-        return true;
-    };
-    // ...
-}
-```
+### 4.1 两套 Executor/Runtime/Module
 
-执行资源由 `DualPipelineRuntime` 持有，每条 pipeline 都有自己的 `Executor`、`RuntimeManager`、`BatchKVMeta` 和 module pool，避免两个线程并发调用同一个 `Module` / `Session`。
+`prepareDualPipelineExecutionState()` 位于 `llm.cpp:277`，对每条 pipeline 创建独立的 `Executor`、`RuntimeManager`、`BatchKVMeta`，并给 Executor 安装 before/after callback。
 
-```cpp
-// transformers/llm/engine/include/llm/llm.hpp:229
-struct DualPipelineRuntime {
-    std::shared_ptr<Express::Executor> executor;
-    std::shared_ptr<Express::Executor::RuntimeManager> runtimeManager;
-    std::shared_ptr<BatchKVMeta> batchMeta;
-    std::map<std::pair<int, bool>, std::shared_ptr<Express::Module>> modulePool;
-};
-```
+`getDualPipelineModule()` 位于 `llm.cpp:349`：
 
-```cpp
-// transformers/llm/engine/src/llm.cpp:351
-bool Llm::prepareDualPipelineExecutionState() {
-    if (!mConfig->dual_pipeline_mode() || !mModule || !mRuntimeManager) {
-        return false;
-    }
-    // ...
-    for (size_t i = 0; i < mDualPipelineRuntimes.size(); ++i) {
-        auto& runtime = mDualPipelineRuntimes[i];
-        runtime.executor = Express::Executor::newExecutor(type, backendConfig, numThread);
-        // ...
-        runtime.runtimeManager.reset(Express::Executor::RuntimeManager::createRuntimeManager(runtimeConfig));
-        runtime.batchMeta.reset(new BatchKVMeta);
-        setRuntimeHint(runtime.runtimeManager, runtime.batchMeta.get(), mMeta.get());
-    }
-    mDualPipelineExecutionReady = true;
-    return true;
-}
-```
+- 每条 pipeline 的第一个 bucket 通过 `Module::load()` 创建。
+- 同一 pipeline 后续 bucket 从已有 Module `clone()`。
+- clone 后保留该 pipeline 的 packed-attention KV cache manager，而不是并发使用共享 Module/Session。
+- QNN clone 路径继承 NPU model directory，使 plugin 查找和预取 cache key 一致。
 
-`generate(batch)` 的 dual 分支按 wave 构建 `DualWaveTask`，先 enqueue 当前 full-module forward 所需的全部 QNN binary，等待 `waitForGraphsReady()` 成功，再创建 pipeline module 并开线程并发 `onForward()`。
+### 4.2 上层与临时 `BatchKVMeta`
 
-```cpp
-// transformers/llm/engine/src/llm.cpp:1254
-std::vector<std::vector<int>> Llm::generate(const std::vector<std::vector<int> >& input_ids,
-                                            std::ostream* os,
-                                            int max_new_tokens) {
-    // ...
-    } else {
-        struct DualWaveTask {
-            std::shared_ptr<BatchScheduler::Chunk> chunk;
-            std::shared_ptr<Module> module;
-            std::shared_ptr<BatchKVMeta> batchMeta;
-            std::vector<std::string> graphIds;
-            std::vector<Express::VARP> outputs;
-            // ...
-        };
-        // ...
-        std::vector<std::shared_ptr<BatchScheduler::Chunk>> wave = scheduleBatchWave(-1, 4);
-        // build one task per pipeline chunk, then enqueue graph prefetch
-        // ...
-        enqueueDualPipelineChunkGraphs(*chunk, &task.graphIds);
-        // ...
-        workers.emplace_back([this, &tasks, i]() {
-            Express::ExecutorScope scope(mDualPipelineRuntimes[tasks[i].chunk->pipelineId].executor);
-            tasks[i].outputs = tasks[i].module->onForward(
-                {tasks[i].hiddenStates, tasks[i].attentionMask, tasks[i].positionIds, tasks[i].logitsIndex});
-        });
-        // ...
-        completeDualPipelineChunkGraphs(task.graphIds);
-    }
-    // ...
-    return ret;
-}
-```
+`prepareDualPipelineBatchMeta()` / `syncDualPipelineBatchMeta()` 位于 `llm.cpp:78` 和 `llm.cpp:94`。上层 `mBatchMeta` 作为 wave 的统一视图；每个 pipeline 在 forward 前复制自己的 request entry，forward 完成后再同步回上层。请求完成时 `releaseDualPipelineRequestExecution()` 同时释放 pipeline KV 和 graph owner。
 
-这里的并发粒度是“两个 request chunk 同时完整跑各自 Module”。它能让请求 1/2 的完整 forward 互相遮盖，但不是 “request A attention stage + request B QNN FFN stage” 的子图级遮盖。
+dual mode 会在 `llm.cpp:501` 强制 packed attention，因此普通单请求 API 仍需走与 batch metadata 一致的调用约束；第 14 节列出这一边界。
 
-## 5. 图预取层：只读 snapshot + worker 状态机
+## 5. QNN 图顺序、资源标识和 bucket metadata
 
-`refreshDualPipelineGraphSnapshot()` 只从 `StaticModule` 的 session 拿 pipeline metadata。这个函数不调用 resize、encode、alloc、`Execution::onResize()`。
+### 5.1 两个 snapshot 的职责
 
-```cpp
-// transformers/llm/engine/src/llm.cpp:440
-bool Llm::refreshDualPipelineGraphSnapshot() {
-    resetDualPipelineGraphState();
-    if (!mConfig->dual_pipeline_mode() || !mModule) {
-        return false;
-    }
-    const StaticModule* staticModule = getStaticModuleForDualPipeline(mModule.get());
-    if (staticModule == nullptr || staticModule->getSession() == nullptr) {
-        MNN_PRINT("MNN_DUAL_PIPELINE: StaticModule session is not available for graph snapshot.\n");
-        return false;
-    }
-    // Snapshot copies Session metadata once; the prefetch worker must not mutate live Session state.
-    mDualPipelineGraphSnapshot = buildGraphSnapshot(staticModule->getSession(), 0, mConfig->base_dir_, mConfig->npu_model_dir());
-    mDualPipelineGraphSnapshotReady = !mDualPipelineGraphSnapshot.ops.empty();
-    return mDualPipelineGraphSnapshotReady;
-}
-```
+`refreshDualPipelineGraphSnapshot()` 位于 `llm.cpp:399`：
 
-`DualPipelineGraph` 从 `Session::getPipelineInfo()` 复制 op 顺序、backend、已知 tensor shape 和 plugin attrs。QNN plugin 判断现在既支持 type/backend 字符串里带 `qnn`，也支持只有 `path + allGraphName` 的导出模型。
+~~~text
+Session snapshot: 当前实际 Session command 顺序，可能被 resize/prune 截断
+Model snapshot:   FlatBuffer 中完整 QNN Plugin binary metadata
+                         │
+                         ▼
+mergeQnnGraphSnapshotsInExecutionOrder()
+    ├─ Session 可观察顺序优先
+    ├─ model-only QNN op 补到序列尾部
+    └─ buildQnnGraphRequests()
+~~~
 
-```cpp
-// transformers/llm/engine/src/DualPipelineGraph.cpp:262
-bool isQnnPluginOp(const OpInfo& op) {
-    if (!op.isPlugin) {
-        return false;
-    }
-    if (containsToken(op.pluginType, "qnn") || containsToken(effectiveBackend(op), "qnn")) {
-        return true;
-    }
-    return !op.qnn.allGraphName.empty() && (!op.qnn.relativePath.empty() || !op.qnn.path.empty());
-}
-```
+每个 QNN op 再映射到唯一 `opName -> graphIndex`。重复 op name 或 graph request 数量不一致会使 snapshot 无效，避免 callback 使用错误图。
 
-```cpp
-// transformers/llm/engine/src/DualPipelineGraph.cpp:338
-std::vector<DualPipelineScheduler::GraphRequest> buildQnnGraphRequests(const GraphSnapshot& snapshot,
-                                                                       int start,
-                                                                       int maxK,
-                                                                       int reqId) {
-    std::vector<DualPipelineScheduler::GraphRequest> requests;
-    // ...
-    for (int i = start; i < static_cast<int>(snapshot.ops.size()) && static_cast<int>(requests.size()) < maxK; ++i) {
-        const OpInfo& op = snapshot.ops[i];
-        if (!isQnnPluginOp(op)) {
-            continue;
-        }
-        DualPipelineScheduler::GraphRequest request;
-        request.action = DualPipelineScheduler::GRAPH_LOAD;
-        request.requestId = reqId;
-        request.graphId = !op.qnn.targetGraphName.empty() ? op.qnn.targetGraphName : op.opName;
-        request.graphPath = op.qnn.path;
-        request.offset = op.qnn.offset;
-        request.size = op.qnn.size;
-        request.allGraphName = op.qnn.allGraphName;
-        // ...
-        requests.push_back(request);
-    }
-    return requests;
-}
-```
+### 5.2 physical graph id 与 shape graph
 
-`DualPipelineScheduler` worker 只做控制面：prefetch resize callback、QNN graph load/release、complete、LRU eviction。`onGraphLoad` 返回 `bool` 后，load 失败会回滚 resident 和 active-use 状态，避免调度层误以为图已驻留。
+历史版本曾按 target graph name 生成 id，shape variant 容易覆盖同一 binary。当前 request 将 path、offset、size、allGraphName 纳入 physical resource identity；shape index/target graph name 仍用于 `RawExecutorWrapper::invokModel(shapeIndex)` 选择具体 QNN graph。
 
-```cpp
-// transformers/llm/engine/src/DualPipelineScheduler.cpp:256
-void DualPipelineScheduler::_processGraphRequest(const GraphRequest& request) {
-    // ...
-    if (shouldLoad) {
-        const bool loadSucceeded = !callbacks.onGraphLoad || callbacks.onGraphLoad(callbackRequest);
-        std::lock_guard<std::mutex> lock(mMutex);
-        std::map<std::string, GraphState>::iterator iter = mGraphs.find(callbackRequest.graphId);
-        if (iter != mGraphs.end()) {
-            iter->second.loadFinished = true;
-            iter->second.record.resident = loadSucceeded;
-            if (!loadSucceeded) {
-                iter->second.record.pinned = false;
-                iter->second.record.activeUseCount = 0;
-                iter->second.record.pendingRelease = false;
-                iter->second.record.lastUseSequence = mNextSequence++;
-            }
-        }
-    }
-}
-```
+## 6. 动态预取窗口和 loader priority
 
-## 6. QNN raw graph prefetch：public API + CPU plugin 复用
+### 6.1 初始窗口
 
-新增 public header 给 LLM 层使用。它表达的是 “预加载 CPU plugin 里将要用到的 QNN raw graph”，不是 stage scheduler API。
+`DualPipelineScheduler::beginGraphPrefetchWave()` 位于 `transformers/llm/engine/src/DualPipelineScheduler.cpp:179`。每条 pipeline 只 enqueue 当前 cursor 后 `W` 个 graph，不再等待整条 forward 的所有 graph ready。
 
-```cpp
-// include/MNN/QNNPrefetch.hpp:17
-struct RawGraphPrefetchConfig {
-    std::string graphId;
-    std::string path;
-    uint64_t offset = 0;
-    uint64_t size = 0;
-    std::vector<std::string> allGraphName;
-    bool pinResident = false;
-};
+每条 pipeline 的状态位于 `DualPipelineScheduler.hpp:176`：
 
-MNN_PUBLIC bool preloadRawGraph(const RawGraphPrefetchConfig& config);
-MNN_PUBLIC void releaseRawGraph(const std::string& graphId, bool forceRelease = false, bool unpinAfterRelease = false);
-```
+| 状态 | 含义 |
+|---|---|
+| `currentGraphIndex` | 最近进入的 QNN graph |
+| `requestedUntil` | 已请求窗口末端 |
+| `completedGraphIndex` | 最近完成 graph |
+| `executingGraphIndex` | 当前持有 QNN lane 的 graph |
+| `registeredGraphIndices` | 已向 physical graph 注册 active use 的索引 |
+| `mPendingQnnGraphs` | 已到达 QNN command、正在等 graph/lane 的 pipeline |
 
-public prefetch API 可以早于 QNN runtime creator 被调用，所以 `createQnnContext()` 自己补了一次 symbol load guard，避免 `QnnInterface_getProviders` 为空时崩溃。
+### 6.2 动态距离排序
 
-```cpp
-// source/backend/qnn/backend/QNNBackend.cpp:43
-static void createQnnContext(){
-    std::lock_guard<std::mutex> lck(gQnnContextMutex);
-    QNN_INTERFACE_VER_TYPE qnnInterface{};
-#ifndef ENABLE_QNN_CONVERT_MODE
-    if (QNN::QnnInterface_getProviders == nullptr
-#ifdef MNN_WITH_PLUGIN
-        || QNN::QnnSystemInterface_getProviders == nullptr
-#endif
-        ) {
-        if (!QNN::loadQNNSymbol()) {
-            return;
-        }
-    }
-    // ...
-}
-```
+`_graphLoadDistanceLocked()` 和 `_popNextTaskLocked()` 位于 `DualPipelineScheduler.cpp:547`、`:558`：
 
-resident raw graph pool 用 `graphId` 和 `path#offset#size#allGraphName` 两套索引。`preloadRawGraphInternal()` 命中 resident graph 时直接返回，未命中才 `compileModel()`。
+~~~text
+pipeline 0 current=B -> C(distance=1), D(distance=2)
+pipeline 1 current=E -> F(distance=1), G(distance=2)
 
-```cpp
-// source/backend/qnn/backend/QNNBackend.cpp:907
-struct RawGraphRecord {
-    std::shared_ptr<RawExecutorWrapper> executor;
-    std::string cacheKey;
-    std::vector<std::string> graphIds;
-    bool pinned = false;
-};
+优先级：C/F -> D/G
+同距离：pipelineId -> enqueueSequence
+~~~
 
-static std::mutex gRawGraphPoolMutex;
-static std::map<std::string, std::shared_ptr<RawGraphRecord>> gRawGraphById;
-static std::map<std::string, std::shared_ptr<RawGraphRecord>> gRawGraphByKey;
-```
+worker 在 `DualPipelineScheduler.cpp:638`。`_hasRunnableTaskLocked()` 观察 `mQnnExecutionActive` 和 `mPendingQnnGraphs`：
 
-```cpp
-// source/backend/qnn/backend/QNNBackend.cpp:952
-static bool preloadRawGraphInternal(const MNN::QNN::RawGraphPrefetchConfig& config) {
-    if (config.graphId.empty() || config.path.empty() || config.allGraphName.empty()) {
-        return false;
-    }
-    if (QNN::gContext.deviceHandle == nullptr) {
-        QNN::createQnnContext();
-    }
-    if (QNN::gContext.deviceHandle == nullptr) {
-        return false;
-    }
+- 当前图未 ready：允许 loader 继续加载当前图。
+- 当前图 ready、pipeline 等待 QNN lane：暂停未来图 compile，优先当前执行。
+- QNN execute 完成：清除 gate，loader 可在下一个 Host 区间继续预取。
 
-    const std::string cacheKey = makeRawGraphCacheKey(config.path, config.offset, config.size, config.allGraphName);
-    std::lock_guard<std::mutex> lock(gRawGraphPoolMutex);
-    // check graphId, then cacheKey
-    // compileModel only on cache miss
-    // ...
-    return true;
-}
-```
+这不是绕过 QNN 全局锁，而是把 compile 尽量放到 Host attention 区间，并避免 ready graph 被未来 compile 抢占。
 
-实际执行落点仍是 CPU plugin 的 `PluginExecuteRaw::init()`：它按相同 key 查 resident executor，命中就复用，否则保持原行为现场 compile。
+### 6.3 跳图和取消
 
-```cpp
-// source/backend/qnn/backend/QNNBackend.cpp:1040
-bool init(CPUKernelContext* ctx) override {
-    if (QNN::gContext.deviceHandle == nullptr){
-        QNN::createQnnContext();
-    }
-    auto path = MNNFilePathConcat(ctx->dir_path(), ctx->getAttr("path")->s()->str());
-    // ...
-    mRawExecutor = findRawGraphExecutor(path, binaryOffset, binarySize, allGraphName);
-    if (mRawExecutor) {
-        return true;
-    }
-    mRawExecutor.reset(new RawExecutorWrapper());
-    return mRawExecutor->compileModel(path, binaryOffset, binarySize, allGraphName);
-}
-```
+`enterGraphStage()` 位于 `DualPipelineScheduler.cpp:218`。当实际 callback index 向前跳时：
 
-## 7. 逐文件修改版本
+1. 删除尚未开始的区间 load task。
+2. 为已注册但未执行的预测图 enqueue `TASK_GRAPH_COMPLETE`，使 active use 归零。
+3. 从实际 index 重新扩展 lookahead。
+4. 只等待实际当前 graph resident。
 
-| 文件 | 修改版本摘要 | Review 重点 |
+未执行 tail 不再使 wave 失败；它们是 cleanup，而不是执行成功条件。
+
+## 7. Host/QNN stage 接口
+
+### 7.1 callback 到 scheduler
+
+`prepareDualPipelineExecutionState()` 的 before callback：
+
+- QNN Plugin op name 命中 `mDualPipelineQnnOpIndices` -> `enterGraphStage(pipelineId, graphIndex)`。
+- 其他有 `OperatorInfo` 的 command -> `enterStage(pipelineId, STAGE_HOST)`。
+
+after callback 对称调用 `leaveGraphStage()` 或 `leaveStage()`。`cmd.info == nullptr` 的 command 仍绕过这套分类。
+
+### 7.2 两个 ready queue
+
+`beginStageWave()`、`enterStage()`、`leaveStage()` 位于 `DualPipelineScheduler.cpp:393`、`:421`、`:443`：
+
+- Host lane 同时只授予一个 Host stage。
+- QNN lane 当前也只授予一个 QNN stage，保证 QNN binary executor 的调用安全。
+- Host 和 QNN 可同时 active；`hostQnnOverlapGrants` 记录过 overlap grant。
+- pipeline 自身不能在前一个 command 未 leave 前再次进入 stage。
+
+因此实现的是 command-boundary Host/QNN overlap，不是把 attention 和 FFN 拆成可独立传递 tensor 的两个完整 stage graph。
+
+## 8. QNN prefetch API 与 raw pool
+
+### 8.1 public API
+
+`include/MNN/QNNPrefetch.hpp:17` 定义配置，公开接口位于 `:26`：
+
+~~~cpp
+// include/MNN/QNNPrefetch.hpp:26
+bool preloadRawGraph(const RawGraphPrefetchConfig& config);
+void releaseRawGraph(const std::string& graphId, bool forceRelease, bool unpinAfterRelease);
+void releaseAllRawGraphs();
+~~~
+
+LLM scheduler 只依赖这个边界，不直接调用 QNN private loader。
+
+### 8.2 pool lookup/load/release
+
+`source/backend/qnn/backend/QNNBackend.cpp:942` 用 normalized path、offset、size、allGraphName 生成 cache key。`preloadRawGraphInternal()` 在 `:976`：
+
+1. 先按 graph id / physical cache key 去重。
+2. miss 时创建 `RawExecutorWrapper`，调用 `compileModel()`。
+3. 将 executor 存到 `gRawGraphByKey`，并建立 graph id alias。
+
+`PluginExecuteRaw::compute()` 在 `QNNBackend.cpp:1127` 每次按 physical key 查 pool，再调用 `invokModel(shapeIndex)`。pool miss 仍保留 fallback compile，这是当前 dual prefetch 失效时的兼容路径。
+
+`compileModel()` 和 `invokModel()` 分别在 `QNNBackend.cpp:789`、`:861` 持有 `gQnnContextOperationMutex`，所以 compile/execute 不能真正并行。
+
+## 9. 跨 wave resident graph 生命周期
+
+### 9.1 正常完成不释放
+
+`leaveGraphStage()` 在 `DualPipelineScheduler.cpp:288` 只 enqueue `TASK_GRAPH_COMPLETE`。worker 的 `_processGraphComplete()` 在 `:743`：
+
+~~~text
+activeUseCount > 0 -> --activeUseCount
+lastUseSequence = next sequence
+resident graph 保留
+~~~
+
+下一 decode wave 请求同一 graph 时，`_processGraphRequest()` 将其视为 resident hit，不再次调用 `onGraphLoad`。
+
+### 9.2 LRU eviction
+
+`_planEvictionsLocked()` 在 `DualPipelineScheduler.cpp:755`：
+
+- resident 且非 pinned 且 `activeUseCount == 0` 才能作为 candidate。
+- 选择最小 `lastUseSequence`。
+- 标记非 resident，清 ownership，回调 `onGraphRelease(forceRelease=true)`。
+- active graph 不能被执行中回收，因此配置上限是软水位。
+
+### 9.3 request owner 与 scheduler stop
+
+`releaseRequestGraphs(requestId)` 在 `DualPipelineScheduler.cpp:359` 只从各 graph 的 owner set 删除 request id。`Llm::releaseDualPipelineRequestExecution()` 在 `llm.cpp:449` 同步调用它和 `BatchKVMeta::releaseKV()`。
+
+`DualPipelineScheduler::stop()` 在 `DualPipelineScheduler.cpp:136` 等 worker 退出后遍历 resident graph，统一发出 force release；`Llm::~Llm()` 再按 Module -> runtime -> QNN pool 的顺序清理。
+
+## 10. 端到端 `generate(batch)` 主线
+
+双 pipeline 分支位于 `llm.cpp:1264`，每个 wave 顺序如下：
+
+1. `scheduleWave()` 取同 segment chunks。
+2. 对每个 chunk 做 QNN bucket 预校验。
+3. 构造 embedding、mask、position ids。
+4. 准备 per-pipeline `BatchKVMeta`。
+5. `beginGraphPrefetchWave()` 提交图窗口。
+6. `getDualPipelineModule()` 获取对应 bucket Module。
+7. `beginStageWave()` 建立 Host/QNN stage wave。
+8. 为每个 chunk 启动一个 worker，进入独立 ExecutorScope，调用 `Module::onForward()`。
+9. join workers，`finishStageWave()`、`finishGraphPrefetchWave()`。
+10. 同步 pipeline metadata，采样、更新 request、释放结束请求。
+
+如果 Module forward 返回空 logits、stage wave 失败、graph load 失败或 bucket 不支持，设置 `LlmStatus::INTERNAL_ERROR`，不继续采样无效输出。
+
+## 11. 当前 worktree 的冗余清理
+
+本轮跨 wave 改动同时删除了原来已经失效的 per-wave release 状态：
+
+| 删除项 | 原因 |
+|---|---|
+| `TASK_GRAPH_RELEASE` | 正常 graph complete 不再触发释放；真实释放只有 LRU 和 stop |
+| `GraphRecord::pendingRelease` | 不再需要等待 active use 归零后销毁 |
+| `pendingReleaseRequest` | 没有延迟 release callback 入口 |
+| 每个 owner 的 graph release task | owner 清理改为显式 `releaseRequestGraphs()` |
+
+历史版本已经删除/替换的冗余接口包括 `waitForGraphsReady()`、`markExecutionComplete()`、旧的全图 barrier 测试、重复 QNN resize tensor mapping，以及被全局 QNN operation mutex 覆盖的 `mInvokeMutex`。
+
+## 12. 逐文件修改版本表
+
+### 12.1 `v0.1` 到 `v0.3` 的实现文件
+
+| 文件 | `v0.1` 初始 | `v0.2` QNN/预取 | `v0.3` 真双执行 | 当前关注 |
+|---|---|---|---|---|
+| `transformers/llm/engine/src/llm.cpp` | 双模式入口和基础 graph 调度 | QNN graph callback、bucket、metadata | 两套 runtime/module/KV、并行 wave | resident owner 清理、执行主线 |
+| `transformers/llm/engine/src/BatchScheduler.cpp` | request chunk | pipeline/segment metadata | `scheduleWave()` 同 segment 聚合 | 稳定 pipeline affinity |
+| `transformers/llm/engine/src/DualPipelineGraph.cpp` | Session snapshot | QNN binary metadata/request | order merge、bucket/resource id | Session 优先、model-only tail |
+| `transformers/llm/engine/src/DualPipelineScheduler.cpp` | graph worker/window | QNN load/release、dynamic priority | Host/QNN ready queues、readiness/skip | resident LRU、pending QNN gate |
+| `source/backend/qnn/backend/QNNBackend.cpp` | 原有 raw QNN executor | preload/release pool、lazy lookup | clone/path/cache 修复 | global mutex、fallback compile |
+| `express/Executor.cpp` | 原 callback 路径 | callback 存储 | 每个 Executor 的 pipeline callback | callback 失败清理边界 |
+| `express/module/StaticModule.cpp` | 原 Module 执行 | QNN model directory 支持 | clone 后保持 pipeline 资源 | clone Session/KV 一致性 |
+| `transformers/llm/engine/src/kvmeta.hpp` | 单 KVMeta | BatchKVMeta | pipeline KV release/sync | upper 与 temporary meta |
+| `transformers/llm/engine/src/llmconfig.hpp` | 原配置 | dual/prefetch 配置 | 默认值兼容 | memory policy 默认值 |
+
+### 12.2 头文件和构建接口
+
+| 文件 | 修改版本 | 接口 |
 |---|---|---|
-| `include/MNN/QNNPrefetch.hpp` | 新增 QNN raw graph prefetch public API。 | public header 与 `MNN_WITH_PLUGIN` / `MNN_QNN` 构建组合是否匹配。 |
-| `CMakeLists.txt` | 将 `QNNPrefetch.hpp` 加入 public headers。 | 非 QNN 构建下 header 暴露和符号实现一致性。 |
-| `source/backend/qnn/backend/QNNBackend.cpp` | 增加 QNN symbol load guard、resident raw graph pool、prefetch/release/has API、cache-key 路径规范化、`PluginExecuteRaw` 复用 resident executor、raw executor invoke mutex。 | graph alias/pin 语义、resident pool 生命周期、锁粒度、compileModel 在锁内执行是否可接受。 |
-| `express/Executor.cpp` | `RuntimeManager::setHintPtr()` 改为写入当前 `RuntimeManager` 自己持有的 runtimes。 | 避免双 pipeline 下把 KV meta 写到全局 current executor。 |
-| `transformers/llm/engine/include/llm/BatchScheduler.hpp` | `Chunk` 增加 `pipelineId/segmentIndex`，新增 `scheduleWave()` 和 request->pipeline 记录。 | API 兼容性、pipeline assignment 生命周期。 |
-| `transformers/llm/engine/src/BatchScheduler.cpp` | dual mode 按 request group 和 segment 构造 ordered chunks；`scheduleWave()` 返回同一 segment chunks；release request 时清 pipeline assignment。 | 四请求 A/B/C/D 分组、decode pipeline persistence、pending chunk commit 顺序。 |
-| `transformers/llm/engine/include/llm/DualPipelineScheduler.hpp` | `GraphRequest` 承载 QNN metadata，`GraphRecord` 增加 `activeUseCount`，`onGraphLoad` 返回 `bool`，新增 readiness wait。 | load failure 传播、共享 graph 使用计数、等待停止语义。 |
-| `transformers/llm/engine/src/DualPipelineScheduler.cpp` | worker 状态机处理 prefetch/load/complete/release/evict；callback 成功后才发布 resident；shared graph release。 | load/complete/release 排序、pinned graph release 语义。 |
-| `transformers/llm/engine/src/DualPipelineGraph.cpp` | 从 `Session::getPipelineInfo()` 只读 snapshot；解析 QNN attrs；按请求组选择 bucket，并按 binary asset 生成 resource id。 | 不触发 live resize；`path + allGraphName` 判断是否过宽。 |
-| `transformers/llm/engine/include/llm/llm.hpp` | 增加 request thread、双 pipeline runtime 数组、module pool、graph snapshot/cursor/graph records。 | 生命周期 reset、并发资源隔离。 |
-| `transformers/llm/engine/src/llm.cpp` | 配置入口、双 runtime 准备、wave 并发执行、prefetch/QNN callback、request 完成清理、空 logits guard。 | 线程异常/失败处理、非 dual 行为保持、batch shape 失败时清理路径。 |
-| `transformers/llm/engine/src/kvmeta.hpp` | `BatchKVMeta::releaseKV()` 对不存在 req meta 直接 no-op。 | 避免错误 pipeline 的空 meta 触发 release callback。 |
-| `test/CMakeLists.txt` | `MNN_BUILD_LLM=OFF` 时排除 `test/llm`；ON 时把 LLM scheduler/graph 源编进 `run_test.out`。 | 默认测试构建不引入 LLM-only 符号。 |
-| `test/llm/BatchSchedulerTest.cpp` | 新增 schedule wave、pipeline persistence、split count clamp 等测试。 | 是否覆盖用户要求的双请求/四请求非重叠调度。 |
-| `test/llm/DualPipelineGraphTest.cpp` | 新增 QNN metadata without type 测试。 | metadata-based QNN 识别是否误伤非 QNN plugin。 |
-| `test/llm/DualPipelineSchedulerTest.cpp` | 新增 graph load failure/readiness 测试；callback 更新为返回 bool。 | failed load 不应被标记 resident 或保留 active use。 |
+| `transformers/llm/engine/include/llm/BatchScheduler.hpp` | `v0.1`/`v0.3` | `Chunk.pipelineId`、`segmentIndex`、`scheduleWave()` |
+| `transformers/llm/engine/include/llm/DualPipelineGraph.hpp` | `v0.1`~`v0.3` | snapshot、bucket、QNN request 构造 |
+| `transformers/llm/engine/include/llm/DualPipelineScheduler.hpp` | `v0.1`~当前 | graph/stage API、LRU state、`releaseRequestGraphs()` |
+| `transformers/llm/engine/include/llm/llm.hpp` | `v0.1`~`v0.3` | dual runtime/module/KV 成员和 helper |
+| `include/MNN/QNNPrefetch.hpp` | `v0.2` | public QNN preload/release 边界 |
+| `CMakeLists.txt` | `v0.2` | LLM/QNN 构建开关接线 |
+| `test/CMakeLists.txt` | `v0.2`/`v0.3` | LLM scheduler/graph/stage 测试源接线 |
 
-## 8. Review 重点和剩余风险
+### 12.3 测试与设备辅助文件
 
-### 8.1 当前还不是 attention/FFN stage-level scheduler
+| 文件 | 修改内容 | 用途 |
+|---|---|---|
+| `test/llm/BatchSchedulerTest.cpp` | 2/3/4 request partition、wave、pipeline persistence | 验证请求分组不重叠 |
+| `test/llm/DualPipelineGraphTest.cpp` | bucket、physical id、order merge、metadata | 验证 QNN 图预测 |
+| `test/llm/DualPipelineSchedulerTest.cpp` | priority、gap、reuse、LRU、owner、execution gate | 验证 graph 生命周期 |
+| `test/llm/DualPipelineStageSchedulerTest.cpp` | Host/QNN overlap、QNN 串行、取消 | 验证 stage queue |
+| `transformers/llm/engine/demo/llm_demo.cpp` | `--dual-batch-test` 三请求入口 | Android smoke test |
+| `project/android/build_64.sh` | 显式打开 LLM/OpenCL/QNN/plugin/online finalize | 可复现 Android 构建 |
+| `project/android/mv2adb.sh` | shebang、目标目录、`libQnnSystem.so` | 完整部署 QNN runtime |
+| `dual_pipeline_code_review.md` | 本文 | review 主线和版本表 |
 
-当前 dual execution 的并发单位是两个 `Module::onForward()`。它没有新增 tensor dependency、stage plan、command range executor，也没有把 transformer block 拆成 CPU/OpenCL attention stage 与 QNN FFN stage。后续如果要做到真正 stage-level 遮盖，需要新增 stage plan、stage ready queue 和部分图执行接口，不能只继续扩 `BatchScheduler::Chunk`。
+## 13. 运行时清理顺序
 
-### 8.2 CPU/OpenCL resize prefetch 仍是安全 no-op
+~~~text
+request finished
+    -> mScheduler->releaseKVCache()
+    -> BatchKVMeta::releaseKV(requestId)
+    -> DualPipelineScheduler::releaseRequestGraphs(requestId)
+    -> resident graph 继续可复用
 
-`onPrefetchResize` 当前故意不调用 live resize。原因是 `Session::resize()` / `Pipeline::encode()` / `Execution::onResize()` 会修改 live runtime、tensor allocator 和 execution 状态。除非有隔离 runtime/scratch backend，否则 prefetch worker 不能并发触碰主执行 session。
+Llm::~Llm()
+    -> DualPipelineScheduler::stop()
+       -> worker join
+       -> release all resident graph
+    -> reset dual Executor callbacks / dual Runtime / dual Module pools
+    -> clear main Module pool / main Module
+    -> QNN::releaseAllRawGraphs()
+    -> reset RuntimeManager
+~~~
 
-### 8.3 QNN public header 的链接语义
+这里的关键分离是：request 生命周期不再等于 QNN graph 生命周期；graph 生命周期由 resident capacity 和 scheduler teardown 管理。
 
-`QNNPrefetch.hpp` 已进入 public headers，但实现主要在 `QNNBackend.cpp`。当前 `#ifndef MNN_WITH_PLUGIN` 有 no-op stub；review 时仍要确认 `MNN_QNN=OFF`、`MNN_WITH_PLUGIN=ON/OFF`、静态库/动态库组合下外部 include + link 行为一致。
+## 14. 验证结果与 review 边界
 
-### 8.4 QNN graph alias 与 pin 是 record 级语义
+### 14.1 Host
 
-`graphId` 现在由 binary path/offset/size/allGraphName 构成，shape variant 保留在 `targetGraphName/shapeIndex`。`unpinAfterRelease` 仍会影响共享 `RawGraphRecord`，不是单个 alias 私有状态。
+当前 `/tmp/mnn-pp-review-llm/run_test.out llm`：
 
-### 8.5 `buildQnnGraphRequests()` 的 QNN 识别变宽
+~~~text
+passed: 30
+failed: 0
+blocked: 0
+skipped: 0
+~~~
 
-现在只要 plugin 有 `path + allGraphName` metadata，即使 type/backend 字符串不带 QNN，也会当作 QNN plugin。它解决了已有导出模型 type 不明显的问题，但如果其他 plugin 复用这两个 attr，会被误判。
+专项 `llm/dual_pipeline_scheduler_execution_before_lookahead` 连续 5 次通过；`git diff --check` 通过。
 
-### 8.6 per-request op cursor 仍是顺序窗口
+### 14.2 Android 三请求
 
-`mDualPipelineRequestOpCursor` 仍只服务 CPU/OpenCL ordered prefetch window；当前 full-module forward 会准备全部 QNN binary。它不是 DAG cursor，也不能证明 stage dependency 调度正确。
+设备：`192.168.124.101:47954`；模型：`/workspace/code/mnn-profiler/project/android/llm_profile_work/qnn_fixed_s1_8_128`。
 
-### 8.7 设备 batch 真执行依赖导出 shape 覆盖
+`--dual-batch-test` 使用 resident limit 30：
 
-使用 `qnn_fixed_s1_8_128` 的 ADB 三请求真实 batch 已跑通。临时 runtime trace 证明 decode wave 中两请求 pipeline 的 30 层均选择 shape index 1 / bucket 8，单请求 pipeline 的 30 层均选择 shape index 2 / bucket 1；移除 trace 后 clean run 仍无 QNN 1002/1100/no-logits。
+~~~text
+2-token real: 5.03s   (原记录约 12.52s)
+16-token real: 7.36s (原记录约 47.06s)
+ReqId 0/1/2: 有效输出
+exit: 0
+~~~
 
-## 9. 验证记录
+当前日志没有 `Acquire buffer size = 0`、QNN validate/execute、prefetch、stage、no-logits、SIGSEGV 或 FORTIFY 错误。
 
-本轮清理和文档更新后的 fresh verification：
+### 14.3 不能过度推断的边界
 
-```bash
-# 本地执行
-rtk g++ -std=c++11 -I. -Iinclude -Itransformers/llm/engine/include -Itransformers/llm/engine/src -c transformers/llm/engine/src/BatchScheduler.cpp -o /tmp/BatchScheduler.o
-rtk g++ -std=c++11 -I. -Iinclude -Itransformers/llm/engine/include -c test/llm/BatchSchedulerTest.cpp -o /tmp/BatchSchedulerTest.o
-rtk g++ -std=c++11 -I. -Iinclude -Iexpress -Isource -Itools -Ischema/current -Itransformers/llm/engine/include -Itransformers/llm/engine/src -I3rd_party/flatbuffers/include -I3rd_party/rapidjson/include -c transformers/llm/engine/src/llm.cpp -o /tmp/llm.o
-rtk g++ -std=c++11 -I. -Iinclude -Iexpress -Isource -Ischema/current -I3rd_party/flatbuffers/include -I3rd_party/rapidjson/include -c express/Executor.cpp -o /tmp/Executor.o
-rtk g++ -std=c++11 -DMNN_WITH_PLUGIN -DMNN_QNN_ENABLED=1 -DENABLE_QNN_ONLINE_FINALIZE -I. -Iinclude -Isource -Ischema/current -I3rd_party/flatbuffers/include -I3rd_party/half -Isource/backend/qnn/backend -Isource/backend/qnn/convertor -I/root/qnn/include/QNN -c source/backend/qnn/backend/QNNBackend.cpp -o /tmp/QNNBackend.o
-rtk cmake --build /tmp/mnn-pp-test-llm --target run_test.out -j2
-rtk /tmp/mnn-pp-test-llm/run_test.out llm
-rtk cmake --build /tmp/mnn-pp-test-llm --target llm -j2
-rtk proxy git diff --check
-```
+1. QNN compile/execute 仍被 `gQnnContextOperationMutex` 串行；当前优化是 resident reuse + execution-priority，不是 compile/execute 真并行。
+2. `maxResidentGraphs` 是软水位，active graph 不会被强制淘汰，内存可能临时超过配置值。
+3. QNN raw pool 是进程级全局池，多实例 `Llm` 没有 client refcount 隔离。
+4. `PluginExecuteRaw` pool miss 仍允许 fallback compile；这会绕过 scheduler 的预取统计。
+5. `cmd.info == nullptr` 的 command 不进入 Host/QNN stage callback。
+6. OpenCL callback 当前证明的是 command submission 边界，不等于硬件时间线已经证明 CPU/OpenCL 与 QNN 完整重叠。
+7. `Llm::load()` 对 snapshot mapping 失败仍保留兼容行为，可能让 Plugin fallback compile；这是后续可收紧的错误策略。
+8. 当前没有独立的 OpenCL `onResize`/kernel compile prefetch queue；OpenCL 的提前准备来自 bucket Module/Session 创建与 MNN 原有 resize/cache 路径，`DualPipelineScheduler` 只在 command callback 层调度 Host lane。
 
-结果：上述命令均 exit 0；`run_test.out llm` 显示 `25/25` passed。Android `max_new_tokens=2` 三请求 clean probe 退出 0，三个请求均有输出且无 QNN validate/execute/prefetch/no-logits 错误。`QNNBackend.cpp` standalone compile 仍有既有 `FUNC_PRINT(size)` format warning，不是本轮新增。
+## 15. 建议的 Review 阅读顺序
 
-## 10. 小结
+1. `transformers/llm/engine/src/llm.cpp:205`：dual mode 配置与 callback 注册。
+2. `transformers/llm/engine/src/BatchScheduler.cpp:213`：same-segment wave。
+3. `transformers/llm/engine/src/DualPipelineGraph.cpp:507`：Session/model order merge。
+4. `transformers/llm/engine/src/llm.cpp:1264`：batch wave coordinator。
+5. `transformers/llm/engine/src/DualPipelineScheduler.cpp:179`：初始预取窗口。
+6. `transformers/llm/engine/src/DualPipelineScheduler.cpp:218`：current graph readiness 与 execution gate。
+7. `transformers/llm/engine/src/DualPipelineScheduler.cpp:421`：Host/QNN ready queue。
+8. `source/backend/qnn/backend/QNNBackend.cpp:976`：QNN raw graph pool preload。
+9. `source/backend/qnn/backend/QNNBackend.cpp:1127`：Plugin lookup 和 QNN execute。
+10. `transformers/llm/engine/src/DualPipelineScheduler.cpp:755`：resident LRU。
+11. `test/llm/DualPipelineSchedulerTest.cpp:257`：跨 wave reuse / LRU / gate 测试。
 
-- 入口是 `Llm::configureDualPipelineMode()`，它把 config、scheduler、prefetch worker 和 QNN callbacks 串起来。
-- 调度核心是 `BatchScheduler::scheduleWave()`，它返回同一 segment 的 pipeline 0/1 chunks。
-- 执行核心是 `Llm::generate(batch)` dual 分支，两个 pipeline 使用独立 runtime/module pool 并发 `onForward()`。
-- 图预取核心是 `DualPipelineGraph` 只读 snapshot 加 `DualPipelineScheduler` worker；CPU/OpenCL resize 仍不碰 live `onResize`。
-- QNN 预加载核心是 `QNNBackend.cpp` 的 resident raw graph pool，实际复用点仍在 CPU plugin `PluginExecuteRaw`。
-- 最需要 review 的边界是 public QNN API 构建组合、QNN graph alias/pin 语义、metadata-based QNN 识别范围，以及后续 stage-level attention/FFN 切图还未实现。
+## 小结
+
+- 双 pipeline 的实际并发单位是两个隔离的 `Module::onForward()`，每条 pipeline 有自己的 Executor、RuntimeManager、Module pool 和 BatchKVMeta。
+- 请求 wave 由 `BatchScheduler::scheduleWave()` 形成；QNN 图顺序由 Session snapshot 主导，FlatBuffer metadata 补全。
+- graph worker 维护执行游标驱动的有界 lookahead；当前 QNN graph ready 后优先执行，未来 compile 延后到 Host 区间。
+- QNN graph 完成后跨 wave resident，容量不足时 LRU 淘汰空闲图，request 完成只清 owner，scheduler stop 才释放全部图。
+- 当前代码已经有 Host/QNN command-boundary overlap，但仍受全局 QNN mutex、fallback compile、全局 pool 和无 `OperatorInfo` command 等边界约束。

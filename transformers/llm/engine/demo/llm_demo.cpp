@@ -250,9 +250,22 @@ void chat(Llm* llm) {
         messages.emplace_back("assistant", assistant_str);
     }
 }
+
+static int dual_batch_test(Llm* llm) {
+    std::vector<std::string> prompts(3, "hello");
+    std::cout << "running dual pipeline batch test" << std::endl;
+    llm->response(prompts, &std::cout);
+    if (llm->getContext()->status == LlmStatus::INTERNAL_ERROR) {
+        std::cout << "dual pipeline batch test failed" << std::endl;
+        return 3;
+    }
+    std::cout << "dual pipeline batch test done" << std::endl;
+    return 0;
+}
+
 int main(int argc, const char* argv[]) {
     if (argc < 2) {
-        std::cout << "Usage: " << argv[0] << " config.json <prompt.txt>" << std::endl;
+        std::cout << "Usage: " << argv[0] << " config.json [prompt.txt | --dual-batch-test]" << std::endl;
         return 0;
     }
     MNN::BackendConfig backendConfig;
@@ -260,9 +273,14 @@ int main(int argc, const char* argv[]) {
     MNN::Express::ExecutorScope s(executor);
 
     std::string config_path = argv[1];
+    const bool dualBatchTest = argc >= 3 && std::string(argv[2]) == "--dual-batch-test";
     std::cout << "config path is " << config_path << std::endl;
     std::unique_ptr<Llm> llm(Llm::createLLM(config_path));
-    llm->set_config("{\"tmp_path\":\"tmp\"}");
+    if (dualBatchTest) {
+        llm->set_config("{\"tmp_path\":\"tmp\",\"async\":false,\"max_new_tokens\":1,\"dual_pipeline_max_resident_graphs\":30}");
+    } else {
+        llm->set_config("{\"tmp_path\":\"tmp\"}");
+    }
     {
         AUTOTIME;
         bool res = llm->load();
@@ -271,9 +289,12 @@ int main(int argc, const char* argv[]) {
             return 0;
         }
     }
-    if (true) {
+    if (!dualBatchTest) {
         AUTOTIME;
         tuning_prepare(llm.get());
+    }
+    if (dualBatchTest) {
+        return dual_batch_test(llm.get());
     }
     if (argc < 3) {
         chat(llm.get());
