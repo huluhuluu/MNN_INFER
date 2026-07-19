@@ -1121,6 +1121,26 @@ public:
             MNN_ERROR("MNN_QNN: Failed to execute Plugin Op.\n");
             return false;
         }
+        auto inputs = ctx->getAttr("inputs")->list();
+        auto inputTensor = ctx->inputs();
+        MNN_ASSERT(inputs->s()->size() == inputTensor.size());
+        mInputs.resize(inputs->s()->size());
+        mRealInputs.resize(inputTensor.size());
+        for (int i = 0; i < inputs->s()->size(); ++i) {
+            mRealInputs[i].reset(new Tensor(inputTensor[i], Tensor::CAFFE));
+            mInputs[i].second = inputs->s()->GetAsString(i)->str();
+            mInputs[i].first = mRealInputs[i].get();
+        }
+        auto outputs = ctx->getAttr("outputs")->list();
+        auto outputTensor = ctx->outputs();
+        MNN_ASSERT(outputs->s()->size() == outputTensor.size());
+        mOutputs.resize(outputs->s()->size());
+        mRealOutputs.resize(outputTensor.size());
+        for (int i = 0; i < outputs->s()->size(); ++i) {
+            mRealOutputs[i].reset(new Tensor(outputTensor[i], Tensor::CAFFE));
+            mOutputs[i].second = outputs->s()->GetAsString(i)->str();
+            mOutputs[i].first = mRealOutputs[i].get();
+        }
         return true;
     }
 
@@ -1131,30 +1151,6 @@ public:
             MNN_ERROR("MNN_QNN: Failed to execute Plugin Op.\n");
             return false;
         }
-        // compute and alloc real in-time inputs and outputs tensor
-        {
-            auto inputs = ctx->getAttr("inputs")->list();
-            auto inputTensor = ctx->inputs();
-            MNN_ASSERT(inputs->s()->size() == inputTensor.size());
-            mInputs.resize(inputs->s()->size());
-            mRealInputs.resize(inputTensor.size());
-            for (int i=0; i<inputs->s()->size(); ++i) {
-                mRealInputs[i].reset(new Tensor(inputTensor[i], Tensor::CAFFE));
-                mInputs[i].second = inputs->s()->GetAsString(i)->str();
-                mInputs[i].first = mRealInputs[i].get();
-            }
-            auto outputs = ctx->getAttr("outputs")->list();
-            auto outputTensor = ctx->outputs();
-            mOutputs.resize(outputs->s()->size());
-            MNN_ASSERT(outputs->s()->size() == outputTensor.size());
-            mRealOutputs.resize(outputTensor.size());
-            for (int i=0; i<outputs->s()->size(); ++i) {
-                mRealOutputs[i].reset(new Tensor(outputTensor[i], Tensor::CAFFE));
-                mOutputs[i].second = outputs->s()->GetAsString(i)->str();
-                mOutputs[i].first = mRealOutputs[i].get();
-            }
-        }
-
         #ifdef QNN_VERBOSE
         std::string graphName = ctx->getAttr("allGraphName")->list()->s()->GetAsString(shapeIndex)->str();
         MNN_PRINT("Graph name:%s, %d\n", graphName.c_str(), shapeIndex);

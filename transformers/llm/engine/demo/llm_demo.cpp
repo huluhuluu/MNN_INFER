@@ -279,7 +279,7 @@ static bool parse_positive_int(const char* text, int& value) {
     return true;
 }
 
-static int dual_throughput_test(Llm* llm, int requestCount, int maxNewTokens, int rounds) {
+static int dual_throughput_test(Llm* llm, int requestCount, int maxNewTokens, int rounds, int splitCount) {
     const std::vector<std::string> prompts(requestCount, "hello");
     auto runRound = [llm, &prompts, maxNewTokens](int& generatedTokens) {
         const auto start = std::chrono::steady_clock::now();
@@ -292,7 +292,8 @@ static int dual_throughput_test(Llm* llm, int requestCount, int maxNewTokens, in
     std::cout << "running dual pipeline throughput test"
               << ", requests=" << requestCount
               << ", max_new_tokens=" << maxNewTokens
-              << ", rounds=" << rounds << std::endl;
+              << ", rounds=" << rounds
+              << ", split_count=" << splitCount << std::endl;
 
     int warmupTokens = 0;
     const double warmupSeconds = runRound(warmupTokens);
@@ -333,7 +334,7 @@ static int dual_throughput_test(Llm* llm, int requestCount, int maxNewTokens, in
 int main(int argc, const char* argv[]) {
     if (argc < 2) {
         std::cout << "Usage: " << argv[0]
-                  << " config.json [prompt.txt | --dual-batch-test | --dual-throughput-test [requests] [tokens] [rounds] [resident_graphs]]"
+                  << " config.json [prompt.txt | --dual-batch-test | --dual-throughput-test [requests] [tokens] [rounds] [resident_graphs] [split_count]]"
                   << std::endl;
         return 0;
     }
@@ -348,11 +349,14 @@ int main(int argc, const char* argv[]) {
     int throughputTokens = 16;
     int throughputRounds = 3;
     int residentGraphs = 30;
+    int throughputSplitCount = 2;
     if (dualThroughputTest &&
         ((argc >= 4 && !parse_positive_int(argv[3], throughputRequests)) ||
          (argc >= 5 && !parse_positive_int(argv[4], throughputTokens)) ||
          (argc >= 6 && !parse_positive_int(argv[5], throughputRounds)) ||
-         (argc >= 7 && !parse_positive_int(argv[6], residentGraphs)))) {
+         (argc >= 7 && !parse_positive_int(argv[6], residentGraphs)) ||
+         (argc >= 8 && !parse_positive_int(argv[7], throughputSplitCount)) ||
+         throughputSplitCount > 2)) {
         std::cerr << "invalid dual throughput test arguments" << std::endl;
         return 2;
     }
@@ -361,7 +365,7 @@ int main(int argc, const char* argv[]) {
     if (dualBatchTest || dualThroughputTest) {
         std::ostringstream settings;
         settings << "{\"tmp_path\":\"tmp\",\"async\":false,\"dual_pipeline_max_resident_graphs\":"
-                 << residentGraphs << "}";
+                 << residentGraphs << ",\"dual_pipeline_split_count\":" << throughputSplitCount << "}";
         llm->set_config(settings.str());
     } else {
         llm->set_config("{\"tmp_path\":\"tmp\"}");
@@ -382,7 +386,8 @@ int main(int argc, const char* argv[]) {
         return dual_batch_test(llm.get());
     }
     if (dualThroughputTest) {
-        return dual_throughput_test(llm.get(), throughputRequests, throughputTokens, throughputRounds);
+        return dual_throughput_test(
+            llm.get(), throughputRequests, throughputTokens, throughputRounds, throughputSplitCount);
     }
     if (argc < 3) {
         chat(llm.get());
