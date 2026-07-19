@@ -17,4 +17,4 @@ cmake ../../../ \
 -DMNN_BUILD_FOR_ANDROID_COMMAND=true \
 -DNATIVE_LIBRARY_OUTPUT=. -DNATIVE_INCLUDE_OUTPUT=. $*
 
-make -j256
+cmake --build . -j"${MNN_BUILD_JOBS:-8}"

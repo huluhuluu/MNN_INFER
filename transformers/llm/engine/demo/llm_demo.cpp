@@ -9,7 +9,10 @@
 #define MNN_OPEN_TIME_TRACE
 #include <MNN/AutoTime.hpp>
 #include <MNN/expr/ExecutorScope.hpp>
+#include <chrono>
+#include <climits>
 #include <fstream>
+#include <iomanip>
 #include <sstream>
 #include <stdlib.h>
 #include <initializer_list>
@@ -263,9 +266,75 @@ static int dual_batch_test(Llm* llm) {
     return 0;
 }
 
+static bool parse_positive_int(const char* text, int& value) {
+    if (text == nullptr) {
+        return false;
+    }
+    char* end = nullptr;
+    const long parsed = std::strtol(text, &end, 10);
+    if (end == text || *end != '\0' || parsed <= 0 || parsed > INT_MAX) {
+        return false;
+    }
+    value = static_cast<int>(parsed);
+    return true;
+}
+
+static int dual_throughput_test(Llm* llm, int requestCount, int maxNewTokens, int rounds) {
+    const std::vector<std::string> prompts(requestCount, "hello");
+    auto runRound = [llm, &prompts, maxNewTokens](int& generatedTokens) {
+        const auto start = std::chrono::steady_clock::now();
+        llm->response(prompts, nullptr, nullptr, maxNewTokens);
+        const auto end = std::chrono::steady_clock::now();
+        generatedTokens = llm->getContext()->gen_seq_len;
+        return std::chrono::duration<double>(end - start).count();
+    };
+
+    std::cout << "running dual pipeline throughput test"
+              << ", requests=" << requestCount
+              << ", max_new_tokens=" << maxNewTokens
+              << ", rounds=" << rounds << std::endl;
+
+    int warmupTokens = 0;
+    const double warmupSeconds = runRound(warmupTokens);
+    if (llm->getContext()->status == LlmStatus::INTERNAL_ERROR || warmupTokens <= 0) {
+        std::cerr << "dual pipeline throughput warmup failed" << std::endl;
+        return 3;
+    }
+    std::cout << std::fixed << std::setprecision(3)
+              << "warmup: tokens=" << warmupTokens
+              << ", elapsed_ms=" << warmupSeconds * 1000.0 << std::endl;
+
+    int totalTokens = 0;
+    double totalSeconds = 0.0;
+    for (int round = 0; round < rounds; ++round) {
+        int generatedTokens = 0;
+        const double seconds = runRound(generatedTokens);
+        if (llm->getContext()->status == LlmStatus::INTERNAL_ERROR || generatedTokens <= 0) {
+            std::cerr << "dual pipeline throughput round " << round << " failed" << std::endl;
+            return 3;
+        }
+        totalTokens += generatedTokens;
+        totalSeconds += seconds;
+        std::cout << "round " << round
+                  << ": tokens=" << generatedTokens
+                  << ", elapsed_ms=" << seconds * 1000.0
+                  << ", aggregate_tokens_per_second=" << generatedTokens / seconds << std::endl;
+    }
+
+    const double aggregateThroughput = totalTokens / totalSeconds;
+    std::cout << "summary: measured_tokens=" << totalTokens
+              << ", elapsed_ms=" << totalSeconds * 1000.0
+              << ", aggregate_tokens_per_second=" << aggregateThroughput
+              << ", average_request_tokens_per_second=" << aggregateThroughput / requestCount
+              << std::endl;
+    return 0;
+}
+
 int main(int argc, const char* argv[]) {
     if (argc < 2) {
-        std::cout << "Usage: " << argv[0] << " config.json [prompt.txt | --dual-batch-test]" << std::endl;
+        std::cout << "Usage: " << argv[0]
+                  << " config.json [prompt.txt | --dual-batch-test | --dual-throughput-test [requests] [tokens] [rounds] [resident_graphs]]"
+                  << std::endl;
         return 0;
     }
     MNN::BackendConfig backendConfig;
@@ -274,10 +343,26 @@ int main(int argc, const char* argv[]) {
 
     std::string config_path = argv[1];
     const bool dualBatchTest = argc >= 3 && std::string(argv[2]) == "--dual-batch-test";
+    const bool dualThroughputTest = argc >= 3 && std::string(argv[2]) == "--dual-throughput-test";
+    int throughputRequests = 3;
+    int throughputTokens = 16;
+    int throughputRounds = 3;
+    int residentGraphs = 30;
+    if (dualThroughputTest &&
+        ((argc >= 4 && !parse_positive_int(argv[3], throughputRequests)) ||
+         (argc >= 5 && !parse_positive_int(argv[4], throughputTokens)) ||
+         (argc >= 6 && !parse_positive_int(argv[5], throughputRounds)) ||
+         (argc >= 7 && !parse_positive_int(argv[6], residentGraphs)))) {
+        std::cerr << "invalid dual throughput test arguments" << std::endl;
+        return 2;
+    }
     std::cout << "config path is " << config_path << std::endl;
     std::unique_ptr<Llm> llm(Llm::createLLM(config_path));
-    if (dualBatchTest) {
-        llm->set_config("{\"tmp_path\":\"tmp\",\"async\":false,\"max_new_tokens\":1,\"dual_pipeline_max_resident_graphs\":30}");
+    if (dualBatchTest || dualThroughputTest) {
+        std::ostringstream settings;
+        settings << "{\"tmp_path\":\"tmp\",\"async\":false,\"dual_pipeline_max_resident_graphs\":"
+                 << residentGraphs << "}";
+        llm->set_config(settings.str());
     } else {
         llm->set_config("{\"tmp_path\":\"tmp\"}");
     }
@@ -286,15 +371,18 @@ int main(int argc, const char* argv[]) {
         bool res = llm->load();
         if (!res) {
             MNN_ERROR("LLM init error\n");
-            return 0;
+            return 1;
         }
     }
-    if (!dualBatchTest) {
+    if (!dualBatchTest && !dualThroughputTest) {
         AUTOTIME;
         tuning_prepare(llm.get());
     }
     if (dualBatchTest) {
         return dual_batch_test(llm.get());
+    }
+    if (dualThroughputTest) {
+        return dual_throughput_test(llm.get(), throughputRequests, throughputTokens, throughputRounds);
     }
     if (argc < 3) {
         chat(llm.get());
