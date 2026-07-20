@@ -96,17 +96,18 @@ struct BatchKVMeta {
 
     // release kv cache for req_id, called after compute
     void releaseKV(int req_id) {
+        auto iter = mMetas.find(req_id);
+        if (iter == mMetas.end()) {
+            return;
+        }
         for (auto& callback : mReleaseCallbacks) {
             if (callback.second) {
                 callback.second(req_id);
             }
         }
-        auto iter = mMetas.find(req_id);
-        if (iter != mMetas.end()) {
-            delete iter->second;
-            iter->second = nullptr;
-            mMetas.erase(iter);
-        }
+        delete iter->second;
+        iter->second = nullptr;
+        mMetas.erase(iter);
         for (auto iter = calId.begin(); iter != calId.end();) {
             if (*iter == req_id) {
                 iter = calId.erase(iter);

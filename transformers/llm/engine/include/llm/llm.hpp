@@ -15,10 +15,12 @@
 #include <sstream>
 #include <iostream>
 #include <streambuf>
+#include <array>
 #include <functional>
 #include <unordered_map>
 
 #include <llm/BatchScheduler.hpp>
+#include <llm/DualPipelineGraph.hpp>
 #include <MNN/expr/Expr.hpp>
 #include <MNN/expr/Module.hpp>
 #include <MNN/expr/MathOp.hpp>
@@ -35,6 +37,7 @@ class Prompt;
 class Generation;
 class EagleGeneration;
 class BatchScheduler;
+class DualPipelineScheduler;
 struct TimePerformance;
 
 using ChatMessage = std::pair<std::string, std::string>; // <role, content>
@@ -168,8 +171,11 @@ public:
     std::vector<std::vector<int>> generate(const std::vector<std::vector<int> >& input_ids, std::ostream* os= &std::cout, int max_new_tokens = -1);
 protected:
     void initRuntime();
-    void setRuntimeHint(std::shared_ptr<Express::Executor::RuntimeManager> &rtg);
-    void applyKVCacheRuntimeHint(std::shared_ptr<Express::Executor::RuntimeManager> &rtg, bool packedMode);
+    void setRuntimeHint(const std::shared_ptr<Express::Executor::RuntimeManager>& rtg, BatchKVMeta* batchMeta = nullptr, KVMeta* meta = nullptr);
+    void applyKVCacheRuntimeHint(const std::shared_ptr<Express::Executor::RuntimeManager>& rtg,
+                                 bool packedMode,
+                                 BatchKVMeta* batchMeta = nullptr,
+                                 KVMeta* meta = nullptr);
     std::shared_ptr<LlmContext> mContext;
     std::shared_ptr<KVMeta> mMeta;
     std::shared_ptr<BatchKVMeta> mBatchMeta;
@@ -205,7 +211,21 @@ private:
     std::shared_ptr<Generation> mGenerationStrategy;
     void setSpeculativeConfig();
     void updateContext(int seq_len, int gen_len);
+    void configureDualPipelineMode();
+    void resetDualPipelineGraphState();
+    bool refreshDualPipelineGraphSnapshot();
+    int dualPipelinePaddedCulLen(const BatchScheduler::Chunk& chunk);
+    void releaseDualPipelineRequestExecution(int requestId);
+    void resetDualPipelineExecutionState();
+    bool prepareDualPipelineExecutionState();
+    std::shared_ptr<Express::Module> getDualPipelineModule(int pipelineId, const std::pair<int, bool>& moduleKey);
 private:
+    struct DualPipelineRuntime {
+        std::shared_ptr<Express::Executor> executor;
+        std::shared_ptr<Express::Executor::RuntimeManager> runtimeManager;
+        std::shared_ptr<BatchKVMeta> batchMeta;
+        std::map<std::pair<int, bool>, std::shared_ptr<Express::Module>> modulePool;
+    };
     bool mInSpec = false;
     int mDraftLength = 4;
     std::shared_ptr<GenerationParams> mGenerateParam;
@@ -217,6 +237,17 @@ private:
     int mCallIndex;
     int mPrefixLength;
     bool mIsPrefixFileExist = false;
+    std::shared_ptr<DualPipelineScheduler> mDualPipelineScheduler;
+    std::array<DualPipelineRuntime, 2> mDualPipelineRuntimes;
+    bool mDualPipelineExecutionReady = false;
+    std::vector<std::string> mDualPipelineInputNames;
+    std::vector<std::string> mDualPipelineOutputNames;
+    Express::Module::Config mDualPipelineModuleConfig;
+    std::string mDualPipelineModelPath;
+    GraphSnapshot mDualPipelineGraphSnapshot;
+    bool mDualPipelineGraphSnapshotReady = false;
+    std::vector<DualPipelineScheduler::GraphRequest> mDualPipelineQnnGraphRequests;
+    std::unordered_map<std::string, int> mDualPipelineQnnOpIndices;
 };
 
 // Embedding start

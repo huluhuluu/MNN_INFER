@@ -111,6 +111,15 @@ void CPURuntime::_bindCPUCore() const {
         mThreadPool->deactive();
     }
 #endif
+#if !defined(_OPENMP)
+#ifdef MNN_USE_THREAD_POOL
+    if (nullptr == mThreadPool) {
+        MNNSetSchedAffinity(mCpuIds.data(), mCpuIds.size());
+    }
+#else
+    MNNSetSchedAffinity(mCpuIds.data(), mCpuIds.size());
+#endif
+#endif
 }
 void CPURuntime::_resetThreadPool() const {
     mThreadNumber = std::max(1, mThreadNumber);
