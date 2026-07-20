@@ -181,8 +181,10 @@ class LlmExporter(torch.nn.Module):
             return
         from utils.eagle import Eagle
         self.eagle = Eagle.get_eagle(self.model_type)(self.args.eagle_path, self.model)
-        eagle_sliding_window = getattr(self.eagle.eagle_config, 'sliding_window', 0)
-        use_sliding_window = getattr(self.eagle.eagle_config, 'use_sliding_window', eagle_sliding_window > 0)
+        eagle_sliding_window = getattr(self.eagle.eagle_config, 'sliding_window', None)
+        use_sliding_window = getattr(self.eagle.eagle_config, 'use_sliding_window', None)
+        if use_sliding_window is None:
+            use_sliding_window = eagle_sliding_window is not None and eagle_sliding_window > 0
         if use_sliding_window and eagle_sliding_window is not None and eagle_sliding_window > 0:
             self.eagle_sliding_window = int(eagle_sliding_window)
         eagle_onnx, eagle_fc_onnx = self.eagle.export(self.onnx_path)

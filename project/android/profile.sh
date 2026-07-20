@@ -11,7 +11,7 @@ QNN_BUILD_DIR="${QNN_BUILD_DIR:-$SCRIPT_DIR/build_64_qnn}"
 HOST_BUILD_DIR="${HOST_BUILD_DIR:-$ROOT_DIR/build_qnn_export}"
 REMOTE_ROOT="${REMOTE_ROOT:-/data/local/tmp/mnn-profiler}"
 ADB_SERIAL="${ADB_SERIAL:-192.168.124.101:47954}"
-MODEL_SRC_DIR="${MODEL_SRC_DIR:-/data/HF_MODELS/Qwen3-1.7B-MNN}"
+MODEL_SRC_DIR="${MODEL_SRC_DIR:-/data/HUGGINGFACE/Qwen3-1.7B-MNN}"
 QNN_EXPORT_SCRIPT="${QNN_EXPORT_SCRIPT:-$ROOT_DIR/transformers/llm/export/npu/generate_llm_qnn.py}"
 QNN_SDK_ROOT="${QNN_SDK_ROOT:-}"
 QNN_SOC_ID="${QNN_SOC_ID:-69}"
@@ -22,8 +22,10 @@ LOG_DIR="${LOG_DIR:-$SCRIPT_DIR/llm_profile_logs}"
 WORK_ROOT="${WORK_ROOT:-$SCRIPT_DIR/llm_profile_work}"
 BUILD_JOBS="${BUILD_JOBS:-$(nproc)}"
 
-PROMPT_LENS=(1024 2048) # 32 64 128 256 512 1024 2048
-DECODE_LENS=(2 4 6 8 16 32 64) # 1 2 4 6 8 16 32 64
+PROMPT_LENS=(128)        # 16 32 64 128 256 512 1024 2048 4096
+DECODE_LENS=(1)          # 1 2 4 6 8 16 32 64
+QNN_TEST_MODE="per-case" # per-case fixed-shape
+QNN_FIXED_SHAPES=(1 8 128)
 BACKENDS=(qnn) # cpu opencl qnn
 WARMUP=2
 REPEAT=3
@@ -117,6 +119,194 @@ join_by_comma() {
   printf '%s' "$out"
 }
 
+join_by_underscore() {
+  local out=""
+  local item
+  for item in "$@"; do
+    if [[ -n "$out" ]]; then
+      out+="_"
+    fi
+    out+="$item"
+  done
+  printf '%s' "$out"
+}
+
+set_array_from_list() {
+  local -n target="$1"
+  local raw="$2"
+  local value
+  raw="${raw//,/ }"
+  target=()
+  for value in $raw; do
+    if [[ ! "$value" =~ ^[0-9]+$ ]]; then
+      echo "invalid numeric list item: $value" >&2
+      exit 1
+    fi
+    target+=("$value")
+  done
+  if [[ "${#target[@]}" -eq 0 ]]; then
+    echo "empty numeric list is not allowed" >&2
+    exit 1
+  fi
+}
+
+set_string_array_from_list() {
+  local -n target="$1"
+  local raw="$2"
+  local value
+  raw="${raw//,/ }"
+  target=()
+  for value in $raw; do
+    target+=("$value")
+  done
+  if [[ "${#target[@]}" -eq 0 ]]; then
+    echo "empty list is not allowed" >&2
+    exit 1
+  fi
+}
+
+usage() {
+  cat <<USAGE
+Usage: $(basename "$0") [options]
+
+Options:
+  --qnn-test-mode=per-case|fixed-shape
+      per-case exports one QNN graph per prompt/decode pair.
+      fixed-shape exports/reuses one graph with --qnn-fixed-shapes and runs all prompt/decode combinations.
+  --qnn-fixed-shapes=1,128
+      Chunk sizes used for the fixed-shape QNN export.
+  --prompt-lens=512,1024,2048
+  --decode-lens=1,2,4,6,8,16
+  --backends=qnn,cpu,opencl
+  --warmup=2
+  --repeat=3
+  -h, --help
+USAGE
+}
+
+parse_args() {
+  local arg value
+  while [[ "$#" -gt 0 ]]; do
+    arg="$1"
+    case "$arg" in
+    --qnn-test-mode=*)
+      QNN_TEST_MODE="${arg#*=}"
+      ;;
+    --qnn-test-mode)
+      shift
+      [[ "$#" -gt 0 ]] || {
+        echo "--qnn-test-mode requires a value" >&2
+        exit 1
+      }
+      QNN_TEST_MODE="$1"
+      ;;
+    --qnn-fixed-shapes=*)
+      set_array_from_list QNN_FIXED_SHAPES "${arg#*=}"
+      ;;
+    --qnn-fixed-shapes)
+      shift
+      [[ "$#" -gt 0 ]] || {
+        echo "--qnn-fixed-shapes requires a value" >&2
+        exit 1
+      }
+      set_array_from_list QNN_FIXED_SHAPES "$1"
+      ;;
+    --prompt-lens=*)
+      set_array_from_list PROMPT_LENS "${arg#*=}"
+      ;;
+    --prompt-lens)
+      shift
+      [[ "$#" -gt 0 ]] || {
+        echo "--prompt-lens requires a value" >&2
+        exit 1
+      }
+      set_array_from_list PROMPT_LENS "$1"
+      ;;
+    --decode-lens=*)
+      set_array_from_list DECODE_LENS "${arg#*=}"
+      ;;
+    --decode-lens)
+      shift
+      [[ "$#" -gt 0 ]] || {
+        echo "--decode-lens requires a value" >&2
+        exit 1
+      }
+      set_array_from_list DECODE_LENS "$1"
+      ;;
+    --backends=*)
+      set_string_array_from_list BACKENDS "${arg#*=}"
+      ;;
+    --backends)
+      shift
+      [[ "$#" -gt 0 ]] || {
+        echo "--backends requires a value" >&2
+        exit 1
+      }
+      set_string_array_from_list BACKENDS "$1"
+      ;;
+    --warmup=*)
+      value="${arg#*=}"
+      [[ "$value" =~ ^[0-9]+$ ]] || {
+        echo "invalid --warmup: $value" >&2
+        exit 1
+      }
+      WARMUP="$value"
+      ;;
+    --warmup)
+      shift
+      [[ "$#" -gt 0 ]] || {
+        echo "--warmup requires a value" >&2
+        exit 1
+      }
+      [[ "$1" =~ ^[0-9]+$ ]] || {
+        echo "invalid --warmup: $1" >&2
+        exit 1
+      }
+      WARMUP="$1"
+      ;;
+    --repeat=*)
+      value="${arg#*=}"
+      [[ "$value" =~ ^[0-9]+$ ]] || {
+        echo "invalid --repeat: $value" >&2
+        exit 1
+      }
+      REPEAT="$value"
+      ;;
+    --repeat)
+      shift
+      [[ "$#" -gt 0 ]] || {
+        echo "--repeat requires a value" >&2
+        exit 1
+      }
+      [[ "$1" =~ ^[0-9]+$ ]] || {
+        echo "invalid --repeat: $1" >&2
+        exit 1
+      }
+      REPEAT="$1"
+      ;;
+    -h | --help)
+      usage
+      exit 0
+      ;;
+    *)
+      echo "unknown option: $arg" >&2
+      usage >&2
+      exit 1
+      ;;
+    esac
+    shift
+  done
+
+  case "$QNN_TEST_MODE" in
+  per-case | fixed-shape)
+    ;;
+  *)
+    echo "invalid --qnn-test-mode: $QNN_TEST_MODE" >&2
+    exit 1
+    ;;
+  esac
+}
+
 resolve_bench_bin() {
   local build_dir="$1"
   local candidate
@@ -178,15 +368,15 @@ configure_android_build() {
   done < <(android_common_cmake_flags)
 
   case "$backend" in
-    cpu)
-      flags+=(-DMNN_OPENCL=OFF -DMNN_QNN=OFF)
-      ;;
-    opencl)
-      flags+=(-DMNN_OPENCL=ON -DMNN_QNN=OFF)
-      ;;
-    qnn)
-      flags+=(-DMNN_OPENCL=OFF -DMNN_QNN=ON -DMNN_WITH_PLUGIN=ON)
-      ;;
+  cpu)
+    flags+=(-DMNN_OPENCL=OFF -DMNN_QNN=OFF)
+    ;;
+  opencl)
+    flags+=(-DMNN_OPENCL=ON -DMNN_QNN=OFF)
+    ;;
+  qnn)
+    flags+=(-DMNN_OPENCL=OFF -DMNN_QNN=ON -DMNN_WITH_PLUGIN=ON)
+    ;;
   esac
 
   mkdir -p "$build_dir"
@@ -304,16 +494,37 @@ run_cpu_or_opencl() {
   adb_run shell "rm -rf '$remote_dir'"
 }
 
+qnn_graph_ready() {
+  local local_dir="$1"
+  [[ -f "$local_dir/config_qnn.json" ]] || return 1
+  [[ -d "$local_dir/qnn" ]] || return 1
+  [[ -n "$(find "$local_dir/qnn" -type f -print -quit 2>/dev/null)" ]]
+}
+
+export_qnn_model() {
+  local local_dir="$1"
+  local cache_dir="$2"
+  shift 2
+  local chunk_sizes=("$@")
+
+  export QNN_SDK_ROOT
+  python3 "$QNN_EXPORT_SCRIPT" \
+    --model "$local_dir" \
+    --soc_id="$QNN_SOC_ID" \
+    --dsp_arch="$QNN_DSP_ARCH" \
+    --mnn_path="$HOST_BUILD_DIR" \
+    --cache_path "$cache_dir" \
+    --chunk_size "${chunk_sizes[@]}" 2>&1 | tee -a "$QNN_LOG"
+}
+
 run_qnn_case() {
   local prompt_len="$1"
   local decode_len="$2"
   local local_dir="$WORK_ROOT/qnn_p${prompt_len}_d${decode_len}"
   local remote_dir="$REMOTE_ROOT/$(basename "$local_dir")"
   local cache_dir="$local_dir/cache"
-  local chunk_sizes
+  local chunk_sizes=()
   local cleanup_local_qnn
-  local skip_args=()
-  local skip_module_args=()
 
   copy_model_skeleton "$MODEL_SRC_DIR" "$local_dir"
   cleanup_local_qnn() {
@@ -322,16 +533,8 @@ run_qnn_case() {
   cleanup_local_qnn
   trap cleanup_local_qnn RETURN
 
-  chunk_sizes="$(sorted_unique_chunk_sizes "$prompt_len" "$decode_len")"
-  export QNN_SDK_ROOT
-
-  python3 "$QNN_EXPORT_SCRIPT" \
-    --model "$local_dir" \
-    --soc_id="$QNN_SOC_ID" \
-    --dsp_arch="$QNN_DSP_ARCH" \
-    --mnn_path="$HOST_BUILD_DIR" \
-    --cache_path "$cache_dir" \
-    --chunk_size $chunk_sizes 2>&1 | tee -a "$QNN_LOG"
+  read -r -a chunk_sizes <<<"$(sorted_unique_chunk_sizes "$prompt_len" "$decode_len")"
+  export_qnn_model "$local_dir" "$cache_dir" "${chunk_sizes[@]}"
 
   adb_run push "$local_dir" "$REMOTE_ROOT/" >/dev/null
 
@@ -344,7 +547,36 @@ run_qnn_case() {
   trap - RETURN
 }
 
+run_qnn_fixed_shape_case() {
+  local shape_suffix
+  shape_suffix="$(join_by_underscore "${QNN_FIXED_SHAPES[@]}")"
+  local local_dir="$WORK_ROOT/qnn_fixed_s${shape_suffix}"
+  local remote_dir="$REMOTE_ROOT/$(basename "$local_dir")"
+  local cache_dir="$local_dir/cache"
+  local prompt_lens decode_lens
+
+  if qnn_graph_ready "$local_dir"; then
+    printf '\n--- qnn fixed export shapes=%s: reuse existing graph ---\n' "${QNN_FIXED_SHAPES[*]}" | tee -a "$QNN_LOG"
+  else
+    printf '\n--- qnn fixed export shapes=%s: export graph ---\n' "${QNN_FIXED_SHAPES[*]}" | tee -a "$QNN_LOG"
+    copy_model_skeleton "$MODEL_SRC_DIR" "$local_dir"
+    rm -rf "$local_dir/qnn" "$local_dir/cache"
+    export_qnn_model "$local_dir" "$cache_dir" "${QNN_FIXED_SHAPES[@]}"
+  fi
+
+  adb_run push "$local_dir" "$REMOTE_ROOT/" >/dev/null
+
+  prompt_lens="$(join_by_comma "${PROMPT_LENS[@]}")"
+  decode_lens="$(join_by_comma "${DECODE_LENS[@]}")"
+  printf '\n--- fixed-shape prompt=%s decode=%s ---\n' "$prompt_lens" "$decode_lens" | tee -a "$QNN_LOG"
+  run_remote_case "$QNN_LOG" "$remote_dir" "config_qnn.json" "$prompt_lens" "$decode_lens" 1
+
+  adb_run shell "rm -rf '$remote_dir'"
+}
+
 main() {
+  parse_args "$@"
+
   mkdir -p "$LOG_DIR" "$WORK_ROOT"
   need_file "$MODEL_SRC_DIR/llm.mnn"
   need_file "$MODEL_SRC_DIR/llm_config.json"
@@ -379,12 +611,21 @@ main() {
     push_runtime_files 1 0 "$QNN_BUILD_DIR"
     printf '=== qnn ===\n' | tee -a "$QNN_LOG"
     local prompt_len decode_len
-    for prompt_len in "${PROMPT_LENS[@]}"; do
-      for decode_len in "${DECODE_LENS[@]}"; do
-        run_qnn_case "$prompt_len" "$decode_len"
+    case "$QNN_TEST_MODE" in
+    per-case)
+      for prompt_len in "${PROMPT_LENS[@]}"; do
+        for decode_len in "${DECODE_LENS[@]}"; do
+          run_qnn_case "$prompt_len" "$decode_len"
+        done
       done
-    done
+      ;;
+    fixed-shape)
+      run_qnn_fixed_shape_case
+      ;;
+    esac
   fi
 }
 
-main "$@"
+if [[ "${BASH_SOURCE[0]}" == "$0" ]]; then
+  main "$@"
+fi

@@ -45,7 +45,7 @@ class Eagle(torch.nn.Module):
         # self.config.head_dim = self.head_dim
         self.config.rotary = Rotary(self)
         # eagle config params
-        self.padding_idx = self.eagle_config.pad_token_id
+        self.padding_idx = getattr(self.eagle_config, 'pad_token_id', None)
         self.vocab_size = self.eagle_config.vocab_size
         self.draft_vocab_size = self.eagle_config.draft_vocab_size
         # embed_tokens api

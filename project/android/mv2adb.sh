@@ -1,7 +1,5 @@
 adb shell mkdir /data/local/tmp/mnn-profiler
 adb push libMNN.so /data/local/tmp/mnn-profiler
-adb push tools/train/libMNNTrain.so /data/local/tmp/mnn-profiler
-adb push tools/train/libMNNTrainUtils.so /data/local/tmp/mnn-profiler
 adb push libMNN_CL.so /data/local/tmp/mnn-profiler
 adb push libMNN_Express.so /data/local/tmp/mnn-profiler
 adb push libllm.so /data/local/tmp/mnn-profiler
