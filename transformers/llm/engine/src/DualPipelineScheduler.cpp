@@ -4,6 +4,7 @@
 //
 
 #include "llm/DualPipelineScheduler.hpp"
+#include "llm/AcceptanceTrace.hpp"
 
 #include <algorithm>
 #include <limits>
@@ -18,6 +19,7 @@ DualPipelineScheduler::StageSnapshot::StageSnapshot()
       qnnReadyStages(0),
       activeHostStages(0),
       activeQnnStages(0),
+      maxConcurrentHostStages(0),
       maxConcurrentQnnStages(0),
       completedStages(0),
       completedHostStages(0),
@@ -30,6 +32,8 @@ DualPipelineScheduler::GraphRequest::GraphRequest()
       requestId(-1),
       pipelineId(-1),
       graphIndex(-1),
+      shapeIndex(-1),
+      bucketSize(-1),
       offset(0),
       size(0),
       draftGraph(false),
@@ -100,6 +104,7 @@ DualPipelineScheduler::DualPipelineScheduler()
       mQnnExecutionActive(false),
       mActiveHostStages(0),
       mActiveQnnStages(0),
+      mMaxConcurrentHostStages(0),
       mMaxConcurrentQnnStages(0),
       mCompletedStages(0),
       mCompletedHostStages(0),
@@ -408,6 +413,7 @@ bool DualPipelineScheduler::beginStageWave(const std::vector<int>& pipelineIds) 
     }
     mActiveHostStages = 0;
     mActiveQnnStages = 0;
+    mMaxConcurrentHostStages = 0;
     mMaxConcurrentQnnStages = 0;
     mCompletedStages = 0;
     mCompletedHostStages = 0;
@@ -491,6 +497,12 @@ bool DualPipelineScheduler::finishStageWave() {
     mActiveHostStages = 0;
     mActiveQnnStages = 0;
     mStageWaveActive = false;
+    AcceptanceTrace::log("event=stage_summary host_completed=%llu qnn_completed=%llu overlap_grants=%llu max_host=%zu max_qnn=%zu cancelled=%d",
+                         static_cast<unsigned long long>(mCompletedHostStages),
+                         static_cast<unsigned long long>(mCompletedQnnStages),
+                         static_cast<unsigned long long>(mHostQnnOverlapGrants),
+                         mMaxConcurrentHostStages, mMaxConcurrentQnnStages,
+                         mStageCancelled ? 1 : 0);
     return succeeded;
 }
 
@@ -503,6 +515,7 @@ DualPipelineScheduler::StageSnapshot DualPipelineScheduler::stageSnapshot() cons
     result.qnnReadyStages = mQnnReadyStages.size();
     result.activeHostStages = mActiveHostStages;
     result.activeQnnStages = mActiveQnnStages;
+    result.maxConcurrentHostStages = mMaxConcurrentHostStages;
     result.maxConcurrentQnnStages = mMaxConcurrentQnnStages;
     result.completedStages = mCompletedStages;
     result.completedHostStages = mCompletedHostStages;
@@ -517,6 +530,9 @@ void DualPipelineScheduler::_grantReadyStagesLocked() {
         mHostReadyStages.pop_front();
         mActiveStages[waiter->pipelineId] = waiter->backend;
         ++mActiveHostStages;
+        if (mActiveHostStages > mMaxConcurrentHostStages) {
+            mMaxConcurrentHostStages = mActiveHostStages;
+        }
         waiter->granted = true;
         if (mActiveQnnStages > 0) {
             ++mHostQnnOverlapGrants;
@@ -592,6 +608,16 @@ void DualPipelineScheduler::_enqueueGraphIndexLocked(int pipelineId, int graphIn
     request.graphIndex = graphIndex;
     request.ownerRequestIds = iter->second.ownerRequestIds;
     request.requestId = request.ownerRequestIds.empty() ? -1 : request.ownerRequestIds.front();
+    if (request.ownerRequestIds.empty()) {
+        AcceptanceTrace::log("event=qnn_bucket lane=%d request_id=-1 request_scope=engine graph_index=%d shape_index=%d bucket=%d",
+                             pipelineId, graphIndex, request.shapeIndex, request.bucketSize);
+    } else {
+        for (size_t ownerIndex = 0; ownerIndex < request.ownerRequestIds.size(); ++ownerIndex) {
+            AcceptanceTrace::log("event=qnn_bucket lane=%d request_id=%d request_scope=engine graph_index=%d shape_index=%d bucket=%d",
+                                 pipelineId, request.ownerRequestIds[ownerIndex], graphIndex,
+                                 request.shapeIndex, request.bucketSize);
+        }
+    }
     Task task;
     task.type = TASK_GRAPH_LOAD;
     task.graphRequest = request;

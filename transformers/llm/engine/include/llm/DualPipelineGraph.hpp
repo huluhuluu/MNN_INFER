@@ -28,6 +28,7 @@ struct QnnGraphInfo {
     uint64_t offset;
     uint64_t size;
     std::vector<std::string> allGraphName;
+    std::vector<std::string> graphPaths;
     std::vector<int> bucketSizes;
     bool pin;
     bool draft;
@@ -72,6 +73,16 @@ std::vector<DualPipelineScheduler::GraphRequest> buildQnnGraphRequests(const Gra
                                                                        int start,
                                                                        int maxK,
                                                                        int reqId);
+
+// Build requests for one concrete QNN bucket. Per-shape exports must only
+// materialize the selected context; loading the scalar context would retain
+// every bucket in the plugin and defeat the scheduler's resident limit.
+std::vector<DualPipelineScheduler::GraphRequest> buildQnnGraphRequestsForSize(
+    const GraphSnapshot& snapshot,
+    int start,
+    int maxK,
+    int reqId,
+    int requestGroupSize);
 
 } // namespace Transformer
 } // namespace MNN

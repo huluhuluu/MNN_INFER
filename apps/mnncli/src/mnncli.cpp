@@ -16,16 +16,18 @@
 #include "cli_command_handler.hpp"
 #include "cli_command_parser.hpp"
 #include "cli_command_spec.hpp"
+#ifndef MNNCLI_SERVICE_ONLY
 #include "handlers/run_command_handler.hpp"
 #include "handlers/delete_command_handler.hpp"
 #include "handlers/list_command_handler.hpp"
 #include "handlers/search_command_handler.hpp"
 #include "handlers/download_command_handler.hpp"
 #include "handlers/model_info_command_handler.hpp"
-#include "handlers/serve_command_handler.hpp"
 #include "handlers/benchmark_command_handler.hpp"
 #include "handlers/config_command_handler.hpp"
 #include "handlers/info_command_handler.hpp"
+#endif
+#include "handlers/serve_command_handler.hpp"
 #include "log_utils.hpp"
 #include "user_interface.hpp"
 
@@ -50,7 +52,11 @@ public:
         
         // List of supported handler-based commands
         static const std::vector<std::string> handler_commands = {
+#ifdef MNNCLI_SERVICE_ONLY
+            "serve"
+#else
             "run", "delete", "list", "search", "download", "model_info", "serve", "benchmark", "config", "info"
+#endif
         };
         
         // Check if this is a handler-based command
@@ -62,17 +68,19 @@ public:
                 mnncli::CommandDispatcher dispatcher;
                 mnncli::CommandParser parser(argc, argv);
                 
-                // Register all handlers
+                // Register handlers available in this build.
+#ifndef MNNCLI_SERVICE_ONLY
                 dispatcher.Register(std::make_unique<mnncli::RunCommandHandler>());
                 dispatcher.Register(std::make_unique<mnncli::DeleteCommandHandler>());
                 dispatcher.Register(std::make_unique<mnncli::ListCommandHandler>());
                 dispatcher.Register(std::make_unique<mnncli::SearchCommandHandler>());
                 dispatcher.Register(std::make_unique<mnncli::DownloadCommandHandler>());
                 dispatcher.Register(std::make_unique<mnncli::ModelInfoCommandHandler>());
-                dispatcher.Register(std::make_unique<mnncli::ServeCommandHandler>());
                 dispatcher.Register(std::make_unique<mnncli::BenchmarkCommandHandler>());
                 dispatcher.Register(std::make_unique<mnncli::ConfigCommandHandler>());
                 dispatcher.Register(std::make_unique<mnncli::InfoCommandHandler>());
+#endif
+                dispatcher.Register(std::make_unique<mnncli::ServeCommandHandler>());
                 
                 // Get spec for the command
                 const auto& spec = mnncli::GetSpec(cmd_name);
@@ -147,6 +155,9 @@ private:
         std::cout << "MNN CLI - AI Model Command Line Interface\n\n";
         std::cout << "Usage: mnncli <command> [options]\n\n";
         std::cout << "Commands:\n";
+#ifdef MNNCLI_SERVICE_ONLY
+        std::cout << "  serve      Start API server\n";
+#else
         std::cout << "  list       List local models\n";
         std::cout << "  search     Search remote models\n";
         std::cout << "  download   Download model\n";
@@ -157,11 +168,16 @@ private:
         std::cout << "  benchmark  Run performance benchmarks\n";
         std::cout << "  config     Manage configuration (show, set, reset, help)\n";
         std::cout << "  info       Show system information\n";
+#endif
         std::cout << "\nGlobal Options:\n";
         std::cout << "  -v, --verbose  Enable verbose output for detailed debugging\n";
         std::cout << "  --help    Show this help message\n";
         std::cout << "  --version Show version information\n";
         std::cout << "\nExamples:\n";
+#ifdef MNNCLI_SERVICE_ONLY
+        std::cout << "  mnncli serve --config /path/to/config.json --host 127.0.0.1 --port 8000\n";
+        std::cout << "  mnncli serve --config /path/to/config.json --scheduler-mode dual_pipeline\n";
+#else
         std::cout << "  mnncli list                          # List local models\n";
         std::cout << "  mnncli search qwen                   # Search for Qwen models\n";
         std::cout << "  mnncli download qwen-7b             # Download Qwen-7B model\n";
@@ -176,6 +192,7 @@ private:
         std::cout << "  mnncli run -p \"Hello world\"         # Run with prompt using default model\n";
         std::cout << "  mnncli serve qwen-7b --port 8000    # Start API server\n";
         std::cout << "  mnncli benchmark qwen-7b            # Run benchmark\n";
+#endif
     }
     
     

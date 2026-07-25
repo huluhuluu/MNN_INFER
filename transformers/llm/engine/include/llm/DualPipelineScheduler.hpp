@@ -35,6 +35,7 @@ public:
         size_t qnnReadyStages;
         size_t activeHostStages;
         size_t activeQnnStages;
+        size_t maxConcurrentHostStages;
         size_t maxConcurrentQnnStages;
         uint64_t completedStages;
         uint64_t completedHostStages;
@@ -59,6 +60,8 @@ public:
         int requestId;
         int pipelineId;
         int graphIndex;
+        int shapeIndex;
+        int bucketSize;
         std::vector<int> ownerRequestIds;
         std::string graphId;
         std::string graphPath;
@@ -226,6 +229,7 @@ private:
     std::map<int, StageBackend> mActiveStages;
     size_t mActiveHostStages;
     size_t mActiveQnnStages;
+    size_t mMaxConcurrentHostStages;
     size_t mMaxConcurrentQnnStages;
     uint64_t mCompletedStages;
     uint64_t mCompletedHostStages;

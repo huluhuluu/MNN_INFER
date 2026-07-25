@@ -230,6 +230,26 @@ static int eval(Llm* llm, std::string prompt_file, int max_token_number) {
     return benchmark(llm, prompts, max_token_number);
 }
 
+static int batch_eval(Llm* llm, const std::string& prompt_file, int max_token_number) {
+    std::ifstream prompt_fs(prompt_file);
+    std::vector<std::string> prompts;
+    std::string prompt;
+    while (std::getline(prompt_fs, prompt)) {
+        if (prompt.empty()) {
+            continue;
+        }
+        if (prompt.back() == '\r') {
+            prompt.pop_back();
+        }
+        prompts.push_back(prompt);
+    }
+    if (prompts.empty()) {
+        return 1;
+    }
+    llm->response(prompts, &std::cout, nullptr, max_token_number);
+    return llm->getContext()->status == LlmStatus::INTERNAL_ERROR ? 3 : 0;
+}
+
 void chat(Llm* llm) {
     ChatMessages messages;
     messages.emplace_back("system", "You are a helpful assistant.");
@@ -334,7 +354,7 @@ static int dual_throughput_test(Llm* llm, int requestCount, int maxNewTokens, in
 int main(int argc, const char* argv[]) {
     if (argc < 2) {
         std::cout << "Usage: " << argv[0]
-                  << " config.json [prompt.txt | --dual-batch-test | --dual-throughput-test [requests] [tokens] [rounds] [resident_graphs] [split_count]]"
+                  << " config.json [prompt.txt | --batch prompt.txt [tokens] [no_think] | --dual-batch-test | --dual-throughput-test [requests] [tokens] [rounds] [resident_graphs] [split_count]]"
                   << std::endl;
         return 0;
     }
@@ -345,6 +365,11 @@ int main(int argc, const char* argv[]) {
     std::string config_path = argv[1];
     const bool dualBatchTest = argc >= 3 && std::string(argv[2]) == "--dual-batch-test";
     const bool dualThroughputTest = argc >= 3 && std::string(argv[2]) == "--dual-throughput-test";
+    const bool batchMode = argc >= 3 && std::string(argv[2]) == "--batch";
+    if (batchMode && argc < 4) {
+        std::cerr << "--batch requires a prompt file" << std::endl;
+        return 2;
+    }
     int throughputRequests = 3;
     int throughputTokens = 16;
     int throughputRounds = 3;
@@ -362,11 +387,13 @@ int main(int argc, const char* argv[]) {
     }
     std::cout << "config path is " << config_path << std::endl;
     std::unique_ptr<Llm> llm(Llm::createLLM(config_path));
-    if (dualBatchTest || dualThroughputTest) {
+    if (dualThroughputTest) {
         std::ostringstream settings;
         settings << "{\"tmp_path\":\"tmp\",\"async\":false,\"dual_pipeline_max_resident_graphs\":"
                  << residentGraphs << ",\"dual_pipeline_split_count\":" << throughputSplitCount << "}";
         llm->set_config(settings.str());
+    } else if (dualBatchTest) {
+        llm->set_config("{\"tmp_path\":\"tmp\",\"async\":false}");
     } else {
         llm->set_config("{\"tmp_path\":\"tmp\"}");
     }
@@ -378,7 +405,7 @@ int main(int argc, const char* argv[]) {
             return 1;
         }
     }
-    if (!dualBatchTest && !dualThroughputTest) {
+    if (!dualThroughputTest) {
         AUTOTIME;
         tuning_prepare(llm.get());
     }
@@ -388,6 +415,18 @@ int main(int argc, const char* argv[]) {
     if (dualThroughputTest) {
         return dual_throughput_test(
             llm.get(), throughputRequests, throughputTokens, throughputRounds, throughputSplitCount);
+    }
+    if (batchMode) {
+        int maxTokenNumber = -1;
+        if (argc >= 5) {
+            std::istringstream os(argv[4]);
+            os >> maxTokenNumber;
+        }
+        if (argc >= 6) {
+            llm->set_config(R"({"jinja":{"context":{"enable_thinking":false}}})");
+        }
+        llm->set_config(R"({"async":false})");
+        return batch_eval(llm.get(), argv[3], maxTokenNumber);
     }
     if (argc < 3) {
         chat(llm.get());

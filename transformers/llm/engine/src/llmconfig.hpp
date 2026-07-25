@@ -338,8 +338,33 @@ public:
         return config_.value("all_logits", false);
     }
 
+    std::string scheduler_mode() const {
+        const auto& document = config_.document;
+        if (document.HasMember("scheduler_mode")) {
+            if (!document["scheduler_mode"].IsString()) {
+                return "";
+            }
+            return document["scheduler_mode"].GetString();
+        }
+        const bool legacyDualPipeline = config_.value("dual_pipeline_mode", config_.value("dual_pipeline", false));
+        return legacyDualPipeline ? "dual_pipeline" : "single_request";
+    }
+
+    bool valid_scheduler_mode() const {
+        const auto mode = scheduler_mode();
+        return mode == "dual_pipeline" || mode == "single_request" || mode == "continuous_batch";
+    }
+
+    bool continuous_batch_mode() const {
+        return scheduler_mode() == "continuous_batch";
+    }
+
     bool dual_pipeline_mode() const {
-        return config_.value("dual_pipeline_mode", config_.value("dual_pipeline", false));
+        return scheduler_mode() == "dual_pipeline";
+    }
+
+    bool scheduler_requires_packed_attention() const {
+        return continuous_batch_mode() || dual_pipeline_mode();
     }
 
     int dual_pipeline_split_count() const {

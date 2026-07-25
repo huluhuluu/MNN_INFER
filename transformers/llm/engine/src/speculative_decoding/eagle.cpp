@@ -19,6 +19,104 @@ static inline VARP _var(std::vector<T> vec, const std::vector<int> &dims) {
     return _Const(vec.data(), dims, NHWC, halide_type_of<T>());
 }
 
+static int _rowCount(VARP input) {
+    auto info = input == nullptr ? nullptr : input->getInfo();
+    if (info == nullptr || info->dim.empty()) {
+        return 0;
+    }
+    if (info->dim.size() == 3 && info->dim[0] == 1) {
+        return info->dim[1];
+    }
+    return info->dim[0];
+}
+
+static VARP _sliceRows(VARP input, int offset, int len) {
+    auto info = input == nullptr ? nullptr : input->getInfo();
+    if (info == nullptr || info->dim.empty() || offset < 0 || len <= 0 || offset + len > _rowCount(input)) {
+        return nullptr;
+    }
+    if (info->dim.size() == 3) {
+        if (info->dim[0] == 1) {
+            return _Slice(input, _var<int>({0, offset, 0}, {3}), _var<int>({1, len, -1}, {3}));
+        }
+        return _Slice(input, _var<int>({offset, 0, 0}, {3}), _var<int>({len, 1, -1}, {3}));
+    }
+    return _Slice(input, _var<int>({offset, 0}, {2}), _var<int>({len, -1}, {2}));
+}
+
+static VARP _padFloatRows(VARP input, int paddedLen) {
+    auto info = input == nullptr ? nullptr : input->getInfo();
+    const int actualLen = _rowCount(input);
+    if (info == nullptr || actualLen <= 0 || paddedLen < actualLen) {
+        return nullptr;
+    }
+    const bool needsLayoutNormalization = info->dim.size() == 3 && info->dim[0] == 1;
+    if (paddedLen == actualLen && !needsLayoutNormalization) {
+        return input;
+    }
+    std::vector<int> dims = info->dim;
+    if (dims.size() == 3) {
+        dims[0] = paddedLen;
+        dims[1] = 1;
+    } else {
+        dims[0] = paddedLen;
+    }
+    auto output = _Input(dims, NCHW, halide_type_of<float>());
+    auto src = input->readMap<float>();
+    auto dst = output->writeMap<float>();
+    if (src == nullptr || dst == nullptr) {
+        return nullptr;
+    }
+    ::memset(dst, 0, output->getInfo()->size * sizeof(float));
+    ::memcpy(dst, src, info->size * sizeof(float));
+    return output;
+}
+
+static VARP _padIntRows(VARP input, int paddedLen) {
+    auto info = input == nullptr ? nullptr : input->getInfo();
+    const int actualLen = info == nullptr ? 0 : info->size;
+    if (info == nullptr || actualLen <= 0 || paddedLen <= actualLen) {
+        return input;
+    }
+    std::vector<int> dims = info->dim;
+    if (dims.size() > 1 && dims[0] == 1) {
+        dims[1] = paddedLen;
+    } else {
+        dims[0] = paddedLen;
+    }
+    auto output = _Input(dims, NCHW, halide_type_of<int>());
+    auto src = input->readMap<int>();
+    auto dst = output->writeMap<int>();
+    if (src == nullptr || dst == nullptr) {
+        return nullptr;
+    }
+    ::memset(dst, 0, output->getInfo()->size * sizeof(int));
+    ::memcpy(dst, src, info->size * sizeof(int));
+    return output;
+}
+
+static VARP _padTreeMask(VARP input, int actualLen, int paddedLen) {
+    auto info = input == nullptr ? nullptr : input->getInfo();
+    if (info == nullptr || info->dim.size() != 4 || info->dim[2] != actualLen ||
+        info->dim[3] != actualLen || paddedLen < actualLen) {
+        return nullptr;
+    }
+    if (paddedLen == actualLen) {
+        return input;
+    }
+    auto output = _Input({1, 1, paddedLen, paddedLen}, NCHW, halide_type_of<float>());
+    auto src = input->readMap<float>();
+    auto dst = output->writeMap<float>();
+    if (src == nullptr || dst == nullptr) {
+        return nullptr;
+    }
+    std::fill(dst, dst + output->getInfo()->size, std::numeric_limits<float>::lowest());
+    for (int row = 0; row < actualLen; ++row) {
+        ::memcpy(dst + row * paddedLen, src + row * actualLen, actualLen * sizeof(float));
+    }
+    return output;
+}
+
 VARP EagleGeneration::gatherHiddenRows(VARP hiddenStates, const std::vector<int>& indices) {
     auto info = hiddenStates->getInfo();
     if (info == nullptr || info->dim.empty()) {
@@ -57,10 +155,18 @@ EagleGeneration::EagleGeneration(Llm* llm, std::shared_ptr<LlmContext> context, 
 
 void EagleGeneration::load(Module::Config module_config) {
     mEagleModuleConfig = module_config;
+    loadDualPipelineGraphInfo();
     mEagleMeta.reset(new KVMeta);
     mEagleBatchMeta.reset();
     mEaglePackedRootModule.reset();
     mEaglePackedModulePool.clear();
+    for (auto& runtime : mEagleDualRuntimes) {
+        runtime.batchMeta.reset();
+        runtime.rootModule.reset();
+        runtime.cacheOwner.reset();
+        runtime.fcModule.reset();
+        runtime.modulePool.clear();
+    }
     bool packedMode = mLlm->mConfig->packed_attention();
     mLlm->mRuntimeManager->setHint(MNN::Interpreter::PACKED_ATTENTION_MODE, false);
     mLlm->mRuntimeManager->setHintPtr(Interpreter::KVCACHE_INFO, mEagleMeta.get());
@@ -81,7 +187,37 @@ void EagleGeneration::load(Module::Config module_config) {
     // init
     mTopK = mLlm->mConfig->eagle_topk();
     mDepth = mLlm->mConfig->eagle_depth();
-    mTreePosition = _Input({1, mTopK}, NCHW, halide_type_of<int>());
+    mTreePosition = _Input({mTopK}, NCHW, halide_type_of<int>());
+}
+
+void EagleGeneration::prepare() {
+    mEaglePastLen = 0;
+    mEagleRemove = mEagleMeta == nullptr ? 0 : mEagleMeta->previous;
+    mEagleRequestPrepared = true;
+}
+
+bool EagleGeneration::prefill(const std::vector<int>& inputIds, VARP hiddenStates) {
+    if (!mEagleRequestPrepared || inputIds.empty() ||
+        _rowCount(hiddenStates) != static_cast<int>(inputIds.size())) {
+        return false;
+    }
+    MNN::Timer timer;
+    auto inputHidden = eagleFCForward({hiddenStates});
+    if (inputHidden == nullptr) {
+        return false;
+    }
+    mEagleMeta->remove = mEagleRemove;
+    auto outputs = eagleForward(inputIds, inputHidden);
+    if (outputs.size() < 2 || outputs[0] == nullptr || outputs[1] == nullptr) {
+        mContext->status = LlmStatus::INTERNAL_ERROR;
+        return false;
+    }
+    mEaglePastLen += static_cast<int>(inputIds.size());
+    mEagleRemove = 0;
+    const uint64_t elapsedUs = timer.durationInUs();
+    mSpecContext.draft_time_us += elapsedUs;
+    mSpecContext.draft_prefill_time_us += elapsedUs;
+    return true;
 }
 
 MNN::Express::VARP EagleGeneration::getMask(std::vector<std::vector<bool>> mask, int seqLen) {
@@ -119,23 +255,57 @@ void EagleGeneration::setPosition(int position) {
 }
 
 std::vector<MNN::Express::VARP> EagleGeneration::eagleForwardRaw(const std::vector<MNN::Express::VARP>& inputs) {
-    int seq_len     = inputs[0]->getInfo()->dim[0];
-    mEagleMeta->add = seq_len;
+    if (inputs.size() < 5) {
+        mContext->status = LlmStatus::INTERNAL_ERROR;
+        return {};
+    }
+    const int actualLen = _rowCount(inputs[0]);
+    const int requiredLen = std::max(actualLen, _rowCount(inputs[1]));
+    const int paddedLen = selectQnnCompatibleBucketSize(mEagleDraftGraphSnapshot, requiredLen);
+    if (actualLen <= 0 || paddedLen < requiredLen) {
+        MNN_ERROR("MNN_QNN: no Eagle draft graph bucket can hold single length %d "
+                  "(embed rows %d, hidden rows %d, draft past %d, target block %d).\n",
+                  requiredLen, actualLen, _rowCount(inputs[1]), mEaglePastLen, mLlm->mBlockSize);
+        mContext->status = LlmStatus::INTERNAL_ERROR;
+        return {};
+    }
+    VARPS paddedInputs = inputs;
+    paddedInputs[0] = _padFloatRows(inputs[0], paddedLen);
+    paddedInputs[1] = _padFloatRows(inputs[1], paddedLen);
+    paddedInputs[3] = _padIntRows(inputs[3], paddedLen);
+    if (paddedInputs[0] == nullptr || paddedInputs[1] == nullptr || paddedInputs[3] == nullptr) {
+        mContext->status = LlmStatus::INTERNAL_ERROR;
+        return {};
+    }
+    const int* logitsIndex = inputs[4]->readMap<int>();
+    const bool allLogits = logitsIndex != nullptr && logitsIndex[0] == 0;
+    if (paddedLen > actualLen) {
+        paddedInputs[4] = mLlm->logitsAllIdx;
+    }
+    mEagleMeta->add = actualLen;
     mLlm->mRuntimeManager->setHint(MNN::Interpreter::PACKED_ATTENTION_MODE, false);
     mLlm->mRuntimeManager->setHintPtr(Interpreter::KVCACHE_INFO, mEagleMeta.get());
-    auto outputs    = mEagleModules[0]->onForward(inputs);
+    auto outputs = mEagleModules[0]->onForward(paddedInputs);
     if (outputs.size() > 1) {
         waitModuleOutputs(outputs);
     }
     mEagleMeta->sync();
     mLlm->applyKVCacheRuntimeHint(mLlm->mRuntimeManager, mLlm->mConfig->packed_attention());
+    if (paddedLen > actualLen && outputs.size() > 1) {
+        outputs[0] = _sliceRows(outputs[0], allLogits ? 0 : actualLen - 1, allLogits ? actualLen : 1);
+        outputs[1] = _sliceRows(outputs[1], 0, actualLen);
+        if (outputs[0] == nullptr || outputs[1] == nullptr) {
+            mContext->status = LlmStatus::INTERNAL_ERROR;
+            return {};
+        }
+    }
     return outputs;
 }
 
 std::vector<VARP> EagleGeneration::eagleForward(Express::VARP input_embeds, VARP hidden_states, bool all_logits) {
     int seq_len         = input_embeds->getInfo()->dim[0];
     auto attention_mask = mLlm->gen_attention_mask(seq_len);
-    auto position_ids = _Input({1, seq_len}, NCHW, halide_type_of<int>());
+    auto position_ids = _Input({seq_len}, NCHW, halide_type_of<int>());
     for (int i = 0; i < seq_len; i++) {
         position_ids->writeMap<int>()[i] = mEaglePastLen + i;
     }
@@ -158,14 +328,25 @@ EagleGeneration::DraftInfo EagleGeneration::topkGenerate(const std::vector<int>&
         inputEmbeds = mLlm->embedding(inputIds);
     }
     int seqLen       = mEaglePastLen + inputEmbeds->getInfo()->dim[0];
-    auto inputHidden = mEagleModules[1]->forward(hiddenStates);
+    auto inputHidden = eagleFCForward({hiddenStates});
+    if (inputHidden == nullptr) {
+        return {};
+    }
     // first token
     mEagleMeta->remove = mEagleRemove;
     auto outputs      = eagleForward(inputEmbeds, inputHidden);
+    if (outputs.size() < 2 || outputs[0] == nullptr || outputs[1] == nullptr) {
+        mContext->status = LlmStatus::INTERNAL_ERROR;
+        return {};
+    }
     mEaglePastLen     = seqLen;
     mEagleRemove      = mTopK * (mDepth - 1);
     auto lastP        = outputs[0];
-    auto lastHidden   = outputs[1];
+    auto lastHidden = _sliceRows(outputs[1], _rowCount(outputs[1]) - 1, 1);
+    if (lastHidden == nullptr) {
+        mContext->status = LlmStatus::INTERNAL_ERROR;
+        return {};
+    }
     auto topKV = MNN::Express::_TopKV2(lastP, MNN::Express::_Scalar<int>(mTopK));
     auto scores = topKV[0]->readMap<float>();
     auto indices = topKV[1]->readMap<int>();
@@ -177,6 +358,10 @@ EagleGeneration::DraftInfo EagleGeneration::topkGenerate(const std::vector<int>&
         auto attentionMask = getMask(tokenTree.getMask(), seqLen);
         mEagleMeta->remove = 0;
         outputs = eagleForwardRaw({inputEmbeds, inputHidden, attentionMask, mTreePosition, mLlm->logitsAllIdx});
+        if (outputs.size() < 2 || outputs[0] == nullptr || outputs[1] == nullptr) {
+            mContext->status = LlmStatus::INTERNAL_ERROR;
+            return {};
+        }
         lastP   = outputs[0];
         inputHidden  = outputs[1];
         auto topKV   = MNN::Express::_TopKV2(lastP, MNN::Express::_Scalar<int>(mTopK));
@@ -196,7 +381,7 @@ EagleGeneration::DraftInfo EagleGeneration::topkGenerate(const std::vector<int>&
             info.attentionMask->writeMap<float>()[i * inputLen + j] = output.attentionMask[i][j] ? 0.0 : std::numeric_limits<float>::lowest();
         }
     }
-    info.positionIds = _Input({1, inputLen}, NCHW, halide_type_of<int>());
+    info.positionIds = _Input({inputLen}, NCHW, halide_type_of<int>());
     for (int i = 0; i < inputLen; i++) {
         info.positionIds->writeMap<int>()[i] = seqLen + output.positionIds[i];
     }
@@ -207,10 +392,27 @@ VARPS EagleGeneration::treeDecoding(const EagleGeneration::DraftInfo& drafInfo) 
     if (mLlm->mConfig->packed_attention()) {
         return treeDecodingPacked(drafInfo);
     }
-    auto inputEmbeds   = mLlm->embedding(drafInfo.draftTokens);
     int inputLen = drafInfo.draftTokens.size();
+    const int paddedLen = mLlm->qnnPaddedCulLen(inputLen);
+    if (paddedLen < inputLen) {
+        MNN_ERROR("MNN_QNN: no target graph bucket can hold Eagle single tree length %d.\n", inputLen);
+        mContext->status = LlmStatus::INTERNAL_ERROR;
+        return {};
+    }
+    auto inputEmbeds = _padFloatRows(mLlm->embedding(drafInfo.draftTokens), paddedLen);
+    auto positionIds = _padIntRows(drafInfo.positionIds, paddedLen);
+    auto attentionMask = _padTreeMask(drafInfo.attentionMask, inputLen, paddedLen);
+    if (inputEmbeds == nullptr || positionIds == nullptr || attentionMask == nullptr) {
+        mContext->status = LlmStatus::INTERNAL_ERROR;
+        return {};
+    }
     mLlm->mMeta->add = inputLen;
-    return mLlm->forwardRaw(inputEmbeds, drafInfo.attentionMask, drafInfo.positionIds);
+    auto outputs = mLlm->forwardRaw(inputEmbeds, attentionMask, positionIds);
+    if (paddedLen > inputLen && outputs.size() > 1) {
+        outputs[0] = _sliceRows(outputs[0], 0, inputLen);
+        outputs[1] = _sliceRows(outputs[1], 0, inputLen);
+    }
+    return outputs;
 }
 
 EagleGeneration::AcceptInfo EagleGeneration::evaluatePosterior(const EagleGeneration::DraftInfo& drafInfo, VARP logits) {
@@ -291,12 +493,14 @@ bool EagleGeneration::processTokens(const std::vector<int>& acceptTokens) {
 
 void EagleGeneration::generate(GenerationParams& param) {
     int reqId = param.reqId;
-    mEaglePastLen = 0;
-    mEagleRemove  = mEagleMeta->previous;
+    if (!mEagleRequestPrepared) {
+        prepare();
+    }
+    mEagleRequestPrepared = false;
     MNN::Timer _t;
     VARP inputEmbeds  = param.input_embeds;
     auto inputIds     = param.input_ids;
-    auto sampleToken  = mLlm->sample(param.outputs[0]);
+    auto sampleToken  = mLlm->sample(param.outputs[0], param.validLogitStart, param.validLogitSize);
     mContext->current_token = sampleToken;
     mContext->history_tokens.push_back(mContext->current_token);
     mContext->output_tokens.push_back(mContext->current_token);
@@ -306,31 +510,51 @@ void EagleGeneration::generate(GenerationParams& param) {
     }
     inputIds.push_back(sampleToken);
     VARP hiddenStates = param.outputs[1];
+    if (param.validLogitSize > 0) {
+        const int actualLen = param.validLogitStart / param.validLogitSize + 1;
+        inputEmbeds = _sliceRows(inputEmbeds, 0, actualLen);
+        hiddenStates = _sliceRows(hiddenStates, 0, actualLen);
+        if (inputEmbeds == nullptr || hiddenStates == nullptr) {
+            mContext->status = LlmStatus::INTERNAL_ERROR;
+            return;
+        }
+    }
     // push sampleToken to inputEmbeds
     int seqLen      = inputEmbeds->getInfo()->dim[0];
     auto cur_embed  = mLlm->embedding({sampleToken});
     auto pre_embeds = _Split(inputEmbeds, {1, seqLen - 1}, 0);
     inputEmbeds     = _Concat({pre_embeds[1], cur_embed}, 0);
     // eagle generate
+    MNN::Timer draftTimer;
     auto draftInfo  = topkGenerate(inputIds, hiddenStates, inputEmbeds, reqId);
+    const uint64_t draftPrefillUs = draftTimer.durationInUs();
+    mSpecContext.draft_time_us += draftPrefillUs;
+    mSpecContext.draft_prefill_time_us += draftPrefillUs;
+    mSpecContext.draft += draftInfo.draftTokens.size();
+    if (draftInfo.draftTokens.empty() || mContext->status == LlmStatus::INTERNAL_ERROR) {
+        mContext->status = LlmStatus::INTERNAL_ERROR;
+        return;
+    }
     auto newTokens = 0, steps = 0;
     while (true) {
         if(mContext->status == LlmStatus::USER_CANCEL) {
             break;
         }
         steps++;
+        mSpecContext.steps++;
+        MNN::Timer targetTimer;
         auto decodingInfo = treeDecoding(draftInfo);
-        for (auto o : decodingInfo) {
-            if(nullptr == o->readMap<float>()) {
-                mContext->status = LlmStatus::INTERNAL_ERROR;
-                break;
-            }
-        }
-        if(decodingInfo.empty()) {
+        if (decodingInfo.size() < 2 || decodingInfo[0] == nullptr || decodingInfo[1] == nullptr ||
+            decodingInfo[0]->readMap<float>() == nullptr || decodingInfo[1]->readMap<float>() == nullptr) {
+            mContext->status = LlmStatus::INTERNAL_ERROR;
             break;
         }
         
         auto acceptInfo = evaluatePosterior(draftInfo, decodingInfo[0]);
+        mSpecContext.target_time_us += targetTimer.durationInUs();
+        const int acceptLen = static_cast<int>(acceptInfo.acceptTokens.size());
+        mSpecContext.accepted += acceptLen;
+        mSpecContext.accept_len_freq[acceptLen]++;
         newTokens += acceptInfo.acceptTokens.size();
         {
             mContext->current_token = acceptInfo.acceptTokens.back();
@@ -344,7 +568,16 @@ void EagleGeneration::generate(GenerationParams& param) {
             mContext->output_tokens.push_back(steps);
             break;
         }
+        draftTimer.reset();
         draftInfo = updateDraft(acceptInfo, decodingInfo[1]);
+        if (draftInfo.draftTokens.empty() || mContext->status == LlmStatus::INTERNAL_ERROR) {
+            mContext->status = LlmStatus::INTERNAL_ERROR;
+            break;
+        }
+        const uint64_t draftDecodeUs = draftTimer.durationInUs();
+        mSpecContext.draft_time_us += draftDecodeUs;
+        mSpecContext.draft_decode_time_us += draftDecodeUs;
+        mSpecContext.draft += draftInfo.draftTokens.size();
     }
     mContext->decode_us += _t.durationInUs();
     if(newTokens >= param.max_new_tokens) {

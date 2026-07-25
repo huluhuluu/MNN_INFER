@@ -20,6 +20,7 @@ cache_dir = 'res'
 if 'cache' in post_treat:
     cache_dir = post_treat['cache']
 clean_tmp = True
+separate_graphs = bool(post_treat.get("separate_graphs", False))
 context_config = {
     "backend_extensions": {
         "shared_library_path": os.path.join(qnn_sdk, "lib","x86_64-linux-clang","libQnnHtpNetRunExtensions.so"),
@@ -82,18 +83,32 @@ for key in post_treat["merge"]:
         if clean_tmp:
             os.popen("rm " + os.path.join(workdir, graphname + '.bin')).read()
         libs.append(os.path.join(workdir, 'x86_64-linux-clang', 'lib' + graphname + '.so'))
-    htp_backend_extensions['graphs'][0]['graph_names'] = graphs
-    with open('htp_backend_extensions.json', 'w') as f:
-        f.write(json.dumps(htp_backend_extensions, indent=4))
-    libsStr = ""
-    for i in range(0, len(libs)):
-        if i > 0:
-            libsStr+=','
-        libsStr += libs[i]
-    print(os.popen(qnnContextBinaryGenerator + ' --model ' + libsStr + ' --backend '+ htp_so + ' --binary_file ' + dstname + ' --config_file ./context_config.json ' + ' --output_dir ' + cache_dir).read())
+    if separate_graphs:
+        for i, (graph, lib) in enumerate(zip(graphs, libs)):
+            htp_backend_extensions['graphs'][0]['graph_names'] = [graph]
+            with open('htp_backend_extensions.json', 'w') as f:
+                f.write(json.dumps(htp_backend_extensions, indent=4))
+            binary_name = dstname + '_' + str(i)
+            subprocess.run([
+                qnnContextBinaryGenerator,
+                '--model', lib,
+                '--backend', htp_so,
+                '--binary_file', binary_name,
+                '--config_file', './context_config.json',
+                '--output_dir', cache_dir,
+            ], check=True)
+    else:
+        htp_backend_extensions['graphs'][0]['graph_names'] = graphs
+        with open('htp_backend_extensions.json', 'w') as f:
+            f.write(json.dumps(htp_backend_extensions, indent=4))
+        libsStr = ""
+        for i in range(0, len(libs)):
+            if i > 0:
+                libsStr+=','
+            libsStr += libs[i]
+        print(os.popen(qnnContextBinaryGenerator + ' --model ' + libsStr + ' --backend '+ htp_so + ' --binary_file ' + dstname + ' --config_file ./context_config.json ' + ' --output_dir ' + cache_dir).read())
     if clean_tmp:
         for workdir in workdirs:
             os.popen("rm -rf " + workdir).read()
-
 
 

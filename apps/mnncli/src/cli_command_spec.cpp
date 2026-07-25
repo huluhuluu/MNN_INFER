@@ -63,7 +63,9 @@ namespace {
         {
             {"config", 'c', ArgKind::Value, false, "Specify custom config file path"},
             {"port",   'p', ArgKind::Value, false, "Port number (default: 8000)"},
-            {"host",   'H', ArgKind::Value, false, "Host address (default: 127.0.0.1)"}
+            {"host",   'H', ArgKind::Value, false, "Host address (default: 127.0.0.1)"},
+            {"scheduler-mode", '\0', ArgKind::Value, false,
+             "Scheduler mode: dual_pipeline, single_request, or continuous_batch"}
         },
         0, 1,  // 0-1 positional args (model_name)
         "Start a model serving server"

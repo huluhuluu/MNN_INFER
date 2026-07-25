@@ -12,6 +12,7 @@
 #include <memory>
 #include <queue>
 #include <algorithm>
+#include <functional>
 #include <sstream>
 #include <map>
 
@@ -133,16 +134,30 @@ public:
     }
 
     TreeOutputs finalize(int sampleToken, int maxDraftTokens) {
-        // 1. Get all nodes, sort by score, and select the best candidates.
         auto allNodes = getAllNodes();
-        std::sort(allNodes.begin(), allNodes.end(), [](const NodePtr& a, const NodePtr& b) {
-            return a->mCumulativeLogProb > b->mCumulativeLogProb;
-        });
-        if (allNodes.size() > maxDraftTokens) {
-            allNodes.resize(maxDraftTokens);
+        // Remove only leaves. Keeping every selected node's ancestors preserves tree paths.
+        while (allNodes.size() > maxDraftTokens) {
+            auto leaf = allNodes.end();
+            for (auto iter = allNodes.begin(); iter != allNodes.end(); ++iter) {
+                bool hasSelectedChild = false;
+                for (const auto& child : (*iter)->mChildren) {
+                    if (std::find(allNodes.begin(), allNodes.end(), child) != allNodes.end()) {
+                        hasSelectedChild = true;
+                        break;
+                    }
+                }
+                if (!hasSelectedChild &&
+                    (leaf == allNodes.end() || (*iter)->mCumulativeLogProb < (*leaf)->mCumulativeLogProb)) {
+                    leaf = iter;
+                }
+            }
+            if (leaf == allNodes.end()) {
+                break;
+            }
+            allNodes.erase(leaf);
         }
 
-        // 2. Sort the draft nodes by their creation order (node_id).
+        // Sort the retained nodes by creation order before rebuilding verifier inputs.
         std::sort(allNodes.begin(), allNodes.end(), [](const NodePtr& a, const NodePtr& b) {
             return a->mNodeId < b->mNodeId;
         });
@@ -202,7 +217,11 @@ public:
             std::vector<int> path;
             auto curr = leaf;
             while(curr && curr->mNodeId != -1) {
-                path.push_back(nodeId2Idx[curr->mNodeId] + 1);
+                const auto iter = nodeId2Idx.find(curr->mNodeId);
+                if (iter == nodeId2Idx.end()) {
+                    break;
+                }
+                path.push_back(iter->second + 1);
                 curr = curr->mParent.lock();
             }
             path.push_back(0);

@@ -282,6 +282,22 @@ VARP generateBlockDiagonalMask(const std::vector<int>& seqLens) {
     return maskVar;
 }
 
+VARP generatePaddedCausalMask(int seqLen, int paddedLen) {
+    VARP maskVar = _Input({1, 1, 1, paddedLen * paddedLen}, NCHW, halide_type_of<float>());
+    float* ptr = maskVar->writeMap<float>();
+    const float minVal = std::numeric_limits<float>::lowest();
+    for (int i = 0; i < paddedLen * paddedLen; ++i) {
+        ptr[i] = minVal;
+    }
+    for (int i = 0; i < seqLen; ++i) {
+        for (int j = 0; j < seqLen; ++j) {
+            ptr[i * seqLen + j] = j <= i ? 0.0f : minVal;
+        }
+    }
+    maskVar->unMap();
+    return maskVar;
+}
+
 VARP generateBlockDiagonalIntMask(const std::vector<int>& seqLens) {
     int maskSize = 0;
     for (int len : seqLens) {
@@ -886,7 +902,7 @@ public:
         }
 
         // Test 7: Reserve draft KV tokens before decode.
-        // This covers CPUKVCacheManager::moveKV value-cache indexing used by Eagle.
+        // This covers reserve compaction used by Eagle, including quantized K on ARM.
         {
             const int historyLen = 160;
             const int draftLen = 7;
@@ -896,9 +912,13 @@ public:
                 2, 1,
                 5, 1,
             };
+            int attentionMode = 8;
+#if defined(__aarch64__)
+            attentionMode = 9;
+#endif
             clearBatchMeta(gBatchMeta);
 
-            auto module = _makePackedAttentionModule();
+            auto module = _makePackedAttentionModule(attentionMode);
 
             auto allQuery = generateRandTensor(historyLen + draftLen + decodeLen, gPackedNumHead, gPackedHeadDim, precision);
             auto allKey = generateRandTensor(historyLen + draftLen + decodeLen, gPackedKvNumHead, gPackedHeadDim, precision);
@@ -943,15 +963,17 @@ public:
                                               decodeLen, (int)expectedKey.size());
 
             const float* outPtr = output->readMap<float>();
-            bool pass = compareRequestOutput(outPtr, 0, ref, "ReserveDecode");
+            std::string caseName = "ReserveDecodeMode" + std::to_string(attentionMode);
+            bool pass = compareRequestOutput(outPtr, 0, ref, caseName);
             output->unMap();
             if (!pass) {
                 return false;
             }
             const size_t expectedPrevious = historyLen + reservedCount + decodeLen;
             if (gBatchMeta.mMetas[0] == nullptr || gBatchMeta.mMetas[0]->previous != expectedPrevious) {
-                MNN_PRINT("Error: Test5 KV cache length mismatch, expected %zu, got %zu\n",
-                          expectedPrevious, gBatchMeta.mMetas[0] == nullptr ? 0 : gBatchMeta.mMetas[0]->previous);
+                MNN_PRINT("Error: reserve KV cache length mismatch in mode %d, expected %zu, got %zu\n",
+                          attentionMode, expectedPrevious,
+                          gBatchMeta.mMetas[0] == nullptr ? 0 : gBatchMeta.mMetas[0]->previous);
                 return false;
             }
         }
@@ -1085,6 +1107,49 @@ public:
             bool pass = compareRequestOutputStrict(outPtr, 0, ref, "SingleTokenFullMask", 0.002f);
             output->unMap();
             if (!pass) {
+                return false;
+            }
+        }
+
+        // Test 10: Keep the input bucket fixed while BatchKVMeta::add grows.
+        // Dual QNN waves can reuse one 256-row module for consecutive actual
+        // lengths such as 37 and 38 without triggering another resize.
+        {
+            const int paddedLen = 64;
+            const int firstLen = 37;
+            const int secondLen = 38;
+            clearBatchMeta(gBatchMeta);
+
+            auto module = _makePackedAttentionModule();
+            auto runPaddedPrefill = [&](int reqLen, int seed, size_t remove) -> bool {
+                auto query = generateSensitiveTensor(paddedLen, gPackedNumHead, gPackedHeadDim, seed);
+                auto key = generateSensitiveTensor(paddedLen, gPackedKvNumHead, gPackedHeadDim, seed + 1);
+                auto value = generateSensitiveTensor(paddedLen, gPackedKvNumHead, gPackedHeadDim, seed + 2);
+                auto actualQuery = sliceTensor(query, 0, reqLen);
+                auto actualKey = sliceTensor(key, 0, reqLen);
+                auto actualValue = sliceTensor(value, 0, reqLen);
+
+                setKVCacheInfo(gBatchMeta, 0, reqLen, remove);
+                auto output = module->onForward({
+                    packRequests({query}),
+                    packRequests({key}),
+                    packRequests({value}),
+                    generatePaddedCausalMask(reqLen, paddedLen)
+                })[0];
+                syncBatchMeta(gBatchMeta);
+
+                auto ref = computeSingleAttention(actualQuery, actualKey, actualValue,
+                                                  generateCausalMaskHost(reqLen, reqLen),
+                                                  reqLen, reqLen);
+                const float* outPtr = output->readMap<float>();
+                const float threshold = precision == 2 ? 0.02f : 0.002f;
+                bool pass = compareRequestOutputStrict(outPtr, 0, ref, "GrowingFixedBucket", threshold);
+                output->unMap();
+                return pass;
+            };
+
+            if (!runPaddedPrefill(firstLen, 109, 0) ||
+                !runPaddedPrefill(secondLen, 127, firstLen)) {
                 return false;
             }
         }

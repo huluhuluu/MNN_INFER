@@ -38,6 +38,7 @@ class Generation;
 class EagleGeneration;
 class BatchScheduler;
 class DualPipelineScheduler;
+struct SpecContext;
 struct TimePerformance;
 
 using ChatMessage = std::pair<std::string, std::string>; // <role, content>
@@ -143,6 +144,7 @@ public:
     bool reuse_kv();
     // config function
     std::string dump_config();
+    std::string scheduler_mode() const;
     bool set_config(const std::string& content);
     Llm* create_lora(const std::string& lora_path);
     // tokenier function
@@ -169,6 +171,11 @@ public:
     void response(const std::vector<ChatMessages>& chat_prompts, std::ostream* os = &std::cout, const char* end_with = nullptr, int max_new_tokens = -1);
     
     std::vector<std::vector<int>> generate(const std::vector<std::vector<int> >& input_ids, std::ostream* os= &std::cout, int max_new_tokens = -1);
+    bool isInSpec() const { return mInSpec; }
+    int getDraftLength() const { return mDraftLength; }
+    SpecContext* getSpecContext();
+    const SpecContext* getSpecContext() const;
+    void resetSpecContext();
 protected:
     void initRuntime();
     void setRuntimeHint(const std::shared_ptr<Express::Executor::RuntimeManager>& rtg, BatchKVMeta* batchMeta = nullptr, KVMeta* meta = nullptr);
@@ -214,6 +221,7 @@ private:
     void configureDualPipelineMode();
     void resetDualPipelineGraphState();
     bool refreshDualPipelineGraphSnapshot();
+    int qnnPaddedCulLen(int requiredSize);
     int dualPipelinePaddedCulLen(const BatchScheduler::Chunk& chunk);
     void releaseDualPipelineRequestExecution(int requestId);
     void resetDualPipelineExecutionState();
@@ -225,8 +233,10 @@ private:
         std::shared_ptr<Express::Executor::RuntimeManager> runtimeManager;
         std::shared_ptr<BatchKVMeta> batchMeta;
         std::map<std::pair<int, bool>, std::shared_ptr<Express::Module>> modulePool;
+        std::unordered_map<std::string, int> activeQnnOpIndices;
     };
     bool mInSpec = false;
+    bool mSchedulerModeLocked = false;
     int mDraftLength = 4;
     std::shared_ptr<GenerationParams> mGenerateParam;
     bool mAsync = true;
@@ -245,6 +255,7 @@ private:
     Express::Module::Config mDualPipelineModuleConfig;
     std::string mDualPipelineModelPath;
     GraphSnapshot mDualPipelineGraphSnapshot;
+    bool mDualPipelineGraphSnapshotInitialized = false;
     bool mDualPipelineGraphSnapshotReady = false;
     std::vector<DualPipelineScheduler::GraphRequest> mDualPipelineQnnGraphRequests;
     std::unordered_map<std::string, int> mDualPipelineQnnOpIndices;

@@ -7,9 +7,11 @@
 #include "../../../transformers/llm/engine/include/llm/llm.hpp"
 #include "httplib.h"
 #include "json.hpp"
+#include <memory>
 using nlohmann::json;
 using PromptItem = std::pair<std::string, std::string>;
 namespace mnncli {
+class RequestCoordinator;
 class LlmStreamBuffer : public std::streambuf {
 public:
   using CallBack = std::function<void(const char* str, size_t len)>;
@@ -63,6 +65,8 @@ class Utf8StreamProcessor {
   };
 class MnncliServer {
   public:
+    MnncliServer();
+    ~MnncliServer();
     const char* html_content = R"""(
 <!DOCTYPE html>
 <html lang="en">
@@ -618,14 +622,11 @@ class MnncliServer {
 </body>
 </html>
     )""";
-    void Start(MNN::Transformer::Llm* llm, bool is_r1, const std::string& host = "127.0.0.1", int port = 8000);
+    void Start(MNN::Transformer::Llm* llm, bool is_r1, const std::string& host = "127.0.0.1", int port = 8000,
+               const std::string& scheduler_mode = "single_request");
     bool is_r1_{false};
 private:
-  void Answer(MNN::Transformer::Llm* llm, const json &messages, std::function<void(const std::string&)> on_result);
-  void AnswerStreaming(MNN::Transformer::Llm* llm,
-                     const json& messages,
-                     std::function<void(const std::string&, bool end)> on_partial);
-    std::mutex llm_mutex_;
+    std::unique_ptr<RequestCoordinator> coordinator_;
 
 };
 }

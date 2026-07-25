@@ -412,6 +412,24 @@ static bool computeIndex(PluginContext* ctx, int & index) {
             return true;
         }
     }
+    MNN_ERROR("MNN_QNN: input shapes did not match %d graph variants; actual:", indexNumber);
+    for (int i = 0; i < inputs.size(); ++i) {
+        MNN_PRINT(" [");
+        for (int j = 0; j < inputs[i]->dimensions(); ++j) {
+            MNN_PRINT("%s%d", j == 0 ? "" : ",", inputs[i]->length(j));
+        }
+        MNN_PRINT("]");
+    }
+    MNN_PRINT("; expected:");
+    for (int si = 0; si < indexNumber; ++si) {
+        const int* expected = attrAllShape->list()->i()->data() + si * dimSum;
+        MNN_PRINT(" [");
+        for (int j = 0; j < dimSum; ++j) {
+            MNN_PRINT("%s%d", j == 0 ? "" : ",", expected[j]);
+        }
+        MNN_PRINT("]");
+    }
+    MNN_PRINT("\n");
     return false;
 }
 
@@ -1054,11 +1072,11 @@ static void releaseAllRawGraphsInternal() {
 
 class PluginExecuteRaw : public CPUComputeKernel {
 private:
-    std::shared_ptr<RawExecutorWrapper> mFallbackExecutor;
     std::string mGraphPath;
     size_t mBinaryOffset = 0;
     size_t mBinarySize = 0;
     std::vector<std::string> mAllGraphName;
+    std::vector<std::string> mGraphPaths;
     std::vector<std::pair<const MNN::Tensor *, std::string>> mInputs;
     std::vector<std::pair<const MNN::Tensor *, std::string>> mOutputs;
     std::vector<std::shared_ptr<MNN::Tensor>> mRealInputs;
@@ -1083,6 +1101,17 @@ public:
         } else {
             MNN_ERROR("MNN_QNN: Incorrect Plugin Op, can't find 'allGraphName' attr.\n");
             return false;
+        }
+
+        mGraphPaths.clear();
+        auto allGraphPathAttr = ctx->getAttr("allGraphPath");
+        if (allGraphPathAttr && allGraphPathAttr->list() && allGraphPathAttr->list()->s() &&
+            allGraphPathAttr->list()->s()->size() == mAllGraphName.size()) {
+            auto graphPaths = allGraphPathAttr->list()->s();
+            for (int i = 0; i < graphPaths->size(); ++i) {
+                mGraphPaths.push_back(MNNFilePathConcat(
+                    ctx->dir_path(), graphPaths->GetAsString(i)->str()));
+            }
         }
 
         mBinaryOffset = 0;
@@ -1161,23 +1190,55 @@ public:
         for (int i=0; i<mInputs.size(); ++i) {
             ctx->backend()->onCopyBuffer(inputTensor[i], mRealInputs[i].get());
         }
-        std::shared_ptr<RawExecutorWrapper> executor = findRawGraphExecutor(
-            mGraphPath, mBinaryOffset, mBinarySize, mAllGraphName);
-        if (!executor) {
-            if (!mFallbackExecutor) {
-                mFallbackExecutor.reset(new RawExecutorWrapper());
-                if (!mFallbackExecutor->compileModel(mGraphPath, mBinaryOffset, mBinarySize, mAllGraphName)) {
-                    mFallbackExecutor.reset();
-                    return false;
-                }
+        std::string graphPath = mGraphPath;
+        size_t binaryOffset = mBinaryOffset;
+        size_t binarySize = mBinarySize;
+        std::vector<std::string> graphNames = mAllGraphName;
+        int executorShapeIndex = shapeIndex;
+        std::string transientGraphId;
+        if (!mGraphPaths.empty()) {
+            if (shapeIndex < 0 || shapeIndex >= mGraphPaths.size()) {
+                return false;
             }
-            executor = mFallbackExecutor;
+            graphPath = mGraphPaths[shapeIndex];
+            binaryOffset = 0;
+            binarySize = 0;
+            graphNames = {mAllGraphName[shapeIndex]};
+            executorShapeIndex = 0;
         }
-        if (!executor->invokModel(mInputs, mOutputs, shapeIndex)) {
+
+        if (!findRawGraphExecutor(graphPath, binaryOffset, binarySize, graphNames)) {
+            transientGraphId = "transient:" +
+                makeRawGraphCacheKey(graphPath, binaryOffset, binarySize, graphNames);
+            MNN::QNN::RawGraphPrefetchConfig prefetchConfig;
+            prefetchConfig.graphId = transientGraphId;
+            prefetchConfig.path = graphPath;
+            prefetchConfig.offset = binaryOffset;
+            prefetchConfig.size = binarySize;
+            prefetchConfig.allGraphName = graphNames;
+            prefetchConfig.pinResident = false;
+            if (!preloadRawGraphInternal(prefetchConfig)) {
+                return false;
+            }
+        }
+        std::shared_ptr<RawExecutorWrapper> executor = findRawGraphExecutor(
+            graphPath, binaryOffset, binarySize, graphNames);
+        const bool executeSucceeded = executor && executor->invokModel(mInputs, mOutputs, executorShapeIndex);
+        if (!executeSucceeded) {
+            const std::string graphName = executorShapeIndex >= 0 && executorShapeIndex < graphNames.size()
+                ? graphNames[executorShapeIndex] : std::string("<unknown>");
+            MNN_ERROR("MNN_QNN: execute failed for %s graph %s (requested shape index %d).\n",
+                      graphPath.c_str(), graphName.c_str(), shapeIndex);
+            if (!transientGraphId.empty()) {
+                releaseRawGraphInternal(transientGraphId, false, false);
+            }
             return false;
         }
         for (int i=0; i<mOutputs.size(); ++i) {
             ctx->backend()->onCopyBuffer(mRealOutputs[i].get(), outputTensor[i]);
+        }
+        if (!transientGraphId.empty()) {
+            releaseRawGraphInternal(transientGraphId, false, false);
         }
 
         return true;

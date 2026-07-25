@@ -43,6 +43,13 @@ int ServeCommandHandler::Handle(const ParsedCommand& cmd) {
     host = CommandParser::GetOption(cmd, "host", "");
     auto port_str = CommandParser::GetOption(cmd, "port", "");
     config_path = CommandParser::GetOption(cmd, "config", "");
+    const std::string scheduler_mode = CommandParser::GetOption(cmd, "scheduler-mode", "");
+    if (!scheduler_mode.empty() && scheduler_mode != "dual_pipeline" &&
+        scheduler_mode != "single_request" && scheduler_mode != "continuous_batch") {
+        UserInterface::ShowError("Invalid scheduler mode",
+                                 "Expected dual_pipeline, single_request, or continuous_batch");
+        return 1;
+    }
 
     // Determine model name (if provided as positional)
     if (!cmd.arguments.empty()) {
@@ -100,7 +107,12 @@ int ServeCommandHandler::Handle(const ParsedCommand& cmd) {
     LOG_INFO("Bind: http://" + host + ":" + std::to_string(port));
 
     // Create and load model
-    auto llm = LLMManager::CreateLLM(config_path, true);
+    auto llm = LLMManager::CreateLLM(config_path, true, scheduler_mode);
+    if (!llm) {
+        UserInterface::ShowError("Failed to load model", "Check scheduler_mode and packed_attention_mode in the model JSON");
+        return 1;
+    }
+    LOG_INFO("Scheduler mode: " + llm->scheduler_mode());
 
     // Determine if this is an R1 model (affects prompt formatting)
     auto lower_path = config_path;
@@ -109,7 +121,7 @@ int ServeCommandHandler::Handle(const ParsedCommand& cmd) {
 
     // Start HTTP server (blocking call)
     MnncliServer server;
-    server.Start(llm.get(), is_r1, host, port);
+    server.Start(llm.get(), is_r1, host, port, llm->scheduler_mode());
 
     return 0;
 }

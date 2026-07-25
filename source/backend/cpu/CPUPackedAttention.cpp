@@ -98,7 +98,11 @@ ErrorCode CPUPackedAttention::onResize(const std::vector<Tensor*>& inputs, const
     mHeadDim = query->length(3);
     mKvNumHead = key->length(2);
 
-    int maxReqLen = 0;
+    // The first module resize can happen before a request is registered in
+    // BatchKVMeta. Allocate against the fixed query bucket as well as any
+    // currently registered request so a later wave cannot grow past buffers
+    // sized for the first chunk.
+    int maxReqLen = query->length(1);
     CPUPackedAttention::setKVCache(maxReqLen);
 
     // Common buffer allocated

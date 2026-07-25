@@ -58,16 +58,23 @@ std::vector<std::vector<int>> ArGeneration::generateBatch(const std::vector<std:
     mLlm->applyKVCacheRuntimeHint(mLlm->mRuntimeManager, true);
 
     while (std::shared_ptr<BatchScheduler::Chunk> chunk = mLlm->mScheduler->schedule(-1, 4)) {
-        Express::VARP hidden_states = mLlm->embedding(chunk->inputs, chunk->calLen, chunk->culLen);
+        const int requiredSize = std::max(chunk->culLen, static_cast<int>(chunk->reqId.size()));
+        const int paddedCulLen = mLlm->qnnPaddedCulLen(requiredSize);
+        if (paddedCulLen < chunk->culLen) {
+            MNN_ERROR("MNN_QNN: no target graph bucket can hold packed length %d.\n", chunk->culLen);
+            mContext->status = LlmStatus::INTERNAL_ERROR;
+            break;
+        }
+        Express::VARP hidden_states = mLlm->embedding(chunk->inputs, chunk->calLen, paddedCulLen);
         Express::VARP attention_mask = mLlm->gen_attention_mask(chunk->calLen);
-        Express::VARP position_ids = mLlm->gen_position_ids(chunk->pos, chunk->calLen, chunk->culLen);
+        Express::VARP position_ids = mLlm->gen_position_ids(chunk->pos, chunk->calLen, paddedCulLen);
         Express::VARP logitsIndex = mLlm->logitsAllIdx;
         for(int i = 0; i < chunk->pos.size() ; i++) {
             int req_id = chunk->reqId[i];
             mLlm->mBatchMeta->setKVCacheInfo(req_id, chunk->calLen[i], 0, nullptr, 0);
             mLlm->mBatchMeta->setKVMetaInfo(req_id, mLlm->mConfig->layer_nums(), 0, 0, "", KVMeta::NoChange);
         }
-        auto moduleKey = std::make_pair(chunk->culLen, false);
+        auto moduleKey = std::make_pair(paddedCulLen, false);
         std::shared_ptr<Module> selectModule = mLlm->mModule;
         if(mLlm->mModulePool.find(moduleKey) == mLlm->mModulePool.end()) {
             mLlm->mModulePool[moduleKey].reset(Module::clone(mLlm->mModule.get()));

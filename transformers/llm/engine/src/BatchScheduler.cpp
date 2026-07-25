@@ -7,6 +7,7 @@
 //
 
 #include "llm/BatchScheduler.hpp"
+#include "llm/AcceptanceTrace.hpp"
 #include "llmconfig.hpp"
 #include "kvmeta.hpp"
 namespace MNN {
@@ -240,6 +241,17 @@ std::vector<std::shared_ptr<BatchScheduler::Chunk>> BatchScheduler::scheduleWave
             break;
         }
         wave.push_back(_popPendingChunk());
+    }
+    for (size_t waveIndex = 0; waveIndex < wave.size(); ++waveIndex) {
+        const std::shared_ptr<Chunk>& chunk = wave[waveIndex];
+        if (!chunk) {
+            continue;
+        }
+        for (size_t requestIndex = 0; requestIndex < chunk->reqId.size(); ++requestIndex) {
+            AcceptanceTrace::log("event=lane_owner request_id=%d request_scope=engine lane=%d segment=%d chunk_index=%zu",
+                                 chunk->reqId[requestIndex], chunk->pipelineId,
+                                 chunk->segmentIndex, waveIndex);
+        }
     }
     return wave;
 }

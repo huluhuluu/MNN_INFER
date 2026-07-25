@@ -234,6 +234,29 @@ std::string qnnGraphResourceId(const OpInfo& op) {
     return graphId;
 }
 
+std::string joinPath(const std::string& dir, const std::string& path);
+
+std::string qnnGraphPathForShape(const OpInfo& op, int shapeIndex) {
+    if (shapeIndex < 0 || shapeIndex >= static_cast<int>(op.qnn.graphPaths.size())) {
+        return "";
+    }
+    const std::string& path = op.qnn.graphPaths[shapeIndex];
+    if (path.empty() || path[0] == '/' || path[0] == '\\') {
+        return path;
+    }
+    const std::string graphDir = !op.qnn.npuDir.empty() ? op.qnn.npuDir : op.qnn.baseDir;
+    return joinPath(graphDir, path);
+}
+
+std::string qnnGraphResourceIdForShape(const OpInfo& op, int shapeIndex) {
+    const std::string path = qnnGraphPathForShape(op, shapeIndex);
+    const std::string graphName = shapeIndex >= 0 && shapeIndex < static_cast<int>(op.qnn.allGraphName.size())
+        ? op.qnn.allGraphName[shapeIndex] : "";
+    std::string graphId = !path.empty() ? path : op.opName;
+    graphId += "#0#0#" + graphName;
+    return graphId;
+}
+
 uint64_t attrUint64FromIntPair(const Plugin* plugin, const char* key) {
     const Attribute* attr = findAttr(plugin, key);
     if (attr == nullptr || attr->list() == nullptr || attr->list()->i() == nullptr || attr->list()->i()->size() != 2) {
@@ -293,6 +316,10 @@ void fillQnnInfo(const Op* op, const std::string& baseDir, const std::string& np
     info->qnn.offset = attrUint64FromIntPair(plugin, "offset");
     info->qnn.size = attrUint64FromIntPair(plugin, "size");
     info->qnn.allGraphName = attrStringList(plugin, "allGraphName");
+    info->qnn.graphPaths = attrStringList(plugin, "allGraphPath");
+    if (info->qnn.graphPaths.size() != info->qnn.allGraphName.size()) {
+        info->qnn.graphPaths.clear();
+    }
     info->qnn.bucketSizes = inferQnnBucketSizes(plugin, info->inputShapes, info->qnn.allGraphName);
     info->qnn.draft = attrBool(plugin, "draftGraph", containsToken(info->opName, "draft"));
     info->qnn.pin = attrBool(plugin, "pinResident", info->qnn.draft);
@@ -543,6 +570,15 @@ std::vector<DualPipelineScheduler::GraphRequest> buildQnnGraphRequests(const Gra
                                                                        int start,
                                                                        int maxK,
                                                                        int reqId) {
+    return buildQnnGraphRequestsForSize(snapshot, start, maxK, reqId, 0);
+}
+
+std::vector<DualPipelineScheduler::GraphRequest> buildQnnGraphRequestsForSize(
+    const GraphSnapshot& snapshot,
+    int start,
+    int maxK,
+    int reqId,
+    int requestGroupSize) {
     std::vector<DualPipelineScheduler::GraphRequest> requests;
     if (start < 0 || maxK <= 0 || start >= static_cast<int>(snapshot.ops.size())) {
         return requests;
@@ -559,7 +595,26 @@ std::vector<DualPipelineScheduler::GraphRequest> buildQnnGraphRequests(const Gra
         request.graphPath = op.qnn.path;
         request.offset = op.qnn.offset;
         request.size = op.qnn.size;
-        request.allGraphName = op.qnn.allGraphName;
+        if (requestGroupSize > 0 && !op.qnn.graphPaths.empty()) {
+            const int shapeIndex = selectQnnShapeIndex(op.qnn, requestGroupSize);
+            if (shapeIndex < 0) {
+                return {};
+            }
+            request.graphId = qnnGraphResourceIdForShape(op, shapeIndex);
+            request.graphPath = qnnGraphPathForShape(op, shapeIndex);
+            request.offset = 0;
+            request.size = 0;
+            request.shapeIndex = shapeIndex;
+            request.bucketSize = op.qnn.bucketSizes[shapeIndex];
+            request.allGraphName = {op.qnn.allGraphName[shapeIndex]};
+        } else if (!op.qnn.graphPaths.empty()) {
+            // The unqualified request is retained for compatibility with
+            // callers that only need graph metadata. It must not be loaded.
+            request.graphPath.clear();
+        }
+        if (request.allGraphName.empty()) {
+            request.allGraphName = op.qnn.allGraphName;
+        }
         request.draftGraph = op.qnn.draft;
         request.pinResident = op.qnn.pin;
         requests.push_back(request);

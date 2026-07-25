@@ -13,19 +13,24 @@ namespace mnncli {
 
 std::unique_ptr<MNN::Transformer::Llm> LLMManager::CreateLLM(
     const std::string& config_path, 
-    bool use_template
+    bool use_template,
+    const std::string& scheduler_mode
 ) {
     std::unique_ptr<MNN::Transformer::Llm> llm(MNN::Transformer::Llm::createLLM(config_path));
-    
-    if (use_template) {
-        llm->set_config("{\"tmp_path\":\"tmp\"}");
-    } else {
-        llm->set_config("{\"tmp_path\":\"tmp\",\"use_template\":false}");
+    std::string runtime_config = use_template ? "{\"tmp_path\":\"tmp\"}" :
+                                                "{\"tmp_path\":\"tmp\",\"use_template\":false}";
+    if (!scheduler_mode.empty()) {
+        runtime_config = use_template ?
+            "{\"tmp_path\":\"tmp\",\"scheduler_mode\":\"" + scheduler_mode + "\"}" :
+            "{\"tmp_path\":\"tmp\",\"use_template\":false,\"scheduler_mode\":\"" + scheduler_mode + "\"}";
     }
+    llm->set_config(runtime_config);
     
     {
         AUTOTIME;
-        llm->load();
+        if (!llm->load()) {
+            return nullptr;
+        }
     }
     
     if (true) {
@@ -45,4 +50,3 @@ void LLMManager::TuningPrepare(MNN::Transformer::Llm* llm) {
 }
 
 } // namespace mnncli
-

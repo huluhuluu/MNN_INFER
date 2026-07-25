@@ -9,9 +9,16 @@ set(CMAKE_CXX_STANDARD_REQUIRED ON)
 
 
 option(BUILD_MNNCLI_TEST "Build MNNCLI test programs." OFF)
+option(MNNCLI_ENABLE_TLS "Enable HTTPS/TLS support in cpp-httplib." ON)
+option(MNNCLI_SERVICE_ONLY "Build only the local model serving command." OFF)
+
+if(NOT MNNCLI_SERVICE_ONLY AND NOT MNNCLI_ENABLE_TLS)
+    message(FATAL_ERROR "MNNCLI_ENABLE_TLS=OFF is supported only with MNNCLI_SERVICE_ONLY=ON")
+endif()
 
 # Configure OpenSSL static libraries
-if(APPLE)
+set(OpenSSL_FOUND FALSE)
+if(MNNCLI_ENABLE_TLS AND APPLE)
     set(OPENSSL_ROOT_DIR "/opt/homebrew/opt/openssl@3")
     set(OPENSSL_USE_STATIC_LIBS TRUE)
     set(OPENSSL_INCLUDE_DIR "${OPENSSL_ROOT_DIR}/include" CACHE PATH "OpenSSL include directory" FORCE)
@@ -23,7 +30,7 @@ if(APPLE)
     message(STATUS "  Include: ${OPENSSL_INCLUDE_DIR}")
     message(STATUS "  SSL: ${OPENSSL_SSL_LIBRARY}")
     message(STATUS "  Crypto: ${OPENSSL_CRYPTO_LIBRARY}")
-else()
+elseif(MNNCLI_ENABLE_TLS)
     find_package(OpenSSL REQUIRED)
 endif()
 
@@ -34,19 +41,24 @@ endif()
 set(MNN_BUILD_DIR "${CMAKE_CURRENT_LIST_DIR}/../../build_mnn_static" CACHE PATH "MNN build directory")
 set(MNN_SOURCE_DIR "${CMAKE_CURRENT_LIST_DIR}/../.." CACHE PATH "MNN source directory")
 
-# Find pre-built MNN library
-find_library(MNN_LIBRARY 
-    NAMES libMNN.a MNN
-    PATHS ${MNN_BUILD_DIR}
-    NO_DEFAULT_PATH
-    REQUIRED
-)
+# Find pre-built MNN library. Cross-compiling CMake may reject a host path in
+# find_library even when it points at the target archive, so prefer the exact
+# two-stage build artifact first.
+set(MNN_LIBRARY "${MNN_BUILD_DIR}/libMNN.a")
+if(NOT EXISTS "${MNN_LIBRARY}")
+    find_library(MNN_LIBRARY
+        NAMES MNN
+        PATHS ${MNN_BUILD_DIR}
+        NO_DEFAULT_PATH
+        REQUIRED
+    )
+endif()
 
 message(STATUS "Found MNN library: ${MNN_LIBRARY}")
 message(STATUS "MNN source directory: ${MNN_SOURCE_DIR}")
 
 # Add libyuv dependency from the local git submodule for Android builds
-if(CMAKE_SYSTEM_NAME STREQUAL "Android")
+if(CMAKE_SYSTEM_NAME STREQUAL "Android" AND NOT MNNCLI_SERVICE_ONLY)
     # Ensure the submodule is available before adding it
     if(EXISTS ${CMAKE_CURRENT_LIST_DIR}/../../3rd_party/libyuv/CMakeLists.txt)
         add_subdirectory(../../3rd_party/libyuv ${CMAKE_BINARY_DIR}/libyuv)
@@ -75,38 +87,50 @@ else()
     file(WRITE ${MODEL_MARKET_JSON_INC_FILE} "const unsigned char model_market_json_data[] = { 0x7B, 0x7D }; // Empty JSON object {}\n")
 endif()
 
-# Add model downloader library
-add_subdirectory(${CMAKE_CURRENT_LIST_DIR}/../frameworks/model_downloader/cpp ${CMAKE_BINARY_DIR}/model_downloader)
-
-set(MNNCLI_SOURCES
+set(MNNCLI_COMMON_SOURCES
     ${CMAKE_CURRENT_LIST_DIR}/src/mnncli.cpp
-    ${CMAKE_CURRENT_LIST_DIR}/src/model_runner.cpp
     ${CMAKE_CURRENT_LIST_DIR}/src/file_utils_config.cpp
-    ${CMAKE_CURRENT_LIST_DIR}/src/llm_benchmark.cpp
-    ${CMAKE_CURRENT_LIST_DIR}/../../transformers/llm/engine/app/llm_benchmark_common.cpp
     ${CMAKE_CURRENT_LIST_DIR}/src/mnncli_server.cpp
-    ${CMAKE_CURRENT_LIST_DIR}/src/model_repository.cpp
-    ${CMAKE_CURRENT_LIST_DIR}/src/cli_download_listener.cpp
     ${CMAKE_CURRENT_LIST_DIR}/src/cli_config_manager.cpp
     ${CMAKE_CURRENT_LIST_DIR}/src/llm_manager.cpp
-    ${CMAKE_CURRENT_LIST_DIR}/src/model_manager.cpp
-    ${CMAKE_CURRENT_LIST_DIR}/src/local_model_utils.cpp
     ${CMAKE_CURRENT_LIST_DIR}/src/cli_command_handler.cpp
     ${CMAKE_CURRENT_LIST_DIR}/src/cli_command_parser.cpp
     ${CMAKE_CURRENT_LIST_DIR}/src/cli_command_spec.cpp
-    ${CMAKE_CURRENT_LIST_DIR}/src/handlers/run_command_handler.cpp
-    ${CMAKE_CURRENT_LIST_DIR}/src/handlers/delete_command_handler.cpp
-    ${CMAKE_CURRENT_LIST_DIR}/src/handlers/list_command_handler.cpp
-    ${CMAKE_CURRENT_LIST_DIR}/src/handlers/search_command_handler.cpp
-    ${CMAKE_CURRENT_LIST_DIR}/src/handlers/download_command_handler.cpp
-    ${CMAKE_CURRENT_LIST_DIR}/src/handlers/model_info_command_handler.cpp
     ${CMAKE_CURRENT_LIST_DIR}/src/handlers/serve_command_handler.cpp
-    ${CMAKE_CURRENT_LIST_DIR}/src/handlers/benchmark_command_handler.cpp
-    ${CMAKE_CURRENT_LIST_DIR}/src/handlers/config_command_handler.cpp
-    ${CMAKE_CURRENT_LIST_DIR}/src/handlers/info_command_handler.cpp
 )
 
-if(CMAKE_SYSTEM_NAME STREQUAL "Android")
+if(MNNCLI_SERVICE_ONLY)
+    set(MNNCLI_SOURCES
+        ${MNNCLI_COMMON_SOURCES}
+        ${CMAKE_CURRENT_LIST_DIR}/../frameworks/model_downloader/cpp/src/file_utils.cpp
+        ${CMAKE_CURRENT_LIST_DIR}/../frameworks/model_downloader/cpp/src/log_utils.cpp
+        ${CMAKE_CURRENT_LIST_DIR}/../frameworks/model_downloader/cpp/src/model_name_utils.cpp
+        ${CMAKE_CURRENT_LIST_DIR}/../frameworks/model_downloader/cpp/src/model_sources.cpp
+    )
+else()
+    add_subdirectory(${CMAKE_CURRENT_LIST_DIR}/../frameworks/model_downloader/cpp ${CMAKE_BINARY_DIR}/model_downloader)
+    set(MNNCLI_SOURCES
+        ${MNNCLI_COMMON_SOURCES}
+        ${CMAKE_CURRENT_LIST_DIR}/src/model_runner.cpp
+        ${CMAKE_CURRENT_LIST_DIR}/src/llm_benchmark.cpp
+        ${CMAKE_CURRENT_LIST_DIR}/../../transformers/llm/engine/app/llm_benchmark_common.cpp
+        ${CMAKE_CURRENT_LIST_DIR}/src/model_repository.cpp
+        ${CMAKE_CURRENT_LIST_DIR}/src/cli_download_listener.cpp
+        ${CMAKE_CURRENT_LIST_DIR}/src/model_manager.cpp
+        ${CMAKE_CURRENT_LIST_DIR}/src/local_model_utils.cpp
+        ${CMAKE_CURRENT_LIST_DIR}/src/handlers/run_command_handler.cpp
+        ${CMAKE_CURRENT_LIST_DIR}/src/handlers/delete_command_handler.cpp
+        ${CMAKE_CURRENT_LIST_DIR}/src/handlers/list_command_handler.cpp
+        ${CMAKE_CURRENT_LIST_DIR}/src/handlers/search_command_handler.cpp
+        ${CMAKE_CURRENT_LIST_DIR}/src/handlers/download_command_handler.cpp
+        ${CMAKE_CURRENT_LIST_DIR}/src/handlers/model_info_command_handler.cpp
+        ${CMAKE_CURRENT_LIST_DIR}/src/handlers/benchmark_command_handler.cpp
+        ${CMAKE_CURRENT_LIST_DIR}/src/handlers/config_command_handler.cpp
+        ${CMAKE_CURRENT_LIST_DIR}/src/handlers/info_command_handler.cpp
+    )
+endif()
+
+if(CMAKE_SYSTEM_NAME STREQUAL "Android" AND NOT MNNCLI_SERVICE_ONLY)
     list(APPEND MNNCLI_SOURCES ${CMAKE_CURRENT_LIST_DIR}/src/AndroidVideoDecoder.cpp)
 endif()
 
@@ -118,6 +142,7 @@ target_include_directories(mnncli PRIVATE
     ${MNN_SOURCE_DIR}/transformers/llm/engine/include
     ${MNN_SOURCE_DIR}/transformers/llm/engine/src
     ${MNN_SOURCE_DIR}/3rd_party
+    ${CMAKE_CURRENT_LIST_DIR}/../frameworks/model_downloader/cpp/include
     ${OPENSSL_INCLUDE_DIR}
     ${MNN_SOURCE_DIR}/transformers/llm/engine/app/jsonhpp
 )
@@ -127,8 +152,13 @@ target_include_directories(mnncli PRIVATE
 # Link to pre-built MNN static library
 target_link_libraries(mnncli PRIVATE ${MNN_LIBRARY})
 
-# Link model downloader
-target_link_libraries(mnncli PRIVATE mnn_model_downloader)
+# Link model downloader for the full command build. Service-only compiles the
+# small local filesystem/logging subset directly and has no TLS dependency.
+if(NOT MNNCLI_SERVICE_ONLY)
+    target_link_libraries(mnncli PRIVATE mnn_model_downloader)
+else()
+    target_compile_definitions(mnncli PRIVATE MNNCLI_SERVICE_ONLY=1)
+endif()
 
 
 # Disable Brotli support in httplib
@@ -142,8 +172,11 @@ if(APPLE)
     target_link_libraries(mnncli PRIVATE ${FOUNDATION} ${METAL} ${GRAPHIC})
 endif()
 
-# Link pthread and dl on Linux/macOS
-if(UNIX)
+# Android pthread symbols are provided by libc and have no standalone
+# libpthread. Desktop Unix keeps the existing explicit pthread dependency.
+if(ANDROID)
+    target_link_libraries(mnncli PRIVATE dl)
+elseif(UNIX)
     target_link_libraries(mnncli PRIVATE pthread dl)
 endif()
 

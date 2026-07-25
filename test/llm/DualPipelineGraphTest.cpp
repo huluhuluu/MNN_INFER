@@ -74,6 +74,39 @@ public:
     }
 };
 
+class DualPipelineGraphQnnPerShapePathTest : public MNNTestCase {
+public:
+    virtual bool run(int precision) {
+        GraphSnapshot snapshot;
+        OpInfo qnn = makeOp("qnn_per_shape_plugin", "QNN");
+        qnn.isPlugin = true;
+        qnn.pluginType = "QNN";
+        qnn.qnn.path = "/models/qnn/graph0.bin";
+        qnn.qnn.allGraphName = {"graph0", "graph1", "graph2"};
+        qnn.qnn.baseDir = "/models";
+        qnn.qnn.graphPaths = {"qnn/graph0_0.bin", "qnn/graph0_1.bin", "qnn/graph0_2.bin"};
+        qnn.qnn.bucketSizes = {256, 32, 1};
+        snapshot.ops.push_back(qnn);
+
+        const auto requests = buildQnnGraphRequests(snapshot, 0, 1, 15);
+        MNNTEST_ASSERT(requests.size() == 1);
+        MNNTEST_ASSERT(requests[0].graphPath.empty());
+        MNNTEST_ASSERT(requests[0].allGraphName == qnn.qnn.allGraphName);
+
+        const auto selected = buildQnnGraphRequestsForSize(snapshot, 0, 1, 15, 20);
+        MNNTEST_ASSERT(selected.size() == 1);
+        MNNTEST_ASSERT(selected[0].graphPath == "/models/qnn/graph0_1.bin");
+        MNNTEST_ASSERT(selected[0].allGraphName == std::vector<std::string>({"graph1"}));
+        MNNTEST_ASSERT(selected[0].graphId == "/models/qnn/graph0_1.bin#0#0#graph1");
+        MNNTEST_ASSERT(selected[0].offset == 0);
+        MNNTEST_ASSERT(selected[0].size == 0);
+        MNNTEST_ASSERT(selected[0].shapeIndex == 1);
+        MNNTEST_ASSERT(selected[0].bucketSize == 32);
+        MNNTEST_ASSERT(buildQnnGraphRequestsForSize(snapshot, 0, 1, 15, 257).empty());
+        return true;
+    }
+};
+
 class DualPipelineGraphQnnBucketSelectionTest : public MNNTestCase {
 public:
     virtual bool run(int precision) {
@@ -201,6 +234,7 @@ public:
 
 MNNTestSuiteRegister(DualPipelineGraphQnnRequestTest, "llm/dual_pipeline_graph_qnn_request");
 MNNTestSuiteRegister(DualPipelineGraphQnnDraftPinTest, "llm/dual_pipeline_graph_qnn_draft_pin");
+MNNTestSuiteRegister(DualPipelineGraphQnnPerShapePathTest, "llm/dual_pipeline_graph_qnn_per_shape_path");
 MNNTestSuiteRegister(DualPipelineGraphQnnBucketSelectionTest, "llm/dual_pipeline_graph_qnn_bucket_selection");
 MNNTestSuiteRegister(DualPipelineGraphQnnResourceIdTest, "llm/dual_pipeline_graph_qnn_resource_id");
 MNNTestSuiteRegister(DualPipelineGraphQnnMetadataWithoutTypeTest, "llm/dual_pipeline_graph_qnn_metadata_without_type");

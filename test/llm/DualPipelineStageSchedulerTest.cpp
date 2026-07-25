@@ -95,6 +95,7 @@ public:
         MNNTEST_ASSERT(snapshot.completedStages == 2);
         MNNTEST_ASSERT(snapshot.completedHostStages == 1);
         MNNTEST_ASSERT(snapshot.completedQnnStages == 1);
+        MNNTEST_ASSERT(snapshot.maxConcurrentHostStages == 1);
         MNNTEST_ASSERT(snapshot.maxConcurrentQnnStages == 1);
         MNNTEST_ASSERT(snapshot.hostQnnOverlapGrants > 0);
         MNNTEST_ASSERT(qnnBegin <= hostBegin);
@@ -284,6 +285,7 @@ public:
         MNNTEST_ASSERT(maxActiveHost.load() == 1);
         MNNTEST_ASSERT(snapshot.completedHostStages == 2);
         MNNTEST_ASSERT(snapshot.completedQnnStages == 0);
+        MNNTEST_ASSERT(snapshot.maxConcurrentHostStages == 1);
         MNNTEST_ASSERT(scheduler.finishStageWave());
         return true;
     }

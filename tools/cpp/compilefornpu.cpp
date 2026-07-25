@@ -557,6 +557,20 @@ static std::unique_ptr<MNN::OpT> _compileSubModule(const SubModuleIO& io, SubMod
     attr->list.reset(new ListValueT);
     attr->list->s = {graphicName};
     extra->attr.emplace_back(std::move(attr));
+    if (gNPUName == "QNN") {
+        attr.reset(new AttributeT);
+        attr->key = "allGraphPath";
+        attr->list.reset(new ListValueT);
+        std::string shapeGraphPath = targetNpuPath;
+        const auto extensionPos = shapeGraphPath.rfind('.');
+        if (extensionPos == std::string::npos) {
+            shapeGraphPath += "_" + std::to_string(shapeIndex);
+        } else {
+            shapeGraphPath.insert(extensionPos, "_" + std::to_string(shapeIndex));
+        }
+        attr->list->s = {shapeGraphPath};
+        extra->attr.emplace_back(std::move(attr));
+    }
     if (io.kvcache.size() > 0) {
         attr.reset(new MNN::AttributeT);
         attr->key = "state";
@@ -937,6 +951,14 @@ int main(int argc, const char* argv[]) {
     auto buffer = bufferPair.first;
     auto length = bufferPair.second;
     auto net = GetNet(buffer);
+    if (gNPUName == "QNN" && nullptr != net->oplists()) {
+        for (int i = 0; i < net->oplists()->size(); ++i) {
+            auto op = net->oplists()->GetAs<Op>(i);
+            if (op->type() == OpType_Attention) {
+                skipOps.insert(op->name()->str());
+            }
+        }
+    }
     std::map<std::string, int> tensorIndexMap;
     for (int i=0; i<net->tensorName()->size(); ++i) {
         auto tname = net->tensorName()->GetAsString(i)->str();
@@ -1173,6 +1195,9 @@ int main(int argc, const char* argv[]) {
         rapidjson::Value type;
         type.SetString(gNPUName.c_str(), resDocument.GetAllocator());
         resDocument.AddMember("type", type, resDocument.GetAllocator());
+    }
+    if (gNPUName == "QNN") {
+        resDocument.AddMember("separate_graphs", true, resDocument.GetAllocator());
     }
     resDocument.AddMember("merge", mergeMessages, resDocument.GetAllocator());
     {

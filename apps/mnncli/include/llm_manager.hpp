@@ -20,7 +20,8 @@ public:
     // Create and load an LLM instance
     static std::unique_ptr<MNN::Transformer::Llm> CreateLLM(
         const std::string& config_path, 
-        bool use_template
+        bool use_template,
+        const std::string& scheduler_mode = ""
     );
     
     // Prepare tuning for the model
@@ -32,4 +33,3 @@ private:
 };
 
 } // namespace mnncli
-

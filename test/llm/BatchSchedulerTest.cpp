@@ -6,6 +6,7 @@
 #include <MNN/MNNDefine.h>
 #include "../MNNTestSuite.h"
 #include "../../transformers/llm/engine/include/llm/BatchScheduler.hpp"
+#include "../../transformers/llm/engine/src/kvmeta.hpp"
 
 using namespace MNN::Transformer;
 
@@ -323,6 +324,93 @@ public:
     }
 };
 
+class BatchSchedulerDualPipelineSkipWaveTest : public MNNTestCase {
+public:
+    virtual bool run(int precision) {
+        BatchScheduler scheduler;
+        scheduler.setDualPipelineMode(true, 2);
+        std::vector<int> reqIds = scheduler.addRequest(
+            std::vector<std::vector<int>>{{1}, {11}, {21}});
+
+        auto prefill = scheduler.scheduleWave(1, 3);
+        MNNTEST_ASSERT(prefill.size() == 2);
+
+        std::set<int> activeDrafts{reqIds[0], reqIds[2]};
+        auto wave = scheduler.scheduleWave(1, 3, activeDrafts);
+        MNNTEST_ASSERT(wave.size() == 1);
+        MNNTEST_ASSERT(wave[0]->pipelineId == 0);
+        MNNTEST_ASSERT(wave[0]->reqId == std::vector<int>({reqIds[1]}));
+        return true;
+    }
+};
+
+class EagleDraftLaneKVIsolationTest : public MNNTestCase {
+public:
+    virtual bool run(int precision) {
+        BatchKVMeta lane0;
+        BatchKVMeta lane1;
+        int lane0Releases = 0;
+        int lane1Releases = 0;
+        int lane0ReleasedReqId = -1;
+        int lane1ReleasedReqId = -1;
+        lane0.registerReleaseCallback(this, [&](int reqId) {
+            lane0ReleasedReqId = reqId;
+            ++lane0Releases;
+        });
+        lane1.registerReleaseCallback(this, [&](int reqId) {
+            lane1ReleasedReqId = reqId;
+            ++lane1Releases;
+        });
+
+        lane0.setKVCacheInfo(7, 5);
+        lane1.setKVCacheInfo(9, 3);
+        MNNTEST_ASSERT(lane0.mMetas.at(7)->add == 5);
+        MNNTEST_ASSERT(lane1.mMetas.at(9)->add == 3);
+        lane0.mMetas.at(7)->previous = 5;
+        lane0.mMetas.at(7)->add = 0;
+        lane1.mMetas.at(9)->previous = 3;
+        lane1.mMetas.at(9)->add = 0;
+
+        lane0.setKVCacheInfo(7, 2, 1);
+        MNNTEST_ASSERT(lane0.mMetas.at(7)->add == 2);
+        MNNTEST_ASSERT(lane0.mMetas.at(7)->remove == 1);
+        MNNTEST_ASSERT(lane1.mMetas.at(9)->previous == 3);
+        MNNTEST_ASSERT(lane1.mMetas.at(9)->add == 0);
+
+        lane0.releaseKV(7);
+        MNNTEST_ASSERT(lane0.mMetas.empty());
+        MNNTEST_ASSERT(lane1.mMetas.count(9) == 1);
+        MNNTEST_ASSERT(lane0Releases == 1);
+        MNNTEST_ASSERT(lane0ReleasedReqId == 7);
+        MNNTEST_ASSERT(lane1Releases == 0);
+        lane1.releaseKV(9);
+        MNNTEST_ASSERT(lane1Releases == 1);
+        MNNTEST_ASSERT(lane1ReleasedReqId == 9);
+        return true;
+    }
+};
+
+class EagleDraftLaneKVResetCleanupTest : public MNNTestCase {
+public:
+    virtual bool run(int precision) {
+        BatchKVMeta failedLane;
+        BatchKVMeta healthyLane;
+        int failedLaneResets = 0;
+        int healthyLaneResets = 0;
+        failedLane.registerResetCallback(this, [&]() { ++failedLaneResets; });
+        healthyLane.registerResetCallback(this, [&]() { ++healthyLaneResets; });
+        failedLane.setKVCacheInfo(3, 4);
+        healthyLane.setKVCacheInfo(4, 6);
+
+        failedLane.reset();
+        MNNTEST_ASSERT(failedLane.mMetas.empty());
+        MNNTEST_ASSERT(healthyLane.mMetas.at(4)->add == 6);
+        MNNTEST_ASSERT(failedLaneResets == 1);
+        MNNTEST_ASSERT(healthyLaneResets == 0);
+        return true;
+    }
+};
+
 MNNTestSuiteRegister(BatchSchedulerDualPipelineSplitTest, "llm/batch_scheduler_dual_pipeline_split");
 MNNTestSuiteRegister(BatchSchedulerSingleTokenPrefillStateTest, "llm/batch_scheduler_single_token_prefill_state");
 MNNTestSuiteRegister(BatchSchedulerDualPipelineMultiRequestSplitTest, "llm/batch_scheduler_dual_pipeline_multi_request_split");
@@ -333,3 +421,6 @@ MNNTestSuiteRegister(BatchSchedulerDualPipelineSingleRequestScheduleWaveTest, "l
 MNNTestSuiteRegister(BatchSchedulerDualPipelinePipelinePersistenceTest, "llm/batch_scheduler_dual_pipeline_pipeline_persistence");
 MNNTestSuiteRegister(BatchSchedulerDualPipelineSplitCountClampTest, "llm/batch_scheduler_dual_pipeline_split_count_clamp");
 MNNTestSuiteRegister(BatchSchedulerDualPipelineThreeRequestWaveTest, "llm/batch_scheduler_dual_pipeline_three_request_wave");
+MNNTestSuiteRegister(BatchSchedulerDualPipelineSkipWaveTest, "llm/batch_scheduler_dual_pipeline_skip_wave");
+MNNTestSuiteRegister(EagleDraftLaneKVIsolationTest, "llm/eagle_draft_lane_kv_isolation");
+MNNTestSuiteRegister(EagleDraftLaneKVResetCleanupTest, "llm/eagle_draft_lane_kv_reset_cleanup");
