@@ -24,7 +24,7 @@ MNN_BUILD_JOBS=8 ./build.sh --android-service
 | QNN runtime | `/data/local/tmp/mnn-qnn` |
 | 临时 staging | `/data/local/tmp/mnn-server-throughput` |
 
-脚本读取设备已有 `config.json` / `config_qnn.json`，保留模型字段，并写入正确的绝对 `base_dir`。生成配置统一使用 greedy、`precision=low`、`memory=low`、`power=high`。CPU/OpenCL 使用 4 线程，QNN 使用 1 线程；continuous/dual 开 packed attention；dual 使用 `split_count=2`，QNN dual 另设 resident=30、prefetch=2。
+脚本读取设备已有 `config.json` / `config_qnn.json`，保留模型字段，并写入正确的绝对 `base_dir`。生成配置统一使用 greedy、`precision=low`、`memory=low`、`power=high`。CPU/OpenCL 使用 4 线程，QNN 使用 1 线程；continuous/dual 开 packed attention；dual 使用 `split_count=2`，QNN dual 另设 resident=40、prefetch=2。resident 是硬预算；活跃图受保护，target 图由 LRU 管理，Eagle FC/draft 当前 bucket 只在 wave 内 pin，并在 bucket 切换和 batch 结束后显式释放，避免跨 wave 累积固定图耗尽容量。
 
 ## Dry Run
 

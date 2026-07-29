@@ -257,7 +257,7 @@ private:
     }
 
     static constexpr size_t kMaxBatchSize = MNN::Transformer::BatchScheduler::MAX_BATCH_SIZE;
-    static constexpr std::chrono::milliseconds kBatchCollectWindow{10};
+    static constexpr std::chrono::milliseconds kBatchCollectWindow{100};
 
     const char* modeName() const {
         switch (mMode) {
@@ -419,6 +419,9 @@ private:
             results = mLlm->generate(input_ids, nullptr, active_tasks.front()->max_tokens);
         } catch (const std::exception& error) {
             LOG_DEBUG("LLM batch request failed: " + std::string(error.what()));
+            MNN::Transformer::AcceptanceTrace::log(
+                "event=batch_failed mode=%s reason=exception request_count=%zu message=%s",
+                modeName(), active_tasks.size(), error.what());
             for (const auto& task : active_tasks) {
                 complete(task, true);
             }
@@ -426,6 +429,9 @@ private:
         }
         if (results.size() != active_tasks.size()) {
             LOG_DEBUG("LLM batch request returned an unexpected result count");
+            MNN::Transformer::AcceptanceTrace::log(
+                "event=batch_failed mode=%s reason=result_count request_count=%zu result_count=%zu",
+                modeName(), active_tasks.size(), results.size());
             for (const auto& task : active_tasks) {
                 complete(task, true);
             }
@@ -434,6 +440,9 @@ private:
         const auto context = mLlm->getContext();
         if (context != nullptr && context->status == MNN::Transformer::LlmStatus::INTERNAL_ERROR) {
             LOG_DEBUG("LLM batch request ended with INTERNAL_ERROR");
+            MNN::Transformer::AcceptanceTrace::log(
+                "event=batch_failed mode=%s reason=internal_error request_count=%zu",
+                modeName(), active_tasks.size());
             for (const auto& task : active_tasks) {
                 complete(task, true);
             }

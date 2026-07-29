@@ -139,6 +139,7 @@ public:
     void cancelGraphPrefetchWave();
     bool finishGraphPrefetchWave();
     GraphWindowSnapshot graphWindowSnapshot() const;
+    bool releaseResidentGraph(const std::string& graphId);
 
     bool beginStageWave(const std::vector<int>& pipelineIds);
     bool enterStage(int pipelineId, StageBackend backend);

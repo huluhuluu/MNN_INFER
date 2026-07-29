@@ -11,6 +11,7 @@
 #include <array>
 #include <map>
 #include <ostream>
+#include <set>
 #include "llm/llm.hpp"
 #include "../llmconfig.hpp"
 #include "../kvmeta.hpp"
@@ -221,6 +222,9 @@ private:
     GraphSnapshot mEagleFCGraphSnapshot;
     std::vector<DualPipelineScheduler::GraphRequest> mEagleDraftGraphRequests;
     std::vector<DualPipelineScheduler::GraphRequest> mEagleFCGraphRequests;
+    std::set<std::string> mEagleBatchResidentGraphIds;
+    std::set<std::string> mEagleCurrentDraftGraphIds;
+    std::set<std::string> mEagleCurrentFCGraphIds;
     std::unordered_map<std::string, int> mEagleDraftQnnOpIndices;
     std::unordered_map<std::string, int> mEagleFCQnnOpIndices;
     MNN::Express::VARP mD2t, mTreePosition;

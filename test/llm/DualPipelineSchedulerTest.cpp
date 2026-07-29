@@ -315,6 +315,43 @@ public:
     }
 };
 
+class DualPipelineSchedulerDraftGraphLruTest : public MNNTestCase {
+public:
+    virtual bool run(int precision) {
+        GraphRecorder recorder;
+        DualPipelineScheduler scheduler;
+        MNNTEST_ASSERT(startScheduler(scheduler, recorder, 1, 0));
+
+        DualPipelineScheduler::PipelineGraphWave draftWave = makeWave(0, 21, {"draft_a"});
+        draftWave.graphs[0].draftGraph = true;
+        draftWave.graphs[0].pinResident = true;
+        MNNTEST_ASSERT(scheduler.beginGraphPrefetchWave({draftWave}));
+        MNNTEST_ASSERT(scheduler.beginStageWave({0}));
+        MNNTEST_ASSERT(scheduler.enterGraphStage(0, 0));
+        MNNTEST_ASSERT(scheduler.leaveGraphStage(0, 0));
+        MNNTEST_ASSERT(scheduler.finishStageWave());
+        MNNTEST_ASSERT(scheduler.finishGraphPrefetchWave());
+        MNNTEST_ASSERT(scheduler.releaseResidentGraph("draft_a"));
+
+        const DualPipelineScheduler::PipelineGraphWave targetWave = makeWave(0, 22, {"target_b"});
+        MNNTEST_ASSERT(scheduler.beginGraphPrefetchWave({targetWave}));
+        MNNTEST_ASSERT(scheduler.beginStageWave({0}));
+        MNNTEST_ASSERT(scheduler.enterGraphStage(0, 0));
+        MNNTEST_ASSERT(scheduler.leaveGraphStage(0, 0));
+        MNNTEST_ASSERT(scheduler.finishStageWave());
+        MNNTEST_ASSERT(scheduler.finishGraphPrefetchWave());
+        scheduler.stop();
+
+        const std::vector<GraphEvent> events = recorder.snapshot();
+        MNNTEST_ASSERT(events.size() == 4);
+        MNNTEST_ASSERT(events[0].type == "load" && events[0].graphId == "draft_a");
+        MNNTEST_ASSERT(events[1].type == "release" && events[1].graphId == "draft_a");
+        MNNTEST_ASSERT(events[2].type == "load" && events[2].graphId == "target_b");
+        MNNTEST_ASSERT(events[3].type == "release" && events[3].graphId == "target_b");
+        return true;
+    }
+};
+
 class DualPipelineSchedulerActiveGraphProtectionTest : public MNNTestCase {
 public:
     virtual bool run(int precision) {
@@ -391,5 +428,6 @@ MNNTestSuiteRegister(DualPipelineSchedulerSharedGraphTest, "llm/dual_pipeline_sc
 MNNTestSuiteRegister(DualPipelineSchedulerGraphLoadFailureTest, "llm/dual_pipeline_scheduler_graph_load_failure");
 MNNTestSuiteRegister(DualPipelineSchedulerWaveReuseTest, "llm/dual_pipeline_scheduler_wave_reuse");
 MNNTestSuiteRegister(DualPipelineSchedulerResidentLruTest, "llm/dual_pipeline_scheduler_resident_lru");
+MNNTestSuiteRegister(DualPipelineSchedulerDraftGraphLruTest, "llm/dual_pipeline_scheduler_draft_graph_lru");
 MNNTestSuiteRegister(DualPipelineSchedulerActiveGraphProtectionTest, "llm/dual_pipeline_scheduler_active_graph_protection");
 MNNTestSuiteRegister(DualPipelineSchedulerExecutionBeforeLookaheadTest, "llm/dual_pipeline_scheduler_execution_before_lookahead");

@@ -334,8 +334,9 @@ void DualPipelineScheduler::cancelGraphPrefetchWave() {
 
 bool DualPipelineScheduler::finishGraphPrefetchWave() {
     bool succeeded = true;
+    std::set<std::string> completionGraphIds;
     {
-        std::lock_guard<std::mutex> lock(mMutex);
+        std::unique_lock<std::mutex> lock(mMutex);
         if (!mGraphPrefetchWaveActive) {
             return true;
         }
@@ -346,6 +347,7 @@ bool DualPipelineScheduler::finishGraphPrefetchWave() {
             _removePendingGraphLoadsLocked(iter->first, state.completedGraphIndex + 1, -1);
             for (std::set<int>::const_iterator graph = state.registeredGraphIndices.begin();
                  graph != state.registeredGraphIndices.end(); ++graph) {
+                completionGraphIds.insert(state.graphs[*graph].graphId);
                 if (*graph > state.completedGraphIndex) {
                     _enqueueGraphCompletionLocked(state, *graph);
                 }
@@ -355,8 +357,18 @@ bool DualPipelineScheduler::finishGraphPrefetchWave() {
         mPendingQnnGraphs.clear();
         mGraphPrefetchWaveActive = false;
         mGraphPrefetchCancelled = false;
+        mCondition.notify_all();
+        mCondition.wait(lock, [this, &completionGraphIds]() {
+            for (std::set<std::string>::const_iterator graphId = completionGraphIds.begin();
+                 graphId != completionGraphIds.end(); ++graphId) {
+                std::map<std::string, GraphState>::const_iterator graph = mGraphs.find(*graphId);
+                if (graph != mGraphs.end() && graph->second.record.activeUseCount > 0) {
+                    return false;
+                }
+            }
+            return true;
+        });
     }
-    mCondition.notify_all();
     return succeeded;
 }
 
@@ -380,6 +392,30 @@ DualPipelineScheduler::GraphWindowSnapshot DualPipelineScheduler::graphWindowSna
         result.pipelines.push_back(progress);
     }
     return result;
+}
+
+bool DualPipelineScheduler::releaseResidentGraph(const std::string& graphId) {
+    Callbacks callbacks;
+    GraphRequest releaseRequest;
+    {
+        std::lock_guard<std::mutex> lock(mMutex);
+        std::map<std::string, GraphState>::iterator iter = mGraphs.find(graphId);
+        if (graphId.empty() || iter == mGraphs.end() || !iter->second.record.resident ||
+            iter->second.record.activeUseCount > 0 || mGraphPrefetchWaveActive) {
+            return false;
+        }
+        callbacks = mConfig.callbacks;
+        releaseRequest = iter->second.lastRequest;
+        releaseRequest.action = GRAPH_RELEASE;
+        releaseRequest.reason = "batch_completed";
+        releaseRequest.forceRelease = true;
+        releaseRequest.unpinAfterRelease = true;
+        mGraphs.erase(iter);
+    }
+    if (callbacks.onGraphRelease) {
+        callbacks.onGraphRelease(releaseRequest);
+    }
+    return true;
 }
 
 bool DualPipelineScheduler::beginStageWave(const std::vector<int>& pipelineIds) {
@@ -753,15 +789,18 @@ void DualPipelineScheduler::_processGraphRequest(const GraphRequest& request) {
 }
 
 void DualPipelineScheduler::_processGraphComplete(const std::string& graphId) {
-    std::lock_guard<std::mutex> lock(mMutex);
-    std::map<std::string, GraphState>::iterator iter = mGraphs.find(graphId);
-    if (iter == mGraphs.end()) {
-        return;
+    {
+        std::lock_guard<std::mutex> lock(mMutex);
+        std::map<std::string, GraphState>::iterator iter = mGraphs.find(graphId);
+        if (iter == mGraphs.end()) {
+            return;
+        }
+        if (iter->second.record.activeUseCount > 0) {
+            --iter->second.record.activeUseCount;
+        }
+        iter->second.record.lastUseSequence = mNextSequence++;
     }
-    if (iter->second.record.activeUseCount > 0) {
-        --iter->second.record.activeUseCount;
-    }
-    iter->second.record.lastUseSequence = mNextSequence++;
+    mCondition.notify_all();
 }
 
 bool DualPipelineScheduler::_planEvictionsLocked(const std::string& incomingGraphId,

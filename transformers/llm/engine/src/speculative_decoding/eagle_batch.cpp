@@ -6,6 +6,7 @@
 
 #include "generate.hpp"
 #include "tokentree.hpp"
+#include "llm/AcceptanceTrace.hpp"
 #include <MNN/expr/ExecutorScope.hpp>
 #include <cstring>
 #include <limits>
@@ -188,16 +189,26 @@ static VARP _makePositionIds(const std::vector<int>& positions) {
 
 static VARP _packFlatFloatVars(const VARPS& vars) {
     int total = 0;
-    for (auto& var : vars) {
-        total += var->getInfo()->size;
+    for (size_t i = 0; i < vars.size(); ++i) {
+        auto info = vars[i] == nullptr ? nullptr : vars[i]->getInfo();
+        if (info == nullptr) {
+            AcceptanceTrace::log("event=eagle_draft_failed phase=mask_info index=%zu count=%zu",
+                                 i, vars.size());
+            return nullptr;
+        }
+        total += info->size;
     }
     auto packed = _Input({1, 1, 1, total}, NCHW, halide_type_of<float>());
     auto dst = packed->writeMap<float>();
     int offset = 0;
-    for (auto& var : vars) {
+    for (size_t i = 0; i < vars.size(); ++i) {
+        auto& var = vars[i];
         auto info = var->getInfo();
         auto src = var->readMap<float>();
         if (src == nullptr || dst == nullptr) {
+            AcceptanceTrace::log(
+                "event=eagle_draft_failed phase=mask_map index=%zu count=%zu total=%d src=%d dst=%d",
+                i, vars.size(), total, src != nullptr, dst != nullptr);
             return nullptr;
         }
         ::memcpy(dst + offset, src, info->size * sizeof(float));
@@ -255,6 +266,10 @@ VARPS EagleGeneration::runDualPipelineComponent(
     VARPS outputs;
     if (pipelineId < 0 || pipelineId >= static_cast<int>(mEagleDualRuntimes.size()) ||
         !module || !mLlm->mDualPipelineScheduler) {
+        AcceptanceTrace::log(
+            "event=eagle_component_failed phase=arguments pipeline=%d runtimes=%zu module=%d scheduler=%d",
+            pipelineId, mEagleDualRuntimes.size(), module != nullptr,
+            mLlm->mDualPipelineScheduler != nullptr);
         return outputs;
     }
     auto& runtime = mLlm->mDualPipelineRuntimes[pipelineId];
@@ -266,6 +281,9 @@ VARPS EagleGeneration::runDualPipelineComponent(
     graphWave.graphs = buildQnnGraphRequestsForSize(
         graphSnapshot, 0, static_cast<int>(graphRequests.size()), paddedLen);
     if (graphWave.graphs.size() != graphRequests.size()) {
+        AcceptanceTrace::log(
+            "event=eagle_component_failed phase=bucket pipeline=%d bucket=%d graphs=%zu expected=%zu",
+            pipelineId, paddedLen, graphWave.graphs.size(), graphRequests.size());
         MNN_ERROR("MNN_DUAL_PIPELINE: component graph bucket selection failed for pipeline %d, bucket %d.\n",
                   pipelineId, paddedLen);
         runtime.activeQnnOpIndices = mLlm->mDualPipelineQnnOpIndices;
@@ -275,12 +293,32 @@ VARPS EagleGeneration::runDualPipelineComponent(
         request.draftGraph = true;
         request.pinResident = true;
     }
+    std::set<std::string> nextGraphIds;
+    for (const auto& request : graphWave.graphs) {
+        nextGraphIds.insert(request.graphId);
+    }
+    std::set<std::string>& currentGraphIds =
+        &graphSnapshot == &mEagleFCGraphSnapshot
+            ? mEagleCurrentFCGraphIds : mEagleCurrentDraftGraphIds;
+    if (currentGraphIds != nextGraphIds) {
+        for (const auto& graphId : currentGraphIds) {
+            mLlm->mDualPipelineScheduler->releaseResidentGraph(graphId);
+        }
+        currentGraphIds = nextGraphIds;
+    }
+    mEagleBatchResidentGraphIds.insert(nextGraphIds.begin(), nextGraphIds.end());
     if (!mLlm->mDualPipelineScheduler->beginGraphPrefetchWave({graphWave})) {
+        AcceptanceTrace::log(
+            "event=eagle_component_failed phase=prefetch pipeline=%d bucket=%d graphs=%zu",
+            pipelineId, paddedLen, graphWave.graphs.size());
         MNN_ERROR("MNN_DUAL_PIPELINE: component graph prefetch failed for pipeline %d.\n", pipelineId);
         runtime.activeQnnOpIndices = mLlm->mDualPipelineQnnOpIndices;
         return outputs;
     }
     if (!mLlm->mDualPipelineScheduler->beginStageWave({pipelineId})) {
+        AcceptanceTrace::log(
+            "event=eagle_component_failed phase=stage pipeline=%d bucket=%d",
+            pipelineId, paddedLen);
         MNN_ERROR("MNN_DUAL_PIPELINE: component stage wave failed for pipeline %d.\n", pipelineId);
         mLlm->mDualPipelineScheduler->cancelGraphPrefetchWave();
         mLlm->mDualPipelineScheduler->finishGraphPrefetchWave();
@@ -295,6 +333,9 @@ VARPS EagleGeneration::runDualPipelineComponent(
         }
     }
     if (outputs.empty()) {
+        AcceptanceTrace::log(
+            "event=eagle_component_failed phase=forward pipeline=%d bucket=%d",
+            pipelineId, paddedLen);
         mLlm->mDualPipelineScheduler->cancelStageWave();
         mLlm->mDualPipelineScheduler->cancelGraphPrefetchWave();
     }
@@ -305,6 +346,9 @@ VARPS EagleGeneration::runDualPipelineComponent(
     const bool graphSucceeded = mLlm->mDualPipelineScheduler->finishGraphPrefetchWave();
     runtime.activeQnnOpIndices = mLlm->mDualPipelineQnnOpIndices;
     if (!stageSucceeded || !graphSucceeded) {
+        AcceptanceTrace::log(
+            "event=eagle_component_failed phase=finish pipeline=%d bucket=%d stage=%d graph=%d callbacks=%d",
+            pipelineId, paddedLen, stageSucceeded, graphSucceeded, callbacksExecuted);
         MNN_ERROR("MNN_DUAL_PIPELINE: component wave completion failed for pipeline %d (stage=%d graph=%d).\n",
                   pipelineId, stageSucceeded, graphSucceeded);
         outputs.clear();
@@ -403,6 +447,9 @@ std::vector<MNN::Express::VARP> EagleGeneration::eagleForwardRawPacked(const std
     int totalLen = inputs.empty() || inputs[0] == nullptr ? 0 : _packedSeqLen(inputs[0]);
     int maskSize = inputs.size() > 2 ? _varElementSize(inputs[2]) : 0;
     if (totalLen <= 0 || maskSize <= 0) {
+        AcceptanceTrace::log(
+            "event=eagle_draft_failed phase=inputs pipeline=%d inputs=%zu total=%d mask=%d",
+            pipelineId, inputs.size(), totalLen, maskSize);
         MNN_ERROR("MNN_DUAL_PIPELINE: Eagle draft has invalid packed inputs for pipeline %d "
                   "(inputs=%d total=%d mask=%d).\n",
                   pipelineId, static_cast<int>(inputs.size()), totalLen, maskSize);
@@ -418,24 +465,26 @@ std::vector<MNN::Express::VARP> EagleGeneration::eagleForwardRawPacked(const std
     }
     const int paddedLen = selectQnnCompatibleBucketSize(mEagleDraftGraphSnapshot, requiredLen);
     if (paddedLen < requiredLen) {
+        AcceptanceTrace::log(
+            "event=eagle_draft_failed phase=bucket pipeline=%d required=%d selected=%d",
+            pipelineId, requiredLen, paddedLen);
         MNN_ERROR("MNN_QNN: no Eagle draft graph bucket can hold packed length %d.\n", requiredLen);
         mContext->status = LlmStatus::INTERNAL_ERROR;
         return outputs;
     }
     VARPS paddedInputs = inputs;
-    // Disk embeddings belong to the caller's executor. Materialize their
-    // padded input before switching to the lane executor used by draft KV.
+    // Packed inputs belong to the caller's executor. Materialize them before
+    // switching to the lane executor used by draft KV.
     paddedInputs[0] = _padPackedFloatRows(inputs[0], paddedLen);
     if (paddedInputs[0] == nullptr) {
+        AcceptanceTrace::log(
+            "event=eagle_draft_failed phase=embed_padding pipeline=%d required=%d padded=%d",
+            pipelineId, requiredLen, paddedLen);
         MNN_ERROR("MNN_DUAL_PIPELINE: Eagle draft embed padding failed for pipeline %d "
                   "(required=%d padded=%d).\n",
                   pipelineId, requiredLen, paddedLen);
         mContext->status = LlmStatus::INTERNAL_ERROR;
         return outputs;
-    }
-    std::unique_ptr<Express::ExecutorScope> executorScope;
-    if (executor) {
-        executorScope.reset(new Express::ExecutorScope(executor));
     }
     paddedInputs[1] = _padPackedFloatRows(inputs[1], paddedLen);
     if (paddedInputs.size() > 3) {
@@ -443,6 +492,10 @@ std::vector<MNN::Express::VARP> EagleGeneration::eagleForwardRawPacked(const std
     }
     if (paddedInputs[1] == nullptr ||
         (paddedInputs.size() > 3 && paddedInputs[3] == nullptr)) {
+        AcceptanceTrace::log(
+            "event=eagle_draft_failed phase=aux_padding pipeline=%d required=%d padded=%d hidden=%d position=%d",
+            pipelineId, requiredLen, paddedLen, paddedInputs[1].get() != nullptr,
+            paddedInputs.size() <= 3 || paddedInputs[3].get() != nullptr);
         MNN_ERROR("MNN_DUAL_PIPELINE: Eagle draft padding failed for pipeline %d "
                   "(required=%d padded=%d embeds=%d hidden=%d position=%d).\n",
                   pipelineId, requiredLen, paddedLen, paddedInputs[0] == nullptr ? 0 : 1,
@@ -451,12 +504,19 @@ std::vector<MNN::Express::VARP> EagleGeneration::eagleForwardRawPacked(const std
         mContext->status = LlmStatus::INTERNAL_ERROR;
         return outputs;
     }
+    std::unique_ptr<Express::ExecutorScope> executorScope;
+    if (executor) {
+        executorScope.reset(new Express::ExecutorScope(executor));
+    }
     if (*rootModule == nullptr) {
         *rootModule = _loadPackedEagleModule(mLlm->mConfig->eagle_model(),
                                              runtimeManager,
                                              mEagleModuleConfig);
     }
     if (*rootModule == nullptr) {
+        AcceptanceTrace::log(
+            "event=eagle_draft_failed phase=root_module pipeline=%d padded=%d",
+            pipelineId, paddedLen);
         MNN_ERROR("MNN_DUAL_PIPELINE: Eagle draft root module is missing for pipeline %d.\n",
                   pipelineId);
         mContext->status = LlmStatus::INTERNAL_ERROR;
@@ -479,6 +539,9 @@ std::vector<MNN::Express::VARP> EagleGeneration::eagleForwardRawPacked(const std
         iter = modulePool->emplace(moduleKey, createPackedModule()).first;
     }
     if (iter->second == nullptr) {
+        AcceptanceTrace::log(
+            "event=eagle_draft_failed phase=module_clone pipeline=%d padded=%d mask=%d",
+            pipelineId, paddedLen, maskSize);
         MNN_ERROR("MNN_DUAL_PIPELINE: Eagle draft clone failed for pipeline %d "
                   "(padded=%d mask=%d).\n",
                   pipelineId, paddedLen, maskSize);
@@ -753,6 +816,12 @@ std::vector<EagleGeneration::DraftInfo> EagleGeneration::topkGeneratePacked(cons
 
     auto packedFcHidden = eagleFCForward(fcInputList, pipelineId);
     if (packedFcHidden == nullptr || _packedSeqLen(packedFcHidden) < totalLen) {
+        AcceptanceTrace::log(
+            "event=eagle_draft_failed phase=fc_rows pipeline=%d rows=%d required=%d",
+            pipelineId, _packedSeqLen(packedFcHidden), totalLen);
+        MNN_ERROR("MNN_DUAL_PIPELINE: Eagle packed FC rows are insufficient for pipeline %d "
+                  "(rows=%d required=%d).\n",
+                  pipelineId, _packedSeqLen(packedFcHidden), totalLen);
         mContext->status = LlmStatus::INTERNAL_ERROR;
         return {};
     }
@@ -811,11 +880,20 @@ std::vector<EagleGeneration::DraftInfo> EagleGeneration::topkGeneratePacked(cons
         auto stepMask = _packFlatFloatVars(stepMaskList);
         auto stepPositionIds = _makePositionIds(stepPositionHost);
         if (stepMask == nullptr) {
+            AcceptanceTrace::log(
+                "event=eagle_draft_failed phase=depth_mask pipeline=%d depth=%d requests=%zu",
+                pipelineId, d, works.size());
+            MNN_ERROR("MNN_DUAL_PIPELINE: Eagle depth mask packing failed for pipeline %d "
+                      "(depth=%d requests=%zu).\n",
+                      pipelineId, d, works.size());
             mContext->status = LlmStatus::INTERNAL_ERROR;
             return {};
         }
         outputs = eagleForwardRawPacked(stepKVInfos, {stepEmbeds, stepHidden, stepMask, stepPositionIds, mLlm->logitsAllIdx}, true, pipelineId);
         if (outputs.size() < 2) {
+            MNN_ERROR("MNN_DUAL_PIPELINE: Eagle depth forward returned %zu outputs for pipeline %d "
+                      "(depth=%d packed_length=%d).\n",
+                      outputs.size(), pipelineId, d, totalLen);
             mContext->status = LlmStatus::INTERNAL_ERROR;
             return {};
         }
@@ -950,9 +1028,13 @@ std::vector<std::vector<int>> EagleGeneration::generateBatch(const std::vector<s
             if (runtime.batchMeta) {
                 runtime.batchMeta->reset();
             }
+            // KV managers retain the backend of the first clone used by this batch.
+            // Drop that owner only after reset has destroyed the old managers.
+            runtime.cacheOwner.reset();
         }
     } else if (mEagleBatchMeta != nullptr) {
         mEagleBatchMeta->reset();
+        mEaglePackedCacheOwner.reset();
     }
 
     struct BatchBaseForward {
@@ -1473,6 +1555,13 @@ std::vector<std::vector<int>> EagleGeneration::generateBatch(const std::vector<s
                     int pos = chunk->pos[i];
                     if (inputIter == inputIndexByReqId.end() || pos < 0 || reqLen <= 0 ||
                         pos + reqLen >= inputIds[inputIter->second].size()) {
+                        const int inputSize = inputIter == inputIndexByReqId.end()
+                            ? -1 : static_cast<int>(inputIds[inputIter->second].size());
+                        MNN_ERROR("MNN_DUAL_PIPELINE: invalid Eagle prefill segment "
+                                  "(request=%d pipeline=%d state=%d pos=%d length=%d prompt=%d final=%d).\n",
+                                  id, base.pipelineId, mLlm->mScheduler->state(id), pos,
+                                  reqLen, inputSize,
+                                  finalChunkIndices.find(i) != finalChunkIndices.end());
                         mContext->status = LlmStatus::INTERNAL_ERROR;
                         break;
                     }
@@ -1591,6 +1680,14 @@ std::vector<std::vector<int>> EagleGeneration::generateBatch(const std::vector<s
         }
         releaseRequestState(id);
         mLlm->mScheduler->releaseReq(id);
+    }
+    if (dualPipelineMode && mLlm->mDualPipelineScheduler) {
+        for (const auto& graphId : mEagleBatchResidentGraphIds) {
+            mLlm->mDualPipelineScheduler->releaseResidentGraph(graphId);
+        }
+        mEagleBatchResidentGraphIds.clear();
+        mEagleCurrentDraftGraphIds.clear();
+        mEagleCurrentFCGraphIds.clear();
     }
     return ret;
 }

@@ -604,7 +604,7 @@ def build_matrix_configs(
             if mode == "dual_pipeline":
                 config["dual_pipeline_split_count"] = 2
                 if backend == "qnn":
-                    config["dual_pipeline_max_resident_graphs"] = 30
+                    config["dual_pipeline_max_resident_graphs"] = 40
                     config["dual_pipeline_prefetch_window"] = 2
             configs.append(MatrixConfig(backend, mode, config))
     return configs

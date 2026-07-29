@@ -322,7 +322,7 @@ class MatrixConfigTest(unittest.TestCase):
         self.assertFalse(by_key[("cpu", "single_request")]["packed_attention_mode"])
         self.assertTrue(by_key[("cpu", "continuous_batch")]["packed_attention_mode"])
         self.assertEqual(by_key[("qnn", "dual_pipeline")]["dual_pipeline_split_count"], 2)
-        self.assertEqual(by_key[("qnn", "dual_pipeline")]["dual_pipeline_max_resident_graphs"], 30)
+        self.assertEqual(by_key[("qnn", "dual_pipeline")]["dual_pipeline_max_resident_graphs"], 40)
         self.assertEqual(by_key[("qnn", "dual_pipeline")]["dual_pipeline_prefetch_window"], 2)
         for config in by_key.values():
             self.assertEqual(config["sampler_type"], "greedy")
