@@ -99,7 +99,7 @@ def convert(args):
         shutil.rmtree(cache_root)
     staging_output.mkdir(parents=True)
 
-    for component in args.components:
+    for component in COMPONENT_FILES:
         convert_component(args, component, cache_root, staging_output)
 
     final_output = args.model / "qnn"
@@ -118,7 +118,6 @@ def main():
     parser.add_argument("--dsp_arch", required=True)
     parser.add_argument("--mnn_path", type=Path, default=Path("../../../build"))
     parser.add_argument("--cache_path", type=Path, default=Path("tmp_qnn_eagle3"))
-    parser.add_argument("--components", nargs="+", choices=COMPONENT_FILES, default=list(COMPONENT_FILES))
     parser.add_argument("--buckets", nargs="+", type=int, default=[1, 32, 256, 512])
     parser.add_argument("--base_config", type=Path)
     parser.add_argument("--backend_type", choices=["cpu", "opencl"], default="opencl")
@@ -139,7 +138,7 @@ def main():
         parser.error("dual pipeline resident graph limit must be positive")
     if args.dual_pipeline_prefetch_window < 0:
         parser.error("dual pipeline prefetch window must be non-negative")
-    for component in args.components:
+    for component in COMPONENT_FILES:
         model_path = args.model / COMPONENT_FILES[component]
         if not model_path.is_file():
             parser.error(f"missing {component} model: {model_path}")

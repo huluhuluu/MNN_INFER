@@ -178,14 +178,18 @@ private:
         addString("precision", mConfig.precision);
         if (comma) overrides << ",";
         if (mConfig.mode == "dual") {
-            overrides << "\"packed_attention_mode\":true,\"dual_pipeline_mode\":true";
+            overrides << "\"scheduler_mode\":\"dual_pipeline\","
+                         "\"packed_attention_mode\":true,\"dual_pipeline_mode\":true";
         } else if (mConfig.mode == "batch") {
-            overrides << "\"packed_attention_mode\":true,\"dual_pipeline_mode\":false";
+            overrides << "\"scheduler_mode\":\"continuous_batch\","
+                         "\"packed_attention_mode\":true,\"dual_pipeline_mode\":false";
         } else if (mConfig.mode == "ar") {
-            overrides << "\"speculative_type\":\"\",\"hidden_states\":false,"
+            overrides << "\"scheduler_mode\":\"single_request\","
+                         "\"speculative_type\":\"\",\"hidden_states\":false,"
                          "\"packed_attention_mode\":false,\"dual_pipeline_mode\":false";
         } else {
-            overrides << "\"packed_attention_mode\":false,\"dual_pipeline_mode\":false";
+            overrides << "\"scheduler_mode\":\"single_request\","
+                         "\"packed_attention_mode\":false,\"dual_pipeline_mode\":false";
         }
         overrides << "}";
         if (!mLlm->set_config(overrides.str())) {

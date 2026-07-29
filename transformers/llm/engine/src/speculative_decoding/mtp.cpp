@@ -151,7 +151,7 @@ void MtpGeneration::generate(GenerationParams& param) {
     int spl_count = 0;
 
     while (len < max_token) {
-        if(mContext->status == LlmStatus::USER_CANCEL) {
+        if (mLlm->cancelRequested()) {
             break;
         }
         MNN::Timer _t;

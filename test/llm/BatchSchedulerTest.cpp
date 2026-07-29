@@ -234,6 +234,27 @@ public:
     }
 };
 
+class BatchSchedulerDualPipelineClearPendingWaveTest : public MNNTestCase {
+public:
+    virtual bool run(int precision) {
+        BatchScheduler scheduler;
+        scheduler.setDualPipelineMode(true, 2);
+        scheduler.addRequest({{1, 2, 3, 4}, {11, 12, 13, 14}});
+
+        auto firstWave = scheduler.scheduleWave(4, 2);
+        MNNTEST_ASSERT(firstWave.size() == 2);
+        MNNTEST_ASSERT(firstWave[0]->segmentIndex == 0);
+
+        scheduler.clearPendingChunks();
+        auto rebuiltWave = scheduler.scheduleWave(4, 2);
+        MNNTEST_ASSERT(rebuiltWave.size() == 2);
+        MNNTEST_ASSERT(rebuiltWave[0]->segmentIndex == 0);
+        MNNTEST_ASSERT(rebuiltWave[0]->inputs[0] == std::vector<int>({3}));
+        MNNTEST_ASSERT(rebuiltWave[1]->inputs[0] == std::vector<int>({13}));
+        return true;
+    }
+};
+
 class BatchSchedulerDualPipelineSingleRequestScheduleWaveTest : public MNNTestCase {
 public:
     virtual bool run(int precision) {
@@ -320,6 +341,53 @@ public:
         MNNTEST_ASSERT(wave[0]->reqId[0] == reqIds[0]);
         MNNTEST_ASSERT(wave[0]->reqId[1] == reqIds[1]);
         MNNTEST_ASSERT(wave[1]->reqId[0] == reqIds[2]);
+        return true;
+    }
+};
+
+class BatchSchedulerDualPipelineEightRequestWaveTest : public MNNTestCase {
+public:
+    virtual bool run(int precision) {
+        BatchScheduler scheduler;
+        scheduler.setDualPipelineMode(true, 2);
+        std::vector<int> reqIds = scheduler.addRequest(
+            std::vector<std::vector<int>>{{1}, {11}, {21}, {31}, {41}, {51}, {61}, {71}});
+
+        std::vector<std::shared_ptr<BatchScheduler::Chunk>> wave = scheduler.scheduleWave(1, 8);
+        MNNTEST_ASSERT(wave.size() == 2);
+        MNNTEST_ASSERT(wave[0]->pipelineId == 0);
+        MNNTEST_ASSERT(wave[1]->pipelineId == 1);
+        MNNTEST_ASSERT(wave[0]->reqId.size() == 4);
+        MNNTEST_ASSERT(wave[1]->reqId.size() == 4);
+        MNNTEST_ASSERT(wave[0]->reqId.front() == reqIds.front());
+        MNNTEST_ASSERT(wave[1]->reqId.front() == reqIds[4]);
+        return true;
+    }
+};
+
+class BatchSchedulerRequestTimingTest : public MNNTestCase {
+public:
+    virtual bool run(int precision) {
+        BatchScheduler scheduler;
+        scheduler.setMaxNewTokens(2);
+        const int reqId = scheduler.addRequest(std::vector<int>{1});
+        BatchScheduler::RequestTiming timing;
+        MNNTEST_ASSERT(scheduler.getRequestTiming(reqId, timing));
+        MNNTEST_ASSERT(timing.registeredUs > 0);
+        MNNTEST_ASSERT(timing.firstTokenUs == 0);
+        MNNTEST_ASSERT(timing.completedUs == 0);
+
+        MNNTEST_ASSERT(scheduler.schedule(1, 1) != nullptr);
+        MNNTEST_ASSERT(scheduler.update(reqId, 2, 1, false));
+        MNNTEST_ASSERT(scheduler.getRequestTiming(reqId, timing));
+        MNNTEST_ASSERT(timing.firstTokenUs >= timing.registeredUs);
+        MNNTEST_ASSERT(timing.completedUs == 0);
+
+        MNNTEST_ASSERT(scheduler.schedule(1, 1) != nullptr);
+        MNNTEST_ASSERT(scheduler.update(reqId, 3, 1, false));
+        MNNTEST_ASSERT(scheduler.getRequestTiming(reqId, timing));
+        MNNTEST_ASSERT(timing.completedUs >= timing.firstTokenUs);
+        MNNTEST_ASSERT(timing.completionTokens == 2);
         return true;
     }
 };
@@ -417,10 +485,13 @@ MNNTestSuiteRegister(BatchSchedulerDualPipelineMultiRequestSplitTest, "llm/batch
 MNNTestSuiteRegister(BatchSchedulerDualPipelineFourRequestPartitionTest, "llm/batch_scheduler_dual_pipeline_four_request_partition");
 MNNTestSuiteRegister(BatchSchedulerDualPipelineSingleTokenPrefillTest, "llm/batch_scheduler_dual_pipeline_single_token_prefill");
 MNNTestSuiteRegister(BatchSchedulerDualPipelineScheduleWaveTest, "llm/batch_scheduler_dual_pipeline_schedule_wave");
+MNNTestSuiteRegister(BatchSchedulerDualPipelineClearPendingWaveTest, "llm/batch_scheduler_dual_pipeline_clear_pending_wave");
 MNNTestSuiteRegister(BatchSchedulerDualPipelineSingleRequestScheduleWaveTest, "llm/batch_scheduler_dual_pipeline_single_request_schedule_wave");
 MNNTestSuiteRegister(BatchSchedulerDualPipelinePipelinePersistenceTest, "llm/batch_scheduler_dual_pipeline_pipeline_persistence");
 MNNTestSuiteRegister(BatchSchedulerDualPipelineSplitCountClampTest, "llm/batch_scheduler_dual_pipeline_split_count_clamp");
 MNNTestSuiteRegister(BatchSchedulerDualPipelineThreeRequestWaveTest, "llm/batch_scheduler_dual_pipeline_three_request_wave");
+MNNTestSuiteRegister(BatchSchedulerDualPipelineEightRequestWaveTest, "llm/batch_scheduler_dual_pipeline_eight_request_wave");
+MNNTestSuiteRegister(BatchSchedulerRequestTimingTest, "llm/batch_scheduler_request_timing");
 MNNTestSuiteRegister(BatchSchedulerDualPipelineSkipWaveTest, "llm/batch_scheduler_dual_pipeline_skip_wave");
 MNNTestSuiteRegister(EagleDraftLaneKVIsolationTest, "llm/eagle_draft_lane_kv_isolation");
 MNNTestSuiteRegister(EagleDraftLaneKVResetCleanupTest, "llm/eagle_draft_lane_kv_reset_cleanup");

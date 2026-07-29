@@ -57,7 +57,6 @@ public:
 
     struct GraphRequest {
         GraphAction action;
-        int requestId;
         int pipelineId;
         int graphIndex;
         int shapeIndex;
@@ -139,7 +138,6 @@ public:
     bool leaveGraphStage(int pipelineId, int graphIndex);
     void cancelGraphPrefetchWave();
     bool finishGraphPrefetchWave();
-    size_t releaseRequestGraphs(int requestId);
     GraphWindowSnapshot graphWindowSnapshot() const;
 
     bool beginStageWave(const std::vector<int>& pipelineIds);
@@ -162,7 +160,6 @@ private:
     struct GraphState {
         GraphRecord record;
         GraphRequest lastRequest;
-        std::set<int> requestOwners;
         bool loadFinished;
 
         GraphState();

@@ -19,14 +19,14 @@
            |      |
            |      +-> `Llm::set_config()`          CLI 覆盖 JSON
            |      +-> `Llm::load()`                校验 mode/packed attention
-           |             `transformers/llm/engine/src/llm.cpp:625`
+           |             `transformers/llm/engine/src/llm.cpp:622`
            |             |
            |             +-> `prepareDualPipelineExecutionState()`  仅 dual
            |             +-> `refreshDualPipelineGraphSnapshot()`
            |             +-> 锁定 startup-only mode
            |
            +-> `MnncliServer::Start(..., llm->scheduler_mode())`
-                  `apps/mnncli/src/mnncli_server.cpp:520`
+                  `apps/mnncli/src/mnncli_server.cpp:550`
                   |
                   +-> `/v1/models`                 readiness
                   +-> `/v1/chat/completions`
@@ -37,14 +37,14 @@
                          +-> worker thread
                          |      |
                          |      +-> `single_request`
-                         |      |      `Llm::response()`
+                         |      |      `Llm::generate_init()` + `generate()`
                          |      |        -> token text -> `Task::append()`
                          |      |
                          |      +-> `continuous_batch` / `dual_pipeline`
                          |             2 ms 合批，最多 4 个同 max_tokens 请求
                          |             -> tokenize
                          |             -> `Llm::generate(batch)`
-                         |                    `transformers/llm/engine/src/llm.cpp:1271`
+                         |                    `transformers/llm/engine/src/llm.cpp:1281`
                          |                    |
                          |                    +-> packed AR / non-dual Eagle
                          |                    |      `Generation::generateBatch()`
@@ -107,7 +107,7 @@
 | Android QNN runtime | `/data/local/tmp/mnn-qnn`，原目录只复用，不复制、不删除 |
 | Eagle3 覆盖 | 主机单元测试、编译和导出路径；没有 Android Eagle3 实测 |
 
-本文只描述当前可从源码或验证产物证明的行为。目标策略中的 `1/32/256/512`、W4 channel-wise 和 OpenCL attention 已进入导出默认值，但不能反向改写现有 `1/8/128` 设备模型的事实。
+本文只描述当前可从源码或验证产物证明的行为。QNN 组件导出固定使用 `1/32/256/512` 和 OpenCL Host backend；W4、channel-wise、smooth quant 等通用 LLM 导出策略保持显式 opt-in，不能反向改写现有 `1/8/128` 设备模型的事实。
 
 ## 2. 配置选择与启动锁定
 
@@ -115,7 +115,7 @@
 
 | `scheduler_mode` | 服务队列 | LLM 调用 | packed attention |
 |---|---|---|---|
-| `single_request` | 每次取 1 个 task | `Llm::response()` | 不强制 |
+| `single_request` | 每次取 1 个 task | `Llm::generate_init()` + `generate()` | 不强制 |
 | `continuous_batch` | 2 ms 窗口，最多 4 个 task | `Llm::generate(batch)` | 强制开启 |
 | `dual_pipeline` | 与 continuous 相同的 HTTP 合批 | dual AR/Eagle batch + 两 lane | 强制开启 |
 
@@ -185,11 +185,11 @@ ChunkState next_chunk(std::string& chunk) {
 }
 ```
 
-待执行任务取消时，`cancel()` 直接从 `mPending` 删除并完成 task。已经进入 engine 的任务设置 `cancelled`，`append()` 会丢弃后续文本；100 ms 的 `Pending` 状态让 SSE provider 在 batch 尚未发布结果时也能检查 `DataSink::is_writable()`。当前公开 LLM API 没有 per-request abort，所以底层 `response()` / `generate()` 仍在当前安全边界自然返回。
+待执行任务取消时，`cancel()` 直接从 `mPending` 删除并完成 task。已经进入 engine 的任务设置 `cancelled`，`append()` 会丢弃后续文本；100 ms 的 `Pending` 状态让 SSE provider 在 batch 尚未发布结果时也能检查 `DataSink::is_writable()`。服务通过原子 `requestCancel()` 通知 engine，生成线程在 token/chunk/wave 边界把它转换成 `USER_CANCEL`，不从 HTTP 线程直接写 `LlmContext`。多成员 batch 只有全部成员取消时才整体停止；单成员取消仍只抑制该成员输出，因为 engine 尚无 per-request abort/KV rollback API。
 
 ### 3.2 single 与 batch 的输出时机不同
 
-`single_request` 把 `Llm::response()` 的文本回调送进 `Utf8StreamProcessor`，每个合法 UTF-8 文本片段立即进入 `Task::chunks`。
+`single_request` 在 coordinator 中显式执行 `generate_init()` 和 `generate()`，把文本回调送进 `Utf8StreamProcessor`；每个合法 UTF-8 文本片段立即进入 `Task::chunks`，取消 flag 在下一生成边界被消费。
 
 `continuous_batch` 和 `dual_pipeline` 则先完成一次 `Llm::generate(batch)`，然后逐请求解码完整 token vector，再追加一个聚合文本 chunk：
 
@@ -214,7 +214,7 @@ void runBatch(const std::vector<std::shared_ptr<Task>>& tasks) {
 
 `/v1/chat/completions` 先 `submit()`。非流式请求等待 task，返回 OpenAI JSON 和真实 `prompt_tokens/completion_tokens`。SSE 路径先循环 `next_chunk()`，成功完成后才写 `finish_reason=stop` 和 `[DONE]`；连接不可写或写失败时立即取消 task。
 
-关键顺序位于 `apps/mnncli/src/mnncli_server.cpp:631-685`：
+关键顺序位于 `apps/mnncli/src/mnncli_server.cpp:661-713`：
 
 ```text
 submit
@@ -253,14 +253,14 @@ std::vector<std::shared_ptr<BatchScheduler::Chunk>> BatchScheduler::scheduleWave
 
 ### 4.3 AR batch 分支
 
-`Llm::generate(batch)` 的入口分支在 `transformers/llm/engine/src/llm.cpp:1271-1284`：
+`Llm::generate(batch)` 的入口分支在 `transformers/llm/engine/src/llm.cpp:1281-1294`：
 
 ```cpp
-// transformers/llm/engine/src/llm.cpp:1271
+// transformers/llm/engine/src/llm.cpp:1281
 std::vector<std::vector<int>> Llm::generate(
     const std::vector<std::vector<int>>& input_ids, std::ostream* os, int max_new_tokens) {
     if (!mConfig->packed_attention() && !mConfig->dual_pipeline_mode()) {
-        // ... reject unsupported batch ...
+        // ... sequential single-request fallback ...
     }
     if (!mConfig->dual_pipeline_mode() || mConfig->speculative_type() == "eagle") {
         return mGenerationStrategy->generateBatch(input_ids, os, max_new_tokens);
@@ -325,7 +325,7 @@ Eagle target wave 和 AR dual 使用同一个 `DualPipelineScheduler` 接口。`
 `DualPipelineScheduler` 为每个 wave 保存两个 ready queue 和两个 active counter。授予逻辑很小：
 
 ```cpp
-// transformers/llm/engine/src/DualPipelineScheduler.cpp:527
+// transformers/llm/engine/src/DualPipelineScheduler.cpp:514
 void DualPipelineScheduler::_grantReadyStagesLocked() {
     if (mActiveHostStages == 0 && !mHostReadyStages.empty()) {
         // ... grant one Host waiter ...
@@ -360,7 +360,7 @@ command callback 根据当前 graph snapshot 中导出的 QNN plugin op 名称�
 构造 graph request 时保留外部选择信息：
 
 ```cpp
-// transformers/llm/engine/src/DualPipelineGraph.cpp:576
+// transformers/llm/engine/src/DualPipelineGraph.cpp:575
 std::vector<DualPipelineScheduler::GraphRequest> buildQnnGraphRequestsForSize(
     const GraphSnapshot& snapshot, int start, int maxK, int reqId, int requestGroupSize) {
     std::vector<DualPipelineScheduler::GraphRequest> requests;
@@ -393,7 +393,7 @@ loader 从可运行任务中按“距当前 cursor 的距离、pipeline id、入
 
 graph complete 只减少 `activeUseCount`，不会立即销毁 executor。加载新 graph 达到 `maxResidentGraphs` 时，LRU 只选择 resident、未 pinned、activeUseCount 为 0 的记录；没有安全候选时 resident limit 是软水位，当前活跃图不会被强制释放。
 
-请求结束调用 `releaseRequestGraphs()` 清除 owner metadata。scheduler stop 则对所有 resident graph 发出强制 release，并最终清空 QNN raw pool。
+请求结束释放 lane-local KV；graph residency 只由 pin、`activeUseCount` 和 LRU 管理。scheduler stop 对所有 resident graph 发出强制 release，并最终清空 QNN raw pool。
 
 设备上的 bucket-128 combined binary 无法同时保留 30 个 context：旧配置在 graph12/13 返回 QNN validate 1002。最终正确性配置使用 `maxResidentGraphs=2`、`prefetchWindow=0`；16-token HTTP prefill（从 `1/8/128` 可用集合推导为 128 bucket）、dual HTTP 和三请求真实 QNN 路径均通过。这里的结论是“有界 resident 能满足正确性”，不是吞吐最优值。
 
@@ -433,7 +433,7 @@ bool compute(CPUKernelContext* ctx) override {
 
 ```text
 `llmexport.py`
-  W4 / channel-wise 默认
+  W4 / channel-wise / smooth quant 显式 opt-in
     -> `generate_llm_qnn.py`
        固定 bucket `1/32/256/512`，默认 Host attention backend 为 OpenCL
        -> `generateLlmIO`
@@ -455,14 +455,15 @@ bool compute(CPUKernelContext* ctx) override {
 | 场景 | 当前行为 | 回收边界 |
 |---|---|---|
 | queued HTTP task 取消 | 立即从 `mPending` 删除 | task 完成，engine 不会看到请求 |
-| executing single 取消 | 立即停止发布文本 | 当前 `Llm::response()` 返回后 coordinator idle |
-| executing batch/dual 取消 | provider 100 ms 检查断开，该 task 不再解码/append | 整个 `generate(batch)` 返回后完成 batch |
+| executing single 取消 | 立即停止发布文本并设置原子 cancel flag | engine 在下一个 token/chunk 边界进入 `USER_CANCEL` |
+| executing batch/dual 全部成员取消 | 设置原子 cancel flag | engine 在下一个 chunk/wave 边界结束并统一回收 |
+| executing batch/dual 单成员取消 | 该 task 不再解码/append，其他成员继续 | batch 完成后回收；无单成员 KV rollback |
 | module 输出失败 | 取消 stage wave 和 graph wave | join worker 后统一 finish/cleanup |
 | QNN graph load 失败 | resident=false，唤醒等待者并使 wave 失败 | active/pin 状态清理 |
 | graph 跳过 | 删除 pending load，登记 complete | wave 尾部清理未执行窗口 |
 | scheduler stop | join loader，强制 release resident graph | QNN raw pool 最终清空 |
 
-这里最重要的边界是“服务取消可见性”与“engine 抢占”不同。当前实现完成了前者，没有添加不存在的 per-request KV rollback 或 kernel abort API。
+这里最重要的边界是 token/wave 边界取消不等于 kernel 抢占。当前实现不会从服务线程并发修改 `LlmContext`，也不会为取消一个成员而错误终止整个 batch；per-request KV rollback 和执行中 kernel abort 仍不存在。
 
 ## 9. 验收 trace
 
@@ -479,6 +480,8 @@ trace 默认关闭，仅当 `MNN_ACCEPTANCE_TRACE` 是非空且不是 `0` 时写
 trace 不参与调度决策，不开启时只保留一次环境变量判断后的快速返回。
 
 ## 10. Android 三模式实测
+
+### 10.1 CPU Host + QNN Plugin
 
 设备是 arm64/V79，模型为 `/data/local/tmp/qnn_fixed_s1_8_128/` 的 AR QNN 产物。最终矩阵在独立 GSM8K 100 题任务自然结束后执行；每个模式只生成 1-4 token，取消用例客户端在 1 秒主动断开，没有再跑 100 题。计时用于说明请求确实完成，不作为并发性能结论。
 
@@ -504,6 +507,35 @@ MNN_ACCEPTANCE_TRACE=1 \
 
 attached 模型是 combined-binary 旧格式，`qnn_bucket` trace 为 `shape_index=-1 bucket=-1`。`1/8/128` 是模型 metadata 的实际 bucket 集合；长 prompt 需要的 128 bucket 是从 packed length 和可用 bucket 推导，不伪装成 trace 直接观测值。
 
+### 10.2 OpenCL Host + QNN Plugin
+
+在同一设备和模型上又执行了一轮轻量 OpenCL 验收。三份配置只把 `backend_type` 改为 `opencl`；`transformers/llm/engine/src/llm.cpp:135` 将它转换为 `MNN_FORWARD_OPENCL`，continuous/dual 继续启用 packed attention，dual 继续使用 resident=2/prefetch=0。本轮没有运行 GSM8K 或性能 benchmark，耗时不作为性能证据。
+
+| 模式 | JSON / SSE | 并发语义 | 取消与恢复 | dual stage | 结果 |
+|---|---|---|---|---|---|
+| `single_request` | HTTP 200、非空 JSON、SSE finish + `[DONE]` | 3 请求的 start/complete 区间严格串行 | executing cancel，输出 0 byte；后续健康请求通过 | 不适用 | 通过 |
+| `continuous_batch` | 同上；明确为 batch 完成后交付 | 请求 4/5 进入同一个 `request_count=2` batch | executing cancel，输出 0 byte；后续健康请求通过 | 不适用 | 通过 |
+| `dual_pipeline` | 同上；明确为 batch 完成后交付 | 请求 4/5 分属 lane 0/1，完成 4 个双 lane wave | executing cancel，输出 0 byte；后续健康请求通过 | 22 份 summary 均为 Host<=1、QNN<=1；3 份 `overlap_grants=28` | 通过 |
+
+三轮日志均未出现 `INTERNAL_ERROR`、崩溃、OpenCL build/kernel 错误或 QNN validate/execute 错误。combined-binary 模型的 `shape_index=-1 bucket=-1` 边界与 CPU Host 验收相同；这里证明的是 OpenCL Host attention/算子路径和 QNN Plugin 组合可运行，不是纯 OpenCL-only 模型，也不把 bucket 推导写成直接 trace 结果。
+
+### 10.3 纯 CPU/OpenCL Host 模型
+
+为排除 QNN Plugin 影响，第三轮改用设备已有的 `/data/local/tmp/Qwen3-1.7B-MNN-int4`。其 `llm.mnn.json` 结构统计为 28 个原生 `Attention`、0 个 `Plugin`、0 个含 `qnn` 的 op；`export_args.json` 同时记录 `generate_for_npu=false`。验收进程只设置 staging 自身的 `LD_LIBRARY_PATH`，没有设置 `/data/local/tmp/mnn-qnn` 或 `ADSP_LIBRARY_PATH`。
+
+配置中的 `backend_type` 仍由 `transformers/llm/engine/src/llm.cpp:128` 的 `backend_type_convert()` 转换；dual 初始化在 `transformers/llm/engine/src/llm.cpp:455` 得到空的 QNN graph request 集合，实际 wave 在 `transformers/llm/engine/src/llm.cpp:1389` 保持 Host-only。对应的 2x3 轻量矩阵如下：
+
+| backend | 模式 | JSON / SSE | 并发语义 | 取消与恢复 | Host-only dual trace | 结果 |
+|---|---|---|---|---|---|---|
+| CPU | `single_request` | HTTP 200、非空 JSON、SSE finish + `[DONE]` | 3 请求严格串行 | executing cancel；断开前已输出 12 byte，后续健康通过 | 不适用 | 通过 |
+| CPU | `continuous_batch` | 同上；batch 完成后交付 | 请求 3/4 同一 `request_count=2` batch | executing cancel，输出 0 byte；健康通过 | 不适用 | 通过 |
+| CPU | `dual_pipeline` | 同上；batch 完成后交付 | 两成员 batch 使用 lane 0/1 | executing cancel，输出 0 byte；健康通过 | 49 份 summary：`max_host=1`、`max_qnn=0`、`qnn_completed=0` | 通过 |
+| OpenCL | `single_request` | HTTP 200、非空 JSON、SSE finish + `[DONE]` | 3 请求严格串行 | executing cancel；断开前已输出 76 byte，后续健康通过 | 不适用 | 通过 |
+| OpenCL | `continuous_batch` | 同上；batch 完成后交付 | 请求 3/4 同一 `request_count=2` batch | executing cancel，输出 0 byte；健康通过 | 不适用 | 通过 |
+| OpenCL | `dual_pipeline` | 同上；batch 完成后交付 | 请求 4/5 使用 lane 0/1 | executing cancel，输出 0 byte；健康通过 | 41 份 summary：`max_host=1`、`max_qnn=0`、`qnn_completed=0` | 通过 |
+
+single 的累计 `response_bytes` 包含断开前已经合法发布的实时 SSE chunk；continuous/dual 在 batch 完成前不发布结果，因此取消时为 0。六轮日志都没有 QNN runtime、DSP、OpenCL build/kernel、`INTERNAL_ERROR` 或崩溃标记。本轮仍只验证正确性，不把耗时写成性能结论。
+
 磁盘门禁：
 
 | 项目 | 验收前 | 验收后 |
@@ -512,6 +544,9 @@ attached 模型是 combined-binary 旧格式，`qnn_bucket` trace 为 `shape_ind
 | model 目录 | 3.2 GiB | 3.2 GiB，未修改 |
 | QNN runtime 目录 | 4.4 GiB | 4.4 GiB，未修改 |
 | acceptance staging | 0 | 13 MiB（`mnncli`、静态 demo、三配置和摘要），低于 256 MiB |
+| OpenCL staging | 0 | 6.5 MiB（`mnncli` 和 1 KiB 摘要；中间配置已删除），低于 256 MiB |
+| pure Host model | 1.0 GiB | 1.0 GiB，原地复用、未修改 |
+| pure Host staging | 0 | 6.5 MiB（`mnncli` 和摘要；中间配置已删除），低于 256 MiB |
 
 ## 11. 验证证据
 
@@ -519,13 +554,15 @@ attached 模型是 combined-binary 旧格式，`qnn_bucket` trace 为 `shape_ind
 
 | 检查 | 结果 |
 |---|---|
-| focused `llm` + `run_test.out llm` | 38/38 通过 |
+| focused `llm` + `run_test.out llm` | 本轮重建后 37/37 通过；删除 1 个无行为作用的 owner-metadata 自测试 |
 | `run_test.out op/packed_attention` | 1/1 通过 |
 | trace stage test | `host=1, qnn=1, overlap=1, max_host=1, max_qnn=1` |
 | Android service build | `apps/mnncli/build.sh --android-service`，NDK r29，arm64，Release，8 jobs，成功 |
 | deployable `mnncli` | stripped 6.6 MiB PIE |
 | 动态依赖 | 仅 `libdl.so`、`libm.so`、`libc.so` |
 | Android 三模式 HTTP | JSON、SSE、并发、执行中取消、健康全部通过 |
+| Android OpenCL Host 三模式 HTTP | 同一轻量矩阵全部通过；dual lane/overlap/Host<=1/QNN<=1 trace 通过 |
+| Android 纯 CPU/OpenCL 2x3 HTTP | 六组合全部通过；模型 0 Plugin，dual `max_qnn=0`、`qnn_completed=0` |
 | Android dual QNN demo | 静态 6.0 MiB demo，3 请求/2 lane/30 graph，退出 0 |
 | Python exporter | `py_compile` 与 `--help` 通过 |
 | `compilefornpu.cpp` | translation-unit compile 通过 |
@@ -547,7 +584,7 @@ attached 模型是 combined-binary 旧格式，`qnn_bucket` trace 为 `shape_ind
 | `apps/mnncli/src/handlers/serve_command_handler.cpp` | 直接 load/start | 校验 mode、传 override、报告 load 失败 | `CreateLLM(...,mode)` | `mnncli serve` | CLI 优先级与错误反馈可验证 |
 | `apps/mnncli/src/llm_manager.cpp` | runtime config 后直接 load | 在 load 前 merge mode，传播失败 | startup override | serve handler | 非法/缺 packed 配置启动失败 |
 | `apps/mnncli/src/mnncli.cpp` | 完整 CLI 注册 | service-only 时仅注册本地 serve 依赖，更新 help | compile-time service surface | app main | 默认 CLI 不变；Android service 可独立链接 |
-| `apps/mnncli/src/mnncli_server.cpp` | handler 直接串行调用 LLM，SSE 等完整结果 | coordinator queue、实时 chunk、batch、100 ms 连接轮询、取消、usage、trace | `submit/cancel/reset`、三态 Task chunk API | HTTP routes | 三模式 JSON/SSE/并发/执行中取消均在 Android 通过 |
+| `apps/mnncli/src/mnncli_server.cpp` | handler 直接串行调用 LLM，SSE 等完整结果 | coordinator queue、实时 chunk、batch、100 ms 连接轮询、原子 engine 取消、usage、trace | `submit/cancel/reset`、三态 Task chunk API | HTTP routes | 既有三模式 Android 验收通过；本轮 host 构建验证取消 API |
 
 ### 12.2 Runtime、QNN 与导出
 
@@ -561,21 +598,21 @@ attached 模型是 combined-binary 旧格式，`qnn_bucket` trace 为 `shape_ind
 | `tools/cpp/compilefornpu.cpp` | QNN plugin 写单 path | 写 `allGraphPath`，跳过实际 Attention op，启用 separate graph | Plugin metadata/post config | QNN converter | Attention 留 Host/OpenCL，FFN graph 可分 bucket |
 | `transformers/llm/engine/include/llm/DualPipelineGraph.hpp` | graph snapshot 基础字段 | 增加 per-shape path/bucket metadata helper | `bucketSizes/graphPaths` | Llm、tests | runtime 可选择单 shape binary |
 | `transformers/llm/engine/include/llm/DualPipelineScheduler.hpp` | graph/stage API | GraphRequest 增加 shape/bucket，snapshot 增加 max Host | struct 字段 | graph builder、trace、tests | trace 可报告真实 bucket 与 Host 不变量 |
-| `transformers/llm/engine/include/llm/llm.hpp` | legacy dual 配置入口 | 公开 scheduler mode，增加启动锁与 dual helpers | `scheduler_mode()` | mnncli、generation | 模式在 load 后稳定 |
+| `transformers/llm/engine/include/llm/llm.hpp` | legacy dual 配置入口 | 公开 scheduler mode、原子取消入口，增加启动锁与 dual helpers | `scheduler_mode()`、`requestCancel()` | mnncli、generation | 模式在 load 后稳定；取消由生成线程消费 |
 | `transformers/llm/engine/include/llm/AcceptanceTrace.hpp` | 不存在 | 新增默认关闭 trace helper | `enabled/nowMicros/log` | service/scheduler/LLM | 无独立 metrics subsystem；环境开关测试通过 |
 | `transformers/llm/engine/src/BatchScheduler.cpp` | dual split/schedule 基础 | trace lane owner，skip-aware wave | `scheduleWave(...,skipReqIds)` | AR/Eagle batch | 真实请求所有权可验收 |
 | `transformers/llm/engine/src/DualPipelineGraph.cpp` | snapshot 与 QNN request 基础 | 合并 execution/model order，选 compatible bucket/path | graph request builders | Llm/Eagle | per-lane bucket 选择与 oversized 拒绝测试 |
 | `transformers/llm/engine/src/DualPipelineScheduler.cpp` | cursor/stage/resident 调度 | trace bucket/stage/lane，Host max counter | snapshot/trace fields | runtime callbacks/tests | Host/QNN<=1 与 overlap 可观测 |
-| `transformers/llm/engine/src/llm.cpp` | dual AR runtime | 三模式校验、lane resources、bucket module、KV 同步、trace | `scheduler_mode()`、dual wave helpers | mnncli/Generation | AR dual 真实执行主线；38 tests |
+| `transformers/llm/engine/src/llm.cpp` | dual AR runtime | 三模式校验、lane resources、bucket module、KV 同步、取消、trace | `scheduler_mode()`、dual wave helpers | mnncli/Generation | dual AR 每请求恢复默认 token budget；37 tests |
 | `transformers/llm/engine/src/llmconfig.hpp` | legacy dual bool | canonical scheduler mode + packed requirement | config accessors | `Llm::load()`/server | JSON/legacy/invalid tests |
-| `transformers/llm/engine/src/speculative_decoding/eagle.cpp` | single Eagle | packed batch所需的 draft/hidden/KV 支持 | Eagle internal methods | Eagle generation | Eagle3 batch 编译路径 |
+| `transformers/llm/engine/src/speculative_decoding/eagle.cpp` | single Eagle | packed batch所需的 draft/hidden/KV 支持，修正 token budget 与 terminal KV/context commit | Eagle internal methods | Eagle generation | 不再把 step 统计值写成 token；Eagle3 编译路径通过 |
 | `transformers/llm/engine/src/speculative_decoding/eagle_batch.cpp` | Eagle packed batch 基础 | dual target wave、lane KV/module、draft/base 协同 | `EagleGeneration::generateBatch()` | `Llm::generate(batch)` | Host unit/compile evidence，非 Android claim |
 | `transformers/llm/engine/src/speculative_decoding/generate.cpp` | continuous AR 使用原始 packed length | embedding、position id、module key 按 QNN compatible bucket padding | `ArGeneration::generateBatch()` 内部 shape | continuous batch | attached `1/8/128` 模型的 continuous HTTP 通过 |
 | `transformers/llm/engine/src/speculative_decoding/generate.hpp` | generation strategy 接口 | 扩展 batch/Eagle data structures 和 override | `generateBatch()` | Llm、AR/Eagle | 三模式共用 batch dispatch |
 | `transformers/llm/engine/src/speculative_decoding/tokentree.hpp` | 全节点排序截断 | leaf-only prune 后重建 mask/path | `finalize()` 行为 | Eagle batch | TokenTree regression 通过 |
 | `transformers/llm/engine/tools/generateLlmIO.cpp` | 单一模型/shape IO 生成 | target/eagle/eagle_fc 组件与多 bucket IO | CLI component/buckets | QNN export script | `1/32/256/512` export 输入 |
-| `transformers/llm/export/llmexport.py` | W4 block 64、lm head 策略不同 | W4 channel-wise，lm head 默认 16 bit | exporter defaults | 模型导出命令 | Python syntax/help 通过 |
-| `transformers/llm/export/npu/generate_llm_qnn.py` | 单组件/旧默认流程 | 三组件导出、固定 bucket、OpenCL runtime config | component export CLI | QNN offline workflow | py_compile/help 通过；未宣称设备 Eagle |
+| `transformers/llm/export/llmexport.py` | 通用量化默认 block 64，其余策略 opt-in | 保持通用默认，不把 QNN 目标变成全局默认 | 无接口变化 | 模型导出命令 | `py_compile` 通过；help 缺主机 `onnx` 依赖 |
+| `transformers/llm/export/npu/generate_llm_qnn.py` | 单组件/旧默认流程 | 必需三组件完整导出、固定 bucket、OpenCL runtime config | full component export CLI | QNN offline workflow | 不再生成引用缺失组件的配置；未宣称设备 Eagle |
 
 ### 12.3 Demo 与测试
 
@@ -584,7 +621,7 @@ attached 模型是 combined-binary 旧格式，`qnn_bucket` trace 为 `shape_ind
 | `transformers/llm/engine/CMakeLists.txt` | llm/demo targets | 注册 `spec_eval` 等新源 | build target | CMake | focused build 成功 |
 | `transformers/llm/engine/demo/llm_demo.cpp` | 普通/已有 batch demo | 增加 dual batch/throughput 入口；正确性模式保留配置 resident 并执行 tuning | `--dual-batch-test` 等 | Android acceptance | resident=2 三请求真实 QNN test 退出 0 |
 | `transformers/llm/engine/demo/spec_eval.cpp` | 不存在 | Eagle3 speculative evaluation demo | `spec_eval` CLI | host evaluation | target 编译通过 |
-| `test/llm/BatchSchedulerTest.cpp` | 基础 scheduler tests | 增加 dual 分组、wave、lane 稳定和 skip tests | test cases | `run_test.out llm` | 38/38 suite 的一部分 |
+| `test/llm/BatchSchedulerTest.cpp` | 基础 scheduler tests | 增加 dual 分组、wave、lane 稳定和 skip tests | test cases | `run_test.out llm` | 37/37 suite 的一部分 |
 | `test/llm/DualPipelineGraphTest.cpp` | graph metadata tests | per-shape path、bucket/shape、order merge tests | test cases | `run_test.out llm` | bucket 选择与 metadata 通过 |
 | `test/llm/DualPipelineStageSchedulerTest.cpp` | stage overlap tests | 增加 Host max invariant | snapshot assertion | `run_test.out llm` | trace focus 为 max_host=1/max_qnn=1 |
 | `test/llm/SchedulerModeConfigTest.cpp` | 不存在 | legacy/explicit/invalid mode tests | 3 test cases | `run_test.out llm` | config 分支通过 |
@@ -600,11 +637,11 @@ attached 模型是 combined-binary 旧格式，`qnn_bucket` trace 为 `shape_ind
 ## 13. 当前实现与目标方案的差异
 
 1. batch/dual SSE 是 batch 完成后交付，不是逐 token streaming。
-2. SSE 每 100 ms 检查断开并停止输出，但 in-flight HTTP 取消不会抢占正在执行的 LLM batch/kernel。
+2. SSE 每 100 ms 检查断开；single 或整个 active batch 取消会在下一个 token/chunk/wave 边界结束，但不会抢占正在执行的 kernel，多成员 batch 也不支持单成员 engine abort。
 3. dual lane 在一个 wave 内并发，下一 wave 仍等待两 lane join；没有即时 lane-completion admission 或请求迁移。
 4. coordinator 的 continuous batch 是固定 2 ms 小窗口和最大 4 请求，不是长期驻留、逐 token admission 的 continuous batching engine。
 5. QNN stage 串行，Host stage 也限制为 1；收益来自 Host/QNN 跨 lane overlap，不是两个 QNN graph 同时执行。
-6. 新导出默认目标是 `1/32/256/512`，本轮 Android 模型实际只有 `1/8/128`。
+6. QNN 组件导出的固定目标是 `1/32/256/512`，本轮 Android 模型实际只有 `1/8/128`；通用 LLM exporter 不继承这些默认策略。
 7. attached combined-binary 模型的 trace 没有 shape/path metadata，bucket 字段是 `-1/-1`；新 per-shape 导出才可直接 trace bucket。
 8. Android 验收覆盖 AR。Eagle3 当前只有主机测试、编译和导出证据。
 
@@ -615,4 +652,4 @@ attached 模型是 combined-binary 旧格式，`qnn_bucket` trace 为 `shape_ind
 - `BatchScheduler::scheduleWave()` 提供互斥 lane chunk，AR/Eagle generation 负责 lane-local Module、Runtime 和 KV 同步。
 - `DualPipelineScheduler` 把 graph window 与 Host/QNN stage 分开管理，保证 Host/QNN 各自最多一个并允许二者 overlap。
 - QNN 链路从 per-shape export metadata 走到 resident raw executor；combined cache miss 使用 transient executor，设备 bucket 必须按现有 `1/8/128` 产物报告。
-- 下一步阅读入口是 `apps/mnncli/src/mnncli_server.cpp:18`、`transformers/llm/engine/src/llm.cpp:1271`、`transformers/llm/engine/src/speculative_decoding/eagle_batch.cpp:925` 和 `transformers/llm/engine/src/DualPipelineScheduler.cpp:223`。
+- 下一步阅读入口是 `apps/mnncli/src/mnncli_server.cpp:19`、`transformers/llm/engine/src/llm.cpp:1281`、`transformers/llm/engine/src/speculative_decoding/eagle_batch.cpp:925` 和 `transformers/llm/engine/src/DualPipelineScheduler.cpp:184`。

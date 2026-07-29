@@ -451,24 +451,24 @@ EagleGeneration::AcceptInfo EagleGeneration::evaluatePosterior(const EagleGenera
     return acceptInfo;
 }
 
-EagleGeneration::DraftInfo EagleGeneration::updateDraft(const AcceptInfo& acceptInfo, VARP hiddenStates) {
+void EagleGeneration::commitAcceptedTokens(const AcceptInfo& acceptInfo) {
     int acceptLen = static_cast<int>(acceptInfo.acceptTokens.size());
-    // update base model kv cache
-    {
-        mLlm->updateContext(acceptLen, acceptLen);
-        if (mLlm->mConfig->packed_attention()) {
-            updatePackedBaseKV(acceptInfo);
-        } else {
-            mLlm->mMeta->remove = acceptInfo.sampleTokens.size();
-            mLlm->mMeta->n_reserve = acceptLen;
-            mLlm->mMeta->reserveHost.resize(acceptLen * 2);
-            mLlm->mMeta->reserve = mLlm->mMeta->reserveHost.data();
-            for (int i = 0; i < acceptLen; i++) {
-                mLlm->mMeta->reserve[2 * i] = acceptInfo.acceptIndices[i];
-                mLlm->mMeta->reserve[2 * i + 1] = 1;
-            }
+    mLlm->updateContext(acceptLen, acceptLen);
+    if (mLlm->mConfig->packed_attention()) {
+        updatePackedBaseKV(acceptInfo);
+    } else {
+        mLlm->mMeta->remove = acceptInfo.sampleTokens.size();
+        mLlm->mMeta->n_reserve = acceptLen;
+        mLlm->mMeta->reserveHost.resize(acceptLen * 2);
+        mLlm->mMeta->reserve = mLlm->mMeta->reserveHost.data();
+        for (int i = 0; i < acceptLen; i++) {
+            mLlm->mMeta->reserve[2 * i] = acceptInfo.acceptIndices[i];
+            mLlm->mMeta->reserve[2 * i + 1] = 1;
         }
     }
+}
+
+EagleGeneration::DraftInfo EagleGeneration::updateDraft(const AcceptInfo& acceptInfo, VARP hiddenStates) {
     auto acceptHiddenState = gatherHiddenRows(hiddenStates, acceptInfo.acceptIndices);
     if (acceptHiddenState == nullptr) {
         mContext->status = LlmStatus::INTERNAL_ERROR;
@@ -505,8 +505,20 @@ void EagleGeneration::generate(GenerationParams& param) {
     mContext->history_tokens.push_back(mContext->current_token);
     mContext->output_tokens.push_back(mContext->current_token);
     mLlm->updateContext(0, 1);
-    if (nullptr != mContext->os) {
+    const bool firstTokenStops = mLlm->is_stop(sampleToken);
+    if (firstTokenStops && nullptr != mContext->os) {
+        *mContext->os << mContext->end_with << std::flush;
+    } else if (nullptr != mContext->os) {
         *mContext->os << mLlm->tokenizer_decode(sampleToken) << std::flush;
+    }
+    int newTokens = 1;
+    if (firstTokenStops || newTokens >= param.max_new_tokens) {
+        if (!firstTokenStops) {
+            mContext->status = LlmStatus::MAX_TOKENS_FINISHED;
+        }
+        mContext->decode_us += _t.durationInUs();
+        mBasePendingKV.erase(reqId);
+        return;
     }
     inputIds.push_back(sampleToken);
     VARP hiddenStates = param.outputs[1];
@@ -535,12 +547,10 @@ void EagleGeneration::generate(GenerationParams& param) {
         mContext->status = LlmStatus::INTERNAL_ERROR;
         return;
     }
-    auto newTokens = 0, steps = 0;
     while (true) {
-        if(mContext->status == LlmStatus::USER_CANCEL) {
+        if (mLlm->cancelRequested()) {
             break;
         }
-        steps++;
         mSpecContext.steps++;
         MNN::Timer targetTimer;
         auto decodingInfo = treeDecoding(draftInfo);
@@ -551,11 +561,27 @@ void EagleGeneration::generate(GenerationParams& param) {
         }
         
         auto acceptInfo = evaluatePosterior(draftInfo, decodingInfo[0]);
+        int acceptLimit = 0;
+        bool stop = false;
+        for (int token : acceptInfo.acceptTokens) {
+            ++acceptLimit;
+            if (mLlm->is_stop(token)) {
+                stop = true;
+                break;
+            }
+            if (newTokens + acceptLimit >= param.max_new_tokens) {
+                break;
+            }
+        }
+        if (acceptLimit < static_cast<int>(acceptInfo.acceptTokens.size())) {
+            acceptInfo.acceptTokens.resize(acceptLimit);
+            acceptInfo.acceptIndices.resize(acceptLimit);
+        }
         mSpecContext.target_time_us += targetTimer.durationInUs();
         const int acceptLen = static_cast<int>(acceptInfo.acceptTokens.size());
         mSpecContext.accepted += acceptLen;
         mSpecContext.accept_len_freq[acceptLen]++;
-        newTokens += acceptInfo.acceptTokens.size();
+        newTokens += acceptLen;
         {
             mContext->current_token = acceptInfo.acceptTokens.back();
             for (auto token : acceptInfo.acceptTokens) {
@@ -563,9 +589,9 @@ void EagleGeneration::generate(GenerationParams& param) {
                 mContext->output_tokens.push_back(token);
             }
         }
-        bool stop = processTokens(acceptInfo.acceptTokens);
+        processTokens(acceptInfo.acceptTokens);
+        commitAcceptedTokens(acceptInfo);
         if (stop || newTokens >= param.max_new_tokens) {
-            mContext->output_tokens.push_back(steps);
             break;
         }
         draftTimer.reset();
@@ -580,7 +606,7 @@ void EagleGeneration::generate(GenerationParams& param) {
         mSpecContext.draft += draftInfo.draftTokens.size();
     }
     mContext->decode_us += _t.durationInUs();
-    if(newTokens >= param.max_new_tokens) {
+    if (newTokens >= param.max_new_tokens && mContext->status == LlmStatus::RUNNING) {
         mContext->status = LlmStatus::MAX_TOKENS_FINISHED;
     }
     mBasePendingKV.erase(reqId);

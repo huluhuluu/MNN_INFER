@@ -453,7 +453,7 @@ bool Llm::refreshDualPipelineGraphSnapshot() {
     mDualPipelineGraphSnapshot = mergeQnnGraphSnapshotsInExecutionOrder(executionSnapshot, modelSnapshot);
     mDualPipelineGraphSnapshotReady = !mDualPipelineGraphSnapshot.ops.empty();
     mDualPipelineQnnGraphRequests = buildQnnGraphRequests(
-        mDualPipelineGraphSnapshot, 0, static_cast<int>(mDualPipelineGraphSnapshot.ops.size()), -1);
+        mDualPipelineGraphSnapshot, 0, static_cast<int>(mDualPipelineGraphSnapshot.ops.size()));
     int graphIndex = 0;
     for (size_t i = 0; i < mDualPipelineGraphSnapshot.ops.size(); ++i) {
         const OpInfo& op = mDualPipelineGraphSnapshot.ops[i];
@@ -503,9 +503,6 @@ void Llm::releaseDualPipelineRequestExecution(int requestId) {
         if (runtime.batchMeta) {
             runtime.batchMeta->releaseKV(requestId);
         }
-    }
-    if (mDualPipelineScheduler) {
-        mDualPipelineScheduler->releaseRequestGraphs(requestId);
     }
 }
 
@@ -1125,6 +1122,7 @@ void Llm::reset() {
 
 void Llm::generate_init(std::ostream* os, const char* end_with) {
     // init status
+    mCancelRequested.store(false, std::memory_order_release);
     mContext->os = os;
     if (nullptr != end_with) {
         mContext->end_with = end_with;
@@ -1185,6 +1183,20 @@ void Llm::eraseHistory(size_t begin, size_t end) {
 
 bool Llm::stoped() {
     return is_stop(mContext->current_token);
+}
+
+void Llm::requestCancel() {
+    mCancelRequested.store(true, std::memory_order_release);
+}
+
+bool Llm::cancelRequested() {
+    if (!mCancelRequested.load(std::memory_order_acquire)) {
+        return false;
+    }
+    if (mContext->status != LlmStatus::INTERNAL_ERROR) {
+        mContext->status = LlmStatus::USER_CANCEL;
+    }
+    return true;
 }
 
 void Llm::generate(int max_token) {
@@ -1271,6 +1283,7 @@ std::vector<int> Llm::generate(const std::vector<int>& input_ids, int max_tokens
 std::vector<std::vector<int>> Llm::generate(const std::vector<std::vector<int> >& input_ids, std::ostream* os, int max_new_tokens){
     int bs = input_ids.size();
     std::vector<std::vector<int>> ret(bs, std::vector<int>{});
+    mLastBatchRequestMetrics.assign(bs, LlmBatchRequestMetrics{});
 
     if (!mConfig->packed_attention() && !mConfig->dual_pipeline_mode()) {
         for (int i = 0; i < bs; i++) {
@@ -1294,90 +1307,11 @@ std::vector<std::vector<int>> Llm::generate(const std::vector<std::vector<int> >
         AcceptanceTrace::log("event=batch_engine_member request_id=%d request_scope=engine batch_index=%zu",
                              reqIds[batchIndex], batchIndex);
     }
-    if(max_new_tokens > 0) {
-        mScheduler->setMaxNewTokens(max_new_tokens);
-    }
+    mScheduler->setMaxNewTokens(max_new_tokens > 0 ? max_new_tokens : mConfig->max_new_tokens());
     // set batch kvcache, but actually works in Llm::setRuntimeHint
     mRuntimeManager->setHintPtr(Interpreter::KVCACHE_INFO, mBatchMeta.get());
 
-    if (!mConfig->dual_pipeline_mode()) {
-        // generation loop
-        while (std::shared_ptr<BatchScheduler::Chunk> chunk = mScheduler->schedule(-1, 4)){// chunk prefill
-            const int requiredSize = std::max(chunk->culLen, static_cast<int>(chunk->reqId.size()));
-            const int paddedCulLen = qnnPaddedCulLen(requiredSize);
-            if (paddedCulLen < chunk->culLen) {
-                MNN_ERROR("MNN_QNN: no target graph bucket can hold packed length %d.\n", chunk->culLen);
-                mContext->status = LlmStatus::INTERNAL_ERROR;
-                break;
-            }
-            // prepare inputs
-            Express::VARP hidden_states = this->embedding(chunk->inputs, chunk->calLen, paddedCulLen);
-            Express::VARP attention_mask = this->gen_attention_mask(chunk->calLen);
-            Express::VARP position_ids = this->gen_position_ids(chunk->pos, chunk->calLen, paddedCulLen);
-            Express::VARP logitsIndex = logitsAllIdx;
-            // set KVCache
-            for(int i = 0; i < chunk->pos.size() ; i++) {
-                int req_id = chunk->reqId[i];
-                mBatchMeta->setKVCacheInfo(chunk->reqId[i], chunk->calLen[i], 0, nullptr, 0);
-                mBatchMeta->setKVMetaInfo(req_id, mConfig->layer_nums(), 0, 0, "", KVMeta::NoChange);
-            }
-            auto moduleKey = std::make_pair(paddedCulLen, false);
-            std::shared_ptr<Module> selectModule = mModule;
-            if(mModulePool.find(moduleKey) == mModulePool.end()) {
-                mModulePool[moduleKey].reset(Module::clone(mModule.get()));
-            }
-            selectModule = mModulePool[moduleKey];
-
-            // get all logits
-            // [1, seqLen, hidden]
-            std::vector<Express::VARP> res = selectModule->onForward({hidden_states, attention_mask, position_ids, logitsIndex});
-            if (res.empty() || res[0] == nullptr) {
-                MNN_ERROR("Llm batch generate failed: module forward returned no logits.\n");
-                mContext->status = LlmStatus::INTERNAL_ERROR;
-                break;
-            }
-            Express::VARP logits = _Squeeze(res[0], {0});
-
-            int sumLen = 0;
-            for (int i = 0; i < chunk->pos.size(); ++i) {
-                sumLen += chunk->calLen[i];
-                const bool isPrefill = i < chunk->state.size() && BatchScheduler::judgeState(chunk->state[i], BatchScheduler::RequestState::PREFILL);
-
-                if(isPrefill) {
-                    updateContext(chunk->calLen[i], 0);  // prefill: update all_seq_len
-                    mContext->prompt_len += chunk->calLen[i];
-                }
-
-                // skip prefill - only sample when in decode phase
-                if (isPrefill) {
-                    continue;
-                }
-
-                updateContext(1, 1);  // decode: update all_seq_len and gen_seq_len
-
-                // get logits for request i
-                Express::VARP logit = MNN::Express::_Gather(logits, _Scalar(sumLen - 1));
-                // sample
-                int token  = this->sample(logit);
-
-                int id = chunk->reqId[i];
-                bool requestFinished = false;
-                const int calLen = chunk->calLen[i];
-                mScheduler->update(id, token, calLen, is_stop(token));
-                requestFinished = mScheduler->isFinished(id);
-                if(requestFinished) {
-                    mScheduler->releaseKVCache(id);
-                }
-                if (requestFinished) {
-                    releaseDualPipelineRequestExecution(id);
-                }
-                // print token str
-                // std::cout<<"ReqId: "<<id<<" | token: "<<token<<" | "<<this->tokenizer_decode(token)<<std::endl;
-            }
-            mBatchMeta->sync();
-        }
-    } else {
-        struct DualWaveTask {
+    struct DualWaveTask {
             std::shared_ptr<BatchScheduler::Chunk> chunk;
             std::shared_ptr<Module> module;
             std::shared_ptr<BatchKVMeta> batchMeta;
@@ -1388,9 +1322,12 @@ std::vector<std::vector<int>> Llm::generate(const std::vector<std::vector<int> >
             Express::VARP logitsIndex;
             std::vector<Express::VARP> outputs;
             uint64_t completedUs = 0;
-        };
-        while (true) {
-            std::vector<std::shared_ptr<BatchScheduler::Chunk>> wave = mScheduler->scheduleWave(-1, 4);
+    };
+    while (true) {
+            if (cancelRequested()) {
+                break;
+            }
+            std::vector<std::shared_ptr<BatchScheduler::Chunk>> wave = mScheduler->scheduleWave(-1, 8);
             if (wave.empty()) {
                 break;
             }
@@ -1454,7 +1391,6 @@ std::vector<std::vector<int>> Llm::generate(const std::vector<std::vector<int> >
                     mDualPipelineGraphSnapshot,
                     0,
                     static_cast<int>(mDualPipelineQnnGraphRequests.size()),
-                    -1,
                     tasks[i].paddedCulLen);
                 if (graphWave.graphs.size() != mDualPipelineQnnGraphRequests.size()) {
                     MNN_ERROR("MNN_DUAL_PIPELINE: failed to select target QNN bucket %d.\n",
@@ -1608,13 +1544,33 @@ std::vector<std::vector<int>> Llm::generate(const std::vector<std::vector<int> >
                 break;
             }
         }
+    if (mContext->status == LlmStatus::INTERNAL_ERROR) {
+        mScheduler->clearPendingChunks();
     }
     for(int id: reqIds){
         std::vector<int> result = mScheduler->getResult(id);
+        BatchScheduler::RequestTiming timing;
+        const bool hasTiming = mScheduler->getRequestTiming(id, timing);
         // save result
         for(int j = 0; j < bs; j++) {
             if(reqIds[j] == id) {
                 ret[j] = result;
+                if (hasTiming && timing.registeredUs > 0 && timing.firstTokenUs >= timing.registeredUs &&
+                    timing.completedUs >= timing.firstTokenUs) {
+                    auto& metrics = mLastBatchRequestMetrics[j];
+                    metrics.valid = true;
+                    metrics.model_ttft_us = static_cast<int64_t>(timing.firstTokenUs - timing.registeredUs);
+                    metrics.model_latency_us = static_cast<int64_t>(timing.completedUs - timing.registeredUs);
+                    metrics.completion_tokens = timing.completionTokens;
+                    metrics.model_tpot_us = timing.completionTokens > 1 ?
+                        static_cast<int64_t>((timing.completedUs - timing.firstTokenUs) /
+                                             (timing.completionTokens - 1)) : 0;
+                    AcceptanceTrace::log(
+                        "event=batch_request_metrics request_id=%d request_scope=engine model_ttft_us=%lld model_tpot_us=%lld model_latency_us=%lld completion_tokens=%zu",
+                        id, static_cast<long long>(metrics.model_ttft_us),
+                        static_cast<long long>(metrics.model_tpot_us),
+                        static_cast<long long>(metrics.model_latency_us), metrics.completion_tokens);
+                }
                 break;
             }
         }
@@ -2176,7 +2132,7 @@ void Llm::resetSpecContext() {
 
 
 bool Llm::is_stop(int token_id) {
-    if (mContext->status == LlmStatus::USER_CANCEL || mContext->status == LlmStatus::INTERNAL_ERROR) {
+    if (cancelRequested() || mContext->status == LlmStatus::INTERNAL_ERROR) {
         return true;
     }
     bool stop = mTokenizer->is_stop(token_id);

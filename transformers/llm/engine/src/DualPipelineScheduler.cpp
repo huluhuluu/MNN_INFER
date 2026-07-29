@@ -29,7 +29,6 @@ DualPipelineScheduler::StageSnapshot::StageSnapshot()
 
 DualPipelineScheduler::GraphRequest::GraphRequest()
     : action(GRAPH_LOAD),
-      requestId(-1),
       pipelineId(-1),
       graphIndex(-1),
       shapeIndex(-1),
@@ -361,18 +360,6 @@ bool DualPipelineScheduler::finishGraphPrefetchWave() {
     return succeeded;
 }
 
-size_t DualPipelineScheduler::releaseRequestGraphs(int requestId) {
-    if (requestId < 0) {
-        return 0;
-    }
-    std::lock_guard<std::mutex> lock(mMutex);
-    size_t releasedOwners = 0;
-    for (std::map<std::string, GraphState>::iterator iter = mGraphs.begin(); iter != mGraphs.end(); ++iter) {
-        releasedOwners += iter->second.requestOwners.erase(requestId);
-    }
-    return releasedOwners;
-}
-
 DualPipelineScheduler::GraphWindowSnapshot DualPipelineScheduler::graphWindowSnapshot() const {
     std::lock_guard<std::mutex> lock(mMutex);
     GraphWindowSnapshot result;
@@ -607,7 +594,6 @@ void DualPipelineScheduler::_enqueueGraphIndexLocked(int pipelineId, int graphIn
     request.pipelineId = pipelineId;
     request.graphIndex = graphIndex;
     request.ownerRequestIds = iter->second.ownerRequestIds;
-    request.requestId = request.ownerRequestIds.empty() ? -1 : request.ownerRequestIds.front();
     if (request.ownerRequestIds.empty()) {
         AcceptanceTrace::log("event=qnn_bucket lane=%d request_id=-1 request_scope=engine graph_index=%d shape_index=%d bucket=%d",
                              pipelineId, graphIndex, request.shapeIndex, request.bucketSize);
@@ -717,15 +703,6 @@ void DualPipelineScheduler::_processGraphRequest(const GraphRequest& request) {
         state.lastRequest = request;
         state.record.graphId = request.graphId;
         state.record.pinned = state.record.pinned || request.draftGraph || request.pinResident;
-        if (!request.ownerRequestIds.empty()) {
-            for (size_t i = 0; i < request.ownerRequestIds.size(); ++i) {
-                if (request.ownerRequestIds[i] >= 0) {
-                    state.requestOwners.insert(request.ownerRequestIds[i]);
-                }
-            }
-        } else if (request.requestId >= 0) {
-            state.requestOwners.insert(request.requestId);
-        }
         if (request.pipelineId >= 0 && request.graphIndex >= 0) {
             std::map<int, PipelineGraphState>::iterator pipeline = mPipelineGraphs.find(request.pipelineId);
             if (pipeline != mPipelineGraphs.end()) {
@@ -807,7 +784,6 @@ void DualPipelineScheduler::_planEvictionsLocked(const std::string& incomingGrap
         candidate->second.record.resident = false;
         candidate->second.loadFinished = false;
         candidate->second.record.activeUseCount = 0;
-        candidate->second.requestOwners.clear();
         releaseRequests->push_back(releaseRequest);
         --residentCount;
     }

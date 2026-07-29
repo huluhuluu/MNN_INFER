@@ -315,27 +315,6 @@ public:
     }
 };
 
-class DualPipelineSchedulerRequestOwnerCleanupTest : public MNNTestCase {
-public:
-    virtual bool run(int precision) {
-        GraphRecorder recorder;
-        DualPipelineScheduler scheduler;
-        MNNTEST_ASSERT(startScheduler(scheduler, recorder, 2, 0));
-        const DualPipelineScheduler::PipelineGraphWave wave = makeWave(0, 23, {"owner_graph"});
-
-        MNNTEST_ASSERT(scheduler.beginGraphPrefetchWave({wave}));
-        MNNTEST_ASSERT(scheduler.beginStageWave({0}));
-        MNNTEST_ASSERT(scheduler.enterGraphStage(0, 0));
-        MNNTEST_ASSERT(scheduler.leaveGraphStage(0, 0));
-        MNNTEST_ASSERT(scheduler.finishStageWave());
-        MNNTEST_ASSERT(scheduler.finishGraphPrefetchWave());
-        MNNTEST_ASSERT(scheduler.releaseRequestGraphs(23) == 1);
-        MNNTEST_ASSERT(scheduler.releaseRequestGraphs(23) == 0);
-        scheduler.stop();
-        return true;
-    }
-};
-
 class DualPipelineSchedulerActiveGraphProtectionTest : public MNNTestCase {
 public:
     virtual bool run(int precision) {
@@ -412,6 +391,5 @@ MNNTestSuiteRegister(DualPipelineSchedulerSharedGraphTest, "llm/dual_pipeline_sc
 MNNTestSuiteRegister(DualPipelineSchedulerGraphLoadFailureTest, "llm/dual_pipeline_scheduler_graph_load_failure");
 MNNTestSuiteRegister(DualPipelineSchedulerWaveReuseTest, "llm/dual_pipeline_scheduler_wave_reuse");
 MNNTestSuiteRegister(DualPipelineSchedulerResidentLruTest, "llm/dual_pipeline_scheduler_resident_lru");
-MNNTestSuiteRegister(DualPipelineSchedulerRequestOwnerCleanupTest, "llm/dual_pipeline_scheduler_request_owner_cleanup");
 MNNTestSuiteRegister(DualPipelineSchedulerActiveGraphProtectionTest, "llm/dual_pipeline_scheduler_active_graph_protection");
 MNNTestSuiteRegister(DualPipelineSchedulerExecutionBeforeLookaheadTest, "llm/dual_pipeline_scheduler_execution_before_lookahead");

@@ -35,7 +35,9 @@ void BatchScheduler::setDualPipelineMode(bool enable, int splitCount) {
 }
 
 int BatchScheduler::addRequest(const std::vector<int>& prompt) {
-    mRequests.push_back(std::make_shared<Request>(mIdx, prompt));
+    auto request = std::make_shared<Request>(mIdx, prompt);
+    request->registeredUs = AcceptanceTrace::nowMicros();
+    mRequests.push_back(request);
     mReqIdToIndex[mIdx++] = mRequests.size() - 1;
     mActiveCount++;
     return mIdx - 1;
@@ -67,6 +69,9 @@ bool BatchScheduler::appendPrompt(int req_id, const std::vector<int>& new_prompt
     req->prompt_len = new_prompt.size();
     req->gen_seq_len = 0;
     req->output_tokens.clear();
+    req->registeredUs = AcceptanceTrace::nowMicros();
+    req->firstTokenUs = 0;
+    req->completedUs = 0;
     
     // reactivate if was finished
     if (req->finished) {
@@ -274,6 +279,10 @@ bool BatchScheduler::update(int req_id, const std::vector<int>& new_tokens, int 
     
     // decode phase: append new token
     if (judgeState(state(req_id), RequestState::DECODE)) {
+        const uint64_t tokenUs = AcceptanceTrace::nowMicros();
+        if (req->firstTokenUs == 0) {
+            req->firstTokenUs = tokenUs;
+        }
         int kv_advance = static_cast<int>(new_tokens.size()) - cal_len;
         if (kv_advance > 0) {
             req->all_seq_len += kv_advance;
@@ -284,6 +293,7 @@ bool BatchScheduler::update(int req_id, const std::vector<int>& new_tokens, int 
         
         if (is_stop_token || req->gen_seq_len >= mMaxNewTokens) {
             req->finished = true;
+            req->completedUs = AcceptanceTrace::nowMicros();
             mActiveCount--;
             
             // check if has pending prompt for next round
@@ -294,6 +304,9 @@ bool BatchScheduler::update(int req_id, const std::vector<int>& new_tokens, int 
                 req->prompt_len = req->pending_prompt.size();
                 req->gen_seq_len = 0;
                 req->output_tokens.clear();
+                req->registeredUs = AcceptanceTrace::nowMicros();
+                req->firstTokenUs = 0;
+                req->completedUs = 0;
                 req->pending_prompt.clear();
                 req->has_pending = false;
                 req->finished = false;
@@ -342,6 +355,17 @@ size_t BatchScheduler::getResultSize(int req_id) const {
     if (ind < 0 || ind >= mRequests.size()) return 0;
     return mRequests[ind]->output_tokens.size();
 }
+
+bool BatchScheduler::getRequestTiming(int req_id, RequestTiming& timing) const {
+    int ind = mReqIdToIndex.count(req_id) ? mReqIdToIndex.at(req_id) : -1;
+    if (ind < 0 || ind >= mRequests.size()) return false;
+    const auto& req = mRequests[ind];
+    timing.registeredUs = req->registeredUs;
+    timing.firstTokenUs = req->firstTokenUs;
+    timing.completedUs = req->completedUs;
+    timing.completionTokens = req->output_tokens.size();
+    return true;
+}
     
 bool BatchScheduler::releaseReq(int req_id) {
     int ind = mReqIdToIndex.count(req_id) ? mReqIdToIndex.at(req_id) : -1;
@@ -361,6 +385,10 @@ bool BatchScheduler::releaseReq(int req_id) {
     mReqIdToIndex.erase(req_id);
     mReqIdToPipeline.erase(req_id);
     return true;
+}
+
+void BatchScheduler::clearPendingChunks() {
+    mPendingChunks.clear();
 }
 
 bool BatchScheduler::releaseKVCache(int req_id){

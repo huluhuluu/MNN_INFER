@@ -568,16 +568,14 @@ GraphSnapshot mergeQnnGraphSnapshotsInExecutionOrder(const GraphSnapshot& execut
 
 std::vector<DualPipelineScheduler::GraphRequest> buildQnnGraphRequests(const GraphSnapshot& snapshot,
                                                                        int start,
-                                                                       int maxK,
-                                                                       int reqId) {
-    return buildQnnGraphRequestsForSize(snapshot, start, maxK, reqId, 0);
+                                                                       int maxK) {
+    return buildQnnGraphRequestsForSize(snapshot, start, maxK, 0);
 }
 
 std::vector<DualPipelineScheduler::GraphRequest> buildQnnGraphRequestsForSize(
     const GraphSnapshot& snapshot,
     int start,
     int maxK,
-    int reqId,
     int requestGroupSize) {
     std::vector<DualPipelineScheduler::GraphRequest> requests;
     if (start < 0 || maxK <= 0 || start >= static_cast<int>(snapshot.ops.size())) {
@@ -590,7 +588,6 @@ std::vector<DualPipelineScheduler::GraphRequest> buildQnnGraphRequestsForSize(
         }
         DualPipelineScheduler::GraphRequest request;
         request.action = DualPipelineScheduler::GRAPH_LOAD;
-        request.requestId = reqId;
         request.graphId = qnnGraphResourceId(op);
         request.graphPath = op.qnn.path;
         request.offset = op.qnn.offset;

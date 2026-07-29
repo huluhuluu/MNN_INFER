@@ -45,15 +45,6 @@ struct SpecContext {
     double acceptRate() const {
         return draft == 0 ? 0.0 : static_cast<double>(accepted) / draft;
     }
-    double compressionRatio() const {
-        return accepted == 0 ? 0.0 : static_cast<double>(draft) / accepted;
-    }
-    double avgDraftTimeMs() const {
-        return steps == 0 ? 0.0 : static_cast<double>(draft_time_us) / 1000.0 / steps;
-    }
-    double avgTargetTimeMs() const {
-        return steps == 0 ? 0.0 : static_cast<double>(target_time_us) / 1000.0 / steps;
-    }
     double theoreticalSpeedup() const {
         if (accepted == 0 || steps == 0 || draft_time_us + target_time_us == 0) {
             return 0.0;
@@ -204,6 +195,7 @@ private:
     VARPS treeDecoding(const DraftInfo& draftInfo);
     VARPS treeDecodingPacked(const DraftInfo& draftInfo);
     AcceptInfo evaluatePosterior(const DraftInfo& drafInfo, VARP logits);
+    void commitAcceptedTokens(const AcceptInfo& acceptInfo);
     DraftInfo updateDraft(const AcceptInfo& accpetInfo, VARP hiddenStates);
     void updatePackedBaseKV(const AcceptInfo& acceptInfo);
     MNN::Express::VARP getMask(std::vector<std::vector<bool>> mask, int seqLen);

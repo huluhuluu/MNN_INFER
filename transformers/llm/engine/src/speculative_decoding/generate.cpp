@@ -58,6 +58,9 @@ std::vector<std::vector<int>> ArGeneration::generateBatch(const std::vector<std:
     mLlm->applyKVCacheRuntimeHint(mLlm->mRuntimeManager, true);
 
     while (std::shared_ptr<BatchScheduler::Chunk> chunk = mLlm->mScheduler->schedule(-1, 4)) {
+        if (mLlm->cancelRequested()) {
+            break;
+        }
         const int requiredSize = std::max(chunk->culLen, static_cast<int>(chunk->reqId.size()));
         const int paddedCulLen = mLlm->qnnPaddedCulLen(requiredSize);
         if (paddedCulLen < chunk->culLen) {
@@ -137,7 +140,7 @@ void ArGeneration::generate(GenerationParams& param) {
     int max_token = param.max_new_tokens;
     int len = 0;
     while (len < max_token) {
-        if(mContext->status == LlmStatus::USER_CANCEL) {
+        if (mLlm->cancelRequested()) {
             break;
         }
         AUTOTIME;

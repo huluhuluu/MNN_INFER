@@ -36,11 +36,10 @@ public:
         qnn.qnn.allGraphName.push_back("all_graph");
         snapshot.ops.push_back(qnn);
 
-        auto requests = buildQnnGraphRequests(snapshot, 0, 4, 11);
+        auto requests = buildQnnGraphRequests(snapshot, 0, 4);
 
         MNNTEST_ASSERT(requests.size() == 1);
         MNNTEST_ASSERT(requests[0].action == DualPipelineScheduler::GRAPH_LOAD);
-        MNNTEST_ASSERT(requests[0].requestId == 11);
         MNNTEST_ASSERT(requests[0].graphId == "/models/qnn_context.bin#4096#8192#all_graph");
         MNNTEST_ASSERT(requests[0].graphPath == "/models/qnn_context.bin");
         MNNTEST_ASSERT(requests[0].offset == 4096);
@@ -64,7 +63,7 @@ public:
         qnn.qnn.pin = true;
         snapshot.ops.push_back(qnn);
 
-        auto requests = buildQnnGraphRequests(snapshot, 0, 1, 13);
+        auto requests = buildQnnGraphRequests(snapshot, 0, 1);
 
         MNNTEST_ASSERT(requests.size() == 1);
         MNNTEST_ASSERT(requests[0].draftGraph);
@@ -88,12 +87,12 @@ public:
         qnn.qnn.bucketSizes = {256, 32, 1};
         snapshot.ops.push_back(qnn);
 
-        const auto requests = buildQnnGraphRequests(snapshot, 0, 1, 15);
+        const auto requests = buildQnnGraphRequests(snapshot, 0, 1);
         MNNTEST_ASSERT(requests.size() == 1);
         MNNTEST_ASSERT(requests[0].graphPath.empty());
         MNNTEST_ASSERT(requests[0].allGraphName == qnn.qnn.allGraphName);
 
-        const auto selected = buildQnnGraphRequestsForSize(snapshot, 0, 1, 15, 20);
+        const auto selected = buildQnnGraphRequestsForSize(snapshot, 0, 1, 20);
         MNNTEST_ASSERT(selected.size() == 1);
         MNNTEST_ASSERT(selected[0].graphPath == "/models/qnn/graph0_1.bin");
         MNNTEST_ASSERT(selected[0].allGraphName == std::vector<std::string>({"graph1"}));
@@ -102,7 +101,7 @@ public:
         MNNTEST_ASSERT(selected[0].size == 0);
         MNNTEST_ASSERT(selected[0].shapeIndex == 1);
         MNNTEST_ASSERT(selected[0].bucketSize == 32);
-        MNNTEST_ASSERT(buildQnnGraphRequestsForSize(snapshot, 0, 1, 15, 257).empty());
+        MNNTEST_ASSERT(buildQnnGraphRequestsForSize(snapshot, 0, 1, 257).empty());
         return true;
     }
 };
@@ -122,7 +121,7 @@ public:
         qnn.qnn.bucketSizes.push_back(1);
         snapshot.ops.push_back(qnn);
 
-        const auto requests = buildQnnGraphRequests(snapshot, 0, 1, 21);
+        const auto requests = buildQnnGraphRequests(snapshot, 0, 1);
         MNNTEST_ASSERT(requests[0].graphId == "qnn_bucket_plugin#0#0#graph_s128#graph_s8#graph_s1");
         MNNTEST_ASSERT(selectQnnBucketSize(qnn.qnn, 1) == 1);
         MNNTEST_ASSERT(selectQnnBucketSize(qnn.qnn, 2) == 8);
@@ -155,7 +154,7 @@ public:
         second.qnn.path = "/models/qnn/graph1.bin";
         snapshot.ops.push_back(second);
 
-        const auto requests = buildQnnGraphRequests(snapshot, 0, 2, 24);
+        const auto requests = buildQnnGraphRequests(snapshot, 0, 2);
         MNNTEST_ASSERT(requests.size() == 2);
         MNNTEST_ASSERT(requests[0].graphId != requests[1].graphId);
         return true;
@@ -174,7 +173,7 @@ public:
         qnn.qnn.allGraphName.push_back("graph0");
         snapshot.ops.push_back(qnn);
 
-        auto requests = buildQnnGraphRequests(snapshot, 0, 1, 19);
+        auto requests = buildQnnGraphRequests(snapshot, 0, 1);
 
         MNNTEST_ASSERT(requests.size() == 1);
         MNNTEST_ASSERT(requests[0].graphId == "/models/qnn/graph0.bin#0#0#graph0");
@@ -225,7 +224,7 @@ public:
         plugin.qnn.path = "/models/not_qnn.bin";
         snapshot.ops.push_back(plugin);
 
-        auto requests = buildQnnGraphRequests(snapshot, 0, 8, 17);
+        auto requests = buildQnnGraphRequests(snapshot, 0, 8);
 
         MNNTEST_ASSERT(requests.empty());
         return true;

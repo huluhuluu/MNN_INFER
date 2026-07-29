@@ -6,6 +6,7 @@
 #include "mnncli_server.hpp"
 #include "log_utils.hpp"
 #include "llm/AcceptanceTrace.hpp"
+#include <algorithm>
 #include <atomic>
 #include <chrono>
 #include <condition_variable>
@@ -22,6 +23,15 @@ public:
             Ready,
             Pending,
             Finished,
+        };
+
+        struct TimingSnapshot {
+            int64_t queueUs = -1;
+            int64_t modelTtftUs = -1;
+            int64_t modelTpotUs = -1;
+            int64_t modelLatencyUs = -1;
+            int64_t e2eTtftUs = -1;
+            int64_t e2eLatencyUs = -1;
         };
 
         Task(uint64_t id, MNN::Transformer::ChatMessages request_prompts, int request_max_tokens)
@@ -61,6 +71,26 @@ public:
         size_t generated_tokens() const {
             std::lock_guard<std::mutex> lock(mutex);
             return generatedTokens;
+        }
+
+        TimingSnapshot timing() const {
+            std::lock_guard<std::mutex> lock(mutex);
+            TimingSnapshot timing;
+            if (startedUs >= created_us) {
+                timing.queueUs = static_cast<int64_t>(startedUs - created_us);
+            }
+            if (modelMetrics.valid) {
+                timing.modelTtftUs = modelMetrics.model_ttft_us;
+                timing.modelTpotUs = modelMetrics.model_tpot_us;
+                timing.modelLatencyUs = modelMetrics.model_latency_us;
+                if (timing.queueUs >= 0 && timing.modelTtftUs >= 0) {
+                    timing.e2eTtftUs = timing.queueUs + timing.modelTtftUs;
+                }
+            }
+            if (completedUs >= created_us) {
+                timing.e2eLatencyUs = static_cast<int64_t>(completedUs - created_us);
+            }
+            return timing;
         }
 
         ChunkState next_chunk(std::string& chunk) {
@@ -113,6 +143,11 @@ public:
             generatedTokens = tokenCount;
         }
 
+        void setModelMetrics(const MNN::Transformer::LlmBatchRequestMetrics& metrics) {
+            std::lock_guard<std::mutex> lock(mutex);
+            modelMetrics = metrics;
+        }
+
         mutable std::mutex mutex;
         std::condition_variable completed;
         std::atomic<bool> cancelled{false};
@@ -120,11 +155,13 @@ public:
         bool finished = false;
         bool failed = false;
         uint64_t startedUs = 0;
+        uint64_t completedUs = 0;
         uint64_t firstChunkUs = 0;
         size_t promptTokens = 0;
         size_t generatedTokens = 0;
         std::string response;
         std::deque<std::string> chunks;
+        MNN::Transformer::LlmBatchRequestMetrics modelMetrics;
     };
 
     RequestCoordinator(MNN::Transformer::Llm* llm, const std::string& scheduler_mode)
@@ -156,6 +193,7 @@ public:
         const bool alreadyFinished = task->is_finished();
         task->markCancelled();
         bool removedFromQueue = false;
+        bool cancelModel = false;
         {
             std::lock_guard<std::mutex> lock(mMutex);
             for (std::deque<std::shared_ptr<Task>>::iterator iter = mPending.begin(); iter != mPending.end(); ++iter) {
@@ -165,9 +203,18 @@ public:
                     break;
                 }
             }
+            if (!removedFromQueue && mExecuting && !mExecutingTasks.empty()) {
+                cancelModel = std::all_of(mExecutingTasks.begin(), mExecutingTasks.end(),
+                                          [](const std::shared_ptr<Task>& activeTask) {
+                                              return activeTask->is_cancelled();
+                                          });
+            }
         }
         if (removedFromQueue) {
             complete(task, false);
+        }
+        if (cancelModel) {
+            mLlm->requestCancel();
         }
         MNN::Transformer::AcceptanceTrace::log("event=request_cancelled request_id=%llu request_scope=service state=%s",
                                                static_cast<unsigned long long>(task->request_id),
@@ -207,7 +254,8 @@ private:
         return Mode::SingleRequest;
     }
 
-    static constexpr size_t kMaxBatchSize = 4;
+    static constexpr size_t kMaxBatchSize = 8;
+    static constexpr std::chrono::milliseconds kBatchCollectWindow{10};
 
     const char* modeName() const {
         switch (mMode) {
@@ -234,6 +282,12 @@ private:
                 task->markCancelled();
                 complete(task, false);
             }
+            if (mExecuting) {
+                for (const auto& task : mExecutingTasks) {
+                    task->markCancelled();
+                }
+                mLlm->requestCancel();
+            }
         }
         mReady.notify_all();
         if (mWorker.joinable()) {
@@ -254,6 +308,7 @@ private:
             }
             task->failed = failed;
             task->finished = true;
+            task->completedUs = MNN::Transformer::AcceptanceTrace::nowMicros();
             elapsedUs = MNN::Transformer::AcceptanceTrace::nowMicros() - task->created_us;
             if (task->firstChunkUs >= task->created_us) {
                 ttftUs = static_cast<int64_t>(task->firstChunkUs - task->created_us);
@@ -264,12 +319,17 @@ private:
         }
         const double tokensPerSecond = elapsedUs > 0 ?
             static_cast<double>(generatedTokens) * 1000000.0 / static_cast<double>(elapsedUs) : 0.0;
-        MNN::Transformer::AcceptanceTrace::log("event=request_completed request_id=%llu request_scope=service status=%s ttft_us=%lld elapsed_us=%llu prompt_tokens=%zu generated_tokens=%zu tokens_per_s=%.3f response_bytes=%zu",
+        const auto timing = task->timing();
+        MNN::Transformer::AcceptanceTrace::log("event=request_completed request_id=%llu request_scope=service status=%s ttft_us=%lld elapsed_us=%llu prompt_tokens=%zu generated_tokens=%zu tokens_per_s=%.3f response_bytes=%zu model_ttft_us=%lld model_tpot_us=%lld model_latency_us=%lld queue_us=%lld",
                                                static_cast<unsigned long long>(task->request_id),
                                                task->is_cancelled() ? "cancelled" : (failed ? "failed" : "ok"),
                                                static_cast<long long>(ttftUs),
                                                static_cast<unsigned long long>(elapsedUs),
-                                               promptTokens, generatedTokens, tokensPerSecond, responseBytes);
+                                               promptTokens, generatedTokens, tokensPerSecond, responseBytes,
+                                               static_cast<long long>(timing.modelTtftUs),
+                                               static_cast<long long>(timing.modelTpotUs),
+                                               static_cast<long long>(timing.modelLatencyUs),
+                                               static_cast<long long>(timing.queueUs));
         task->completed.notify_all();
     }
 
@@ -278,20 +338,30 @@ private:
             complete(task, false);
             return;
         }
-        task->markStarted(0);
-        MNN::Transformer::AcceptanceTrace::log("event=request_started request_id=%llu request_scope=service mode=single_request",
-                                               static_cast<unsigned long long>(task->request_id));
-        Utf8StreamProcessor processor([task](const std::string& text) {
-            if (text.find("<eop>") == std::string::npos) {
-                task->append(text);
-            }
-        });
-        LlmStreamBuffer stream_buffer([&processor](const char* data, size_t len) {
-            processor.processStream(data, len);
-        });
-        std::ostream output(&stream_buffer);
         try {
-            mLlm->response(task->prompts, &output, "<eop>", task->max_tokens);
+            const auto prompt = mLlm->apply_chat_template(task->prompts);
+            const auto inputIds = mLlm->tokenizer_encode(prompt);
+            task->markStarted(inputIds.size());
+            MNN::Transformer::AcceptanceTrace::log("event=request_started request_id=%llu request_scope=service mode=single_request",
+                                                   static_cast<unsigned long long>(task->request_id));
+            Utf8StreamProcessor processor([task](const std::string& text) {
+                if (text.find("<eop>") == std::string::npos) {
+                    task->append(text);
+                }
+            });
+            LlmStreamBuffer streamBuffer([this, task, &processor](const char* data, size_t len) {
+                if (task->is_cancelled()) {
+                    mLlm->requestCancel();
+                    return;
+                }
+                processor.processStream(data, len);
+            });
+            std::ostream output(&streamBuffer);
+            mLlm->generate_init(&output, "<eop>");
+            if (task->is_cancelled()) {
+                mLlm->requestCancel();
+            }
+            mLlm->generate(inputIds, task->max_tokens);
             const auto context = mLlm->getContext();
             if (context != nullptr) {
                 {
@@ -337,6 +407,13 @@ private:
         std::vector<std::vector<int>> results;
         try {
             mLlm->generate_init(nullptr, nullptr);
+            if (std::all_of(active_tasks.begin(), active_tasks.end(),
+                            [](const std::shared_ptr<Task>& task) { return task->is_cancelled(); })) {
+                for (const auto& task : active_tasks) {
+                    complete(task, false);
+                }
+                return;
+            }
             results = mLlm->generate(input_ids, nullptr, active_tasks.front()->max_tokens);
         } catch (const std::exception& error) {
             LOG_DEBUG("LLM batch request failed: " + std::string(error.what()));
@@ -360,8 +437,12 @@ private:
             }
             return;
         }
+        const auto& batchMetrics = mLlm->getLastBatchRequestMetrics();
         for (size_t i = 0; i < active_tasks.size(); ++i) {
             active_tasks[i]->setGeneratedTokens(results[i].size());
+            if (i < batchMetrics.size()) {
+                active_tasks[i]->setModelMetrics(batchMetrics[i]);
+            }
             if (!active_tasks[i]->is_cancelled()) {
                 std::string decoded;
                 Utf8StreamProcessor processor([&decoded](const std::string& text) {
@@ -399,8 +480,8 @@ private:
                 batch.push_back(mPending.front());
                 mPending.pop_front();
                 if (mMode != Mode::SingleRequest) {
-                    mReady.wait_for(lock, std::chrono::milliseconds(2), [this] {
-                        return mStopping || !mPending.empty();
+                    mReady.wait_for(lock, kBatchCollectWindow, [this, &batch] {
+                        return mStopping || batch.size() + mPending.size() >= kMaxBatchSize;
                     });
                     const int max_tokens = batch.front()->max_tokens;
                     while (!mPending.empty() && batch.size() < kMaxBatchSize &&
@@ -413,6 +494,7 @@ private:
                     batch[taskIndex]->started.store(true);
                 }
                 mExecuting = true;
+                mExecutingTasks = batch;
             }
 
             if (mMode == Mode::SingleRequest) {
@@ -424,6 +506,7 @@ private:
             {
                 std::lock_guard<std::mutex> lock(mMutex);
                 mExecuting = false;
+                mExecutingTasks.clear();
             }
             mIdle.notify_all();
         }
@@ -436,6 +519,7 @@ private:
     std::condition_variable mReady;
     std::condition_variable mIdle;
     std::deque<std::shared_ptr<Task>> mPending;
+    std::vector<std::shared_ptr<Task>> mExecutingTasks;
     bool mExecuting = false;
     bool mStopping = false;
     std::thread mWorker;
@@ -610,6 +694,7 @@ void MnncliServer::Start(MNN::Transformer::Llm* llm, bool is_r1, const std::stri
                 return;
             }
             const auto answer = task->answer();
+            const auto timing = task->timing();
             json response_json = {
                 {"id", "chatcmpl" + GetCurrentTimeAsString()},
                 {"object", "chat.completion"},
@@ -620,7 +705,14 @@ void MnncliServer::Start(MNN::Transformer::Llm* llm, bool is_r1, const std::stri
                     {"finish_reason", "stop"}}})},
                 {"usage", {{"prompt_tokens", task->prompt_tokens()},
                             {"completion_tokens", task->generated_tokens()},
-                            {"total_tokens", task->prompt_tokens() + task->generated_tokens()}}}
+                            {"total_tokens", task->prompt_tokens() + task->generated_tokens()}}},
+                {"timings", {{"queue_ms", timing.queueUs / 1000.0},
+                              {"model_ttft_ms", timing.modelTtftUs / 1000.0},
+                              {"model_tpot_ms", timing.modelTpotUs / 1000.0},
+                              {"model_latency_ms", timing.modelLatencyUs / 1000.0},
+                              {"e2e_ttft_ms", timing.e2eTtftUs / 1000.0},
+                              {"e2e_latency_ms", timing.e2eLatencyUs / 1000.0},
+                              {"scope", "model_and_service"}}}
             };
             res.set_content(response_json.dump(), "application/json");
             return;

@@ -71,8 +71,7 @@ GraphSnapshot mergeQnnGraphSnapshotsInExecutionOrder(const GraphSnapshot& execut
 
 std::vector<DualPipelineScheduler::GraphRequest> buildQnnGraphRequests(const GraphSnapshot& snapshot,
                                                                        int start,
-                                                                       int maxK,
-                                                                       int reqId);
+                                                                       int maxK);
 
 // Build requests for one concrete QNN bucket. Per-shape exports must only
 // materialize the selected context; loading the scalar context would retain
@@ -81,7 +80,6 @@ std::vector<DualPipelineScheduler::GraphRequest> buildQnnGraphRequestsForSize(
     const GraphSnapshot& snapshot,
     int start,
     int maxK,
-    int reqId,
     int requestGroupSize);
 
 } // namespace Transformer

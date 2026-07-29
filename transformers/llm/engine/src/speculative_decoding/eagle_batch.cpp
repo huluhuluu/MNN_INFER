@@ -221,9 +221,9 @@ void EagleGeneration::loadDualPipelineGraphInfo() {
     mEagleFCGraphSnapshot = buildQnnGraphSnapshotFromModel(
         mLlm->mConfig->eagle_fc(), mLlm->mConfig->base_dir_, mLlm->mConfig->npu_model_dir());
     mEagleDraftGraphRequests = buildQnnGraphRequests(
-        mEagleDraftGraphSnapshot, 0, static_cast<int>(mEagleDraftGraphSnapshot.ops.size()), -1);
+        mEagleDraftGraphSnapshot, 0, static_cast<int>(mEagleDraftGraphSnapshot.ops.size()));
     mEagleFCGraphRequests = buildQnnGraphRequests(
-        mEagleFCGraphSnapshot, 0, static_cast<int>(mEagleFCGraphSnapshot.ops.size()), -1);
+        mEagleFCGraphSnapshot, 0, static_cast<int>(mEagleFCGraphSnapshot.ops.size()));
     mEagleDraftQnnOpIndices.clear();
     mEagleFCQnnOpIndices.clear();
     auto initializeComponentGraphs = [](const GraphSnapshot& snapshot,
@@ -264,7 +264,7 @@ VARPS EagleGeneration::runDualPipelineComponent(
     graphWave.ownerRequestIds = ownerReqIds;
     const int paddedLen = inputs.empty() ? 0 : _packedSeqLen(inputs[0]);
     graphWave.graphs = buildQnnGraphRequestsForSize(
-        graphSnapshot, 0, static_cast<int>(graphRequests.size()), -1, paddedLen);
+        graphSnapshot, 0, static_cast<int>(graphRequests.size()), paddedLen);
     if (graphWave.graphs.size() != graphRequests.size()) {
         MNN_ERROR("MNN_DUAL_PIPELINE: component graph bucket selection failed for pipeline %d, bucket %d.\n",
                   pipelineId, paddedLen);
@@ -1196,7 +1196,6 @@ std::vector<std::vector<int>> EagleGeneration::generateBatch(const std::vector<s
                     mLlm->mDualPipelineGraphSnapshot,
                     0,
                     static_cast<int>(mLlm->mDualPipelineQnnGraphRequests.size()),
-                    -1,
                     task.paddedCulLen);
                 if (graphWave.graphs.size() != mLlm->mDualPipelineQnnGraphRequests.size()) {
                     MNN_ERROR("MNN_DUAL_PIPELINE: target graph bucket selection failed for pipeline %d, bucket %d.\n",
@@ -1308,6 +1307,9 @@ std::vector<std::vector<int>> EagleGeneration::generateBatch(const std::vector<s
     };
 
     while (mLlm->mScheduler->hasValidWork() || !draftInfos.empty()) {
+        if (mLlm->cancelRequested()) {
+            break;
+        }
         std::set<int> skipReqIds;
         std::vector<DraftInfo> ordinaryDrafts;
         std::array<std::vector<DraftInfo>, 2> laneDrafts;

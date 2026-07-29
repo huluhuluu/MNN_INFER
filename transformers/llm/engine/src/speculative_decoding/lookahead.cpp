@@ -89,7 +89,7 @@ void LookaheadGeneration::generate(GenerationParams& param) {
     int verify_len = mLlm->mDraftLength + 1;
     
     while (len < max_token) {
-        if(mContext->status == LlmStatus::USER_CANCEL) {
+        if (mLlm->cancelRequested()) {
             break;
         }
         MNN::Timer _t;

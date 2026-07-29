@@ -10,6 +10,7 @@
 #define BATCHSCHEDULER_hpp
 
 #include <iostream>
+#include <cstdint>
 #include <numeric>
 #include <map>
 #include <set>
@@ -34,6 +35,12 @@ public:
     static const bool judgeState(int code, RequestState state) {
         return (code & state) != 0;
     }
+    struct RequestTiming {
+        uint64_t registeredUs = 0;
+        uint64_t firstTokenUs = 0;
+        uint64_t completedUs = 0;
+        size_t completionTokens = 0;
+    };
     struct Request {
         int id;
         // tokens (aligned with LlmContext)
@@ -48,6 +55,9 @@ public:
         bool has_pending = false;
         // state
         bool finished = false;
+        uint64_t registeredUs = 0;
+        uint64_t firstTokenUs = 0;
+        uint64_t completedUs = 0;
         
         Request(int i, const std::vector<int>& t) : id(i), history_tokens(t), prompt_len(t.size()) {
             gen_seq_len = 0;
@@ -99,11 +109,13 @@ public:
     // get results
     std::vector<int> getResult(int req_id) const;
     size_t getResultSize(int req_id) const;
+    bool getRequestTiming(int req_id, RequestTiming& timing) const;
     
     // remove finished request
     bool releaseReq(int req_id);
     bool releaseKVCache(int req_id);
     bool isFinished(int req_id) const;
+    void clearPendingChunks();
 
     void setMaxNewTokens(int max_new_tokens) { mMaxNewTokens = max_new_tokens; }
 private:

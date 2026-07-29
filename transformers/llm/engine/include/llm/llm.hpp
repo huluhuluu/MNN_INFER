@@ -16,6 +16,7 @@
 #include <iostream>
 #include <streambuf>
 #include <array>
+#include <atomic>
 #include <functional>
 #include <unordered_map>
 
@@ -101,6 +102,13 @@ struct LlmContext {
     // llm status
     LlmStatus status;
 };
+struct LlmBatchRequestMetrics {
+    bool valid = false;
+    int64_t model_ttft_us = -1;
+    int64_t model_tpot_us = -1;
+    int64_t model_latency_us = -1;
+    size_t completion_tokens = 0;
+};
 struct GenerationParams;
 class MNN_PUBLIC Llm {
 public:
@@ -141,6 +149,8 @@ public:
     std::vector<int> generate(const std::vector<int>& input_ids, int max_new_tokens = -1);
     std::vector<int> generate(MNN::Express::VARP input_embeds, int max_tokens = -1);
     bool stoped();
+    void requestCancel();
+    bool cancelRequested();
     bool reuse_kv();
     // config function
     std::string dump_config();
@@ -176,6 +186,9 @@ public:
     SpecContext* getSpecContext();
     const SpecContext* getSpecContext() const;
     void resetSpecContext();
+    const std::vector<LlmBatchRequestMetrics>& getLastBatchRequestMetrics() const {
+        return mLastBatchRequestMetrics;
+    }
 protected:
     void initRuntime();
     void setRuntimeHint(const std::shared_ptr<Express::Executor::RuntimeManager>& rtg, BatchKVMeta* batchMeta = nullptr, KVMeta* meta = nullptr);
@@ -187,6 +200,7 @@ protected:
     std::shared_ptr<KVMeta> mMeta;
     std::shared_ptr<BatchKVMeta> mBatchMeta;
     std::shared_ptr<BatchScheduler> mScheduler;
+    std::vector<LlmBatchRequestMetrics> mLastBatchRequestMetrics;
     std::shared_ptr<LlmConfig> mConfig;
     std::shared_ptr<Prompt> mPrompt;
     std::shared_ptr<Tokenizer> mTokenizer;
@@ -236,6 +250,7 @@ private:
         std::unordered_map<std::string, int> activeQnnOpIndices;
     };
     bool mInSpec = false;
+    std::atomic<bool> mCancelRequested{false};
     bool mSchedulerModeLocked = false;
     int mDraftLength = 4;
     std::shared_ptr<GenerationParams> mGenerateParam;
