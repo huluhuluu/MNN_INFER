@@ -13,6 +13,7 @@
 #include "shape/SizeComputer.hpp"
 #include "core/OpCommonUtils.hpp"
 #include "core/Schedule.hpp"
+#include "CompileForNPUUtils.hpp"
 #include "rapidjson/document.h"
 #include <rapidjson/prettywriter.h>
 
@@ -719,39 +720,6 @@ static bool _fuse(MNN::NetT* net, MNN::NetT* srcNet) {
     }
     return true;
 }
-static bool _reOrderOp(MNN::NetT* net) {
-    auto oplist = std::move(net->oplists);
-    std::set<int> validInputs;
-    do {
-        bool empty = true;
-        for (int i=0; i<oplist.size(); ++i) {
-            if (nullptr == oplist[i]) {
-                continue;
-            }
-            bool valid = true;
-            for (auto index : oplist[i]->inputIndexes) {
-                if (validInputs.find(index) == validInputs.end()) {
-                    valid = false;
-                    break;
-                }
-            }
-            if (valid) {
-                for (auto index : oplist[i]->outputIndexes) {
-                    validInputs.insert(index);
-                }
-                net->oplists.emplace_back(std::move(oplist[i]));
-                oplist[i] = nullptr;
-            } else {
-                empty = false;
-            }
-        }
-        if (empty) {
-            break;
-        }
-    } while (true);
-    return true;
-}
-
 static bool _reIndexTensor(MNN::NetT* net) {
     auto& mNet = net;
     std::map<std::string, int> tensorNameIdx;
@@ -951,14 +919,6 @@ int main(int argc, const char* argv[]) {
     auto buffer = bufferPair.first;
     auto length = bufferPair.second;
     auto net = GetNet(buffer);
-    if (gNPUName == "QNN" && nullptr != net->oplists()) {
-        for (int i = 0; i < net->oplists()->size(); ++i) {
-            auto op = net->oplists()->GetAs<Op>(i);
-            if (op->type() == OpType_Attention) {
-                skipOps.insert(op->name()->str());
-            }
-        }
-    }
     std::map<std::string, int> tensorIndexMap;
     for (int i=0; i<net->tensorName()->size(); ++i) {
         auto tname = net->tensorName()->GetAsString(i)->str();
@@ -1003,17 +963,7 @@ int main(int argc, const char* argv[]) {
         MNN_ERROR("\n");
     }
     auto firstInputIndex = inputIndexes;
-    std::set<int> firstOutputIndex;
-    for (int i=0; i<net->oplists()->size(); ++i) {
-        auto op = net->oplists()->GetAs<Op>(i);
-        if (skipOps.find(op->name()->str()) != skipOps.end()) {
-            MNN_PRINT("Skip %s op\n", op->name()->c_str());
-            auto outputSize = op->outputIndexes()->size();
-            for (int v=0; v<outputSize; ++v) {
-                firstOutputIndex.insert(op->outputIndexes()->data()[v]);
-            }
-        }
-    }
+    auto firstOutputIndex = MNN::Tools::collectExplicitSkipOutputs(net, skipOps);
     std::vector<bool> keepOp(net->oplists()->size(), false);
     {
         auto subModulesInfo = _createSubModuleInfo(net, inputIndexes, outputIndexes, noneedComputeIndexes, sharedConst);
@@ -1167,8 +1117,10 @@ int main(int argc, const char* argv[]) {
                 dstNet->oplists.emplace_back(std::move(op));
             }
         }
-        _reIndexTensor(dstNet.get());
-        _reOrderOp(dstNet.get());
+        if (!_reIndexTensor(dstNet.get()) || !MNN::Tools::reorderOps(dstNet.get())) {
+            MNN_ERROR("compilefornpu: failed to normalize generated graph %d\n", inputIndex);
+            return 1;
+        }
         allNets.emplace_back(std::move(dstNet));
     }
     // Fuse And Store
