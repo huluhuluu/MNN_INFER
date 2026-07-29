@@ -7,6 +7,8 @@
 #include "../MNNTestSuite.h"
 #include "../../transformers/llm/engine/include/llm/BatchScheduler.hpp"
 #include "../../transformers/llm/engine/src/kvmeta.hpp"
+#include "../../transformers/llm/engine/src/llmconfig.hpp"
+#include "../../source/backend/qnn/backend/QNNRawGraphValidation.hpp"
 
 using namespace MNN::Transformer;
 
@@ -348,12 +350,14 @@ public:
 class BatchSchedulerDualPipelineEightRequestWaveTest : public MNNTestCase {
 public:
     virtual bool run(int precision) {
+        MNNTEST_ASSERT(BatchScheduler::MAX_BATCH_SIZE == 8);
         BatchScheduler scheduler;
         scheduler.setDualPipelineMode(true, 2);
         std::vector<int> reqIds = scheduler.addRequest(
             std::vector<std::vector<int>>{{1}, {11}, {21}, {31}, {41}, {51}, {61}, {71}});
 
-        std::vector<std::shared_ptr<BatchScheduler::Chunk>> wave = scheduler.scheduleWave(1, 8);
+        std::vector<std::shared_ptr<BatchScheduler::Chunk>> wave = scheduler.scheduleWave(
+            1, BatchScheduler::MAX_BATCH_SIZE);
         MNNTEST_ASSERT(wave.size() == 2);
         MNNTEST_ASSERT(wave[0]->pipelineId == 0);
         MNNTEST_ASSERT(wave[1]->pipelineId == 1);
@@ -479,6 +483,70 @@ public:
     }
 };
 
+class BatchSchedulerReleaseDropsPendingSegmentsTest : public MNNTestCase {
+public:
+    virtual bool run(int precision) {
+        auto config = std::make_shared<LlmConfig>();
+        auto batchMeta = std::make_shared<BatchKVMeta>();
+        BatchScheduler scheduler(config, batchMeta);
+        scheduler.setDualPipelineMode(true, 2);
+        const std::vector<int> reqIds = scheduler.addRequest({
+            {1, 2, 3, 4},
+            {11, 12, 13, 14},
+        });
+
+        const auto firstWave = scheduler.scheduleWave(4, 2);
+        MNNTEST_ASSERT(firstWave.size() == 2);
+        MNNTEST_ASSERT(scheduler.releaseReq(reqIds[0]));
+
+        const auto rebuiltWave = scheduler.scheduleWave(4, 2);
+        MNNTEST_ASSERT(!rebuiltWave.empty());
+        for (const auto& chunk : rebuiltWave) {
+            MNNTEST_ASSERT(chunk != nullptr);
+            MNNTEST_ASSERT(std::find(chunk->reqId.begin(), chunk->reqId.end(), reqIds[0]) == chunk->reqId.end());
+        }
+        return true;
+    }
+};
+
+class QNNRawGraphMetadataValidationTest : public MNNTestCase {
+public:
+    virtual bool run(int precision) {
+        MNNTEST_ASSERT(!MNN::QNN::validateRawGraphMetadata(0, 0));
+        MNNTEST_ASSERT(!MNN::QNN::validateRawGraphMetadata(2, 1));
+        MNNTEST_ASSERT(MNN::QNN::validateRawGraphMetadata(2, 2));
+        return true;
+    }
+};
+
+class QNNRawGraphShapeIndexValidationTest : public MNNTestCase {
+public:
+    virtual bool run(int precision) {
+        MNNTEST_ASSERT(!MNN::QNN::validateRawGraphShapeIndex(-1, 2));
+        MNNTEST_ASSERT(MNN::QNN::validateRawGraphShapeIndex(0, 2));
+        MNNTEST_ASSERT(MNN::QNN::validateRawGraphShapeIndex(1, 2));
+        MNNTEST_ASSERT(!MNN::QNN::validateRawGraphShapeIndex(2, 2));
+        return true;
+    }
+};
+
+class QNNRawGraphMultiOwnerLifetimeTest : public MNNTestCase {
+public:
+    virtual bool run(int precision) {
+        MNN::QNN::RawGraphAliasOwnership ownership;
+        ownership.acquire(true);
+        ownership.acquire(true);
+        MNNTEST_ASSERT(ownership.references() == 2);
+        MNNTEST_ASSERT(ownership.pinned());
+        MNNTEST_ASSERT(!ownership.release(true));
+        MNNTEST_ASSERT(ownership.references() == 1);
+        MNNTEST_ASSERT(ownership.pinned());
+        MNNTEST_ASSERT(ownership.release(true));
+        MNNTEST_ASSERT(!ownership.pinned());
+        return true;
+    }
+};
+
 MNNTestSuiteRegister(BatchSchedulerDualPipelineSplitTest, "llm/batch_scheduler_dual_pipeline_split");
 MNNTestSuiteRegister(BatchSchedulerSingleTokenPrefillStateTest, "llm/batch_scheduler_single_token_prefill_state");
 MNNTestSuiteRegister(BatchSchedulerDualPipelineMultiRequestSplitTest, "llm/batch_scheduler_dual_pipeline_multi_request_split");
@@ -495,3 +563,7 @@ MNNTestSuiteRegister(BatchSchedulerRequestTimingTest, "llm/batch_scheduler_reque
 MNNTestSuiteRegister(BatchSchedulerDualPipelineSkipWaveTest, "llm/batch_scheduler_dual_pipeline_skip_wave");
 MNNTestSuiteRegister(EagleDraftLaneKVIsolationTest, "llm/eagle_draft_lane_kv_isolation");
 MNNTestSuiteRegister(EagleDraftLaneKVResetCleanupTest, "llm/eagle_draft_lane_kv_reset_cleanup");
+MNNTestSuiteRegister(BatchSchedulerReleaseDropsPendingSegmentsTest, "llm/batch_scheduler_release_drops_pending_segments");
+MNNTestSuiteRegister(QNNRawGraphMetadataValidationTest, "llm/qnn_raw_graph_metadata_validation");
+MNNTestSuiteRegister(QNNRawGraphShapeIndexValidationTest, "llm/qnn_raw_graph_shape_index_validation");
+MNNTestSuiteRegister(QNNRawGraphMultiOwnerLifetimeTest, "llm/qnn_raw_graph_multi_owner_lifetime");

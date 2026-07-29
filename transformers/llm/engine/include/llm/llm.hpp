@@ -237,6 +237,7 @@ private:
     bool refreshDualPipelineGraphSnapshot();
     int qnnPaddedCulLen(int requiredSize);
     int dualPipelinePaddedCulLen(const BatchScheduler::Chunk& chunk);
+    void recordBatchRequestMetrics(size_t batchIndex, int requestId);
     void releaseDualPipelineRequestExecution(int requestId);
     void resetDualPipelineExecutionState();
     bool prepareDualPipelineExecutionState();

@@ -1334,9 +1334,11 @@ std::vector<std::vector<int>> EagleGeneration::generateBatch(const std::vector<s
 
         std::vector<std::shared_ptr<BatchScheduler::Chunk>> wave;
         if (dualPipelineMode) {
-            wave = mLlm->mScheduler->scheduleWave(-1, 4, skipReqIds);
+            wave = mLlm->mScheduler->scheduleWave(
+                -1, BatchScheduler::MAX_BATCH_SIZE, skipReqIds);
         } else {
-            auto chunk = mLlm->mScheduler->schedule(-1, 4, skipReqIds);
+            auto chunk = mLlm->mScheduler->schedule(
+                -1, BatchScheduler::MAX_BATCH_SIZE, skipReqIds);
             if (chunk) {
                 wave.push_back(chunk);
             }
@@ -1568,11 +1570,16 @@ std::vector<std::vector<int>> EagleGeneration::generateBatch(const std::vector<s
             break;
         }
     }
+    if (mContext->status == LlmStatus::INTERNAL_ERROR ||
+        mContext->status == LlmStatus::USER_CANCEL) {
+        mLlm->mScheduler->clearPendingChunks();
+    }
     for(int id: reqIds){
         const auto result = mLlm->mScheduler->getResult(id);
         for(int j = 0; j < bs; j++) {
             if(reqIds[j] == id) {
                 ret[j] = result;
+                mLlm->recordBatchRequestMetrics(j, id);
                 break;
             }
         }

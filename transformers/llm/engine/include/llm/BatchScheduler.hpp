@@ -25,6 +25,8 @@ class LlmConfig;
 struct BatchKVMeta;
 class BatchScheduler {
 public:
+    static constexpr int MAX_BATCH_SIZE = 8;
+
     enum RequestState {
         PREFILL = 1,
         DECODE = 2,

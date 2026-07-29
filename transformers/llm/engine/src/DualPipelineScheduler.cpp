@@ -691,6 +691,7 @@ void DualPipelineScheduler::_processGraphRequest(const GraphRequest& request) {
     Callbacks callbacks;
     std::vector<GraphRequest> evictReleaseRequests;
     bool shouldLoad = false;
+    bool hasCapacity = true;
 
     {
         std::lock_guard<std::mutex> lock(mMutex);
@@ -698,7 +699,7 @@ void DualPipelineScheduler::_processGraphRequest(const GraphRequest& request) {
         GraphState& state = mGraphs[request.graphId];
         bool wasResident = state.record.resident;
         if (!wasResident) {
-            _planEvictionsLocked(request.graphId, &evictReleaseRequests);
+            hasCapacity = _planEvictionsLocked(request.graphId, &evictReleaseRequests);
         }
         state.lastRequest = request;
         state.record.graphId = request.graphId;
@@ -709,12 +710,18 @@ void DualPipelineScheduler::_processGraphRequest(const GraphRequest& request) {
                 pipeline->second.registeredGraphIndices.insert(request.graphIndex);
             }
         }
-        ++state.record.activeUseCount;
         state.record.lastUseSequence = mNextSequence++;
-        shouldLoad = !wasResident;
+        shouldLoad = !wasResident && hasCapacity;
         if (shouldLoad) {
+            ++state.record.activeUseCount;
             state.loadFinished = false;
+        } else if (!hasCapacity) {
+            state.record.pinned = false;
+            state.record.activeUseCount = 0;
+            state.record.resident = false;
+            state.loadFinished = true;
         } else {
+            ++state.record.activeUseCount;
             state.loadFinished = true;
         }
     }
@@ -740,6 +747,8 @@ void DualPipelineScheduler::_processGraphRequest(const GraphRequest& request) {
             }
         }
         mCondition.notify_all();
+    } else if (!hasCapacity) {
+        mCondition.notify_all();
     }
 }
 
@@ -755,7 +764,7 @@ void DualPipelineScheduler::_processGraphComplete(const std::string& graphId) {
     iter->second.record.lastUseSequence = mNextSequence++;
 }
 
-void DualPipelineScheduler::_planEvictionsLocked(const std::string& incomingGraphId,
+bool DualPipelineScheduler::_planEvictionsLocked(const std::string& incomingGraphId,
                                                  std::vector<GraphRequest>* releaseRequests) {
     size_t residentCount = _residentGraphCountLocked();
     while (residentCount >= mConfig.maxResidentGraphs) {
@@ -787,6 +796,7 @@ void DualPipelineScheduler::_planEvictionsLocked(const std::string& incomingGrap
         releaseRequests->push_back(releaseRequest);
         --residentCount;
     }
+    return residentCount < mConfig.maxResidentGraphs;
 }
 
 size_t DualPipelineScheduler::_residentGraphCountLocked() const {

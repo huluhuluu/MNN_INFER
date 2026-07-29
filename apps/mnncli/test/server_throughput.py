@@ -27,6 +27,8 @@ from urllib.request import Request, urlopen
 
 
 DEFAULT_TIMEOUT_S = 600.0
+DEFAULT_ADB_TIMEOUT_S = 600.0
+DEFAULT_COOLDOWN_TIMEOUT_S = 1800.0
 MIN_DEVICE_FREE_BYTES = 10 * 1024**3
 MAX_DEVICE_STAGE_BYTES = 64 * 1024**2
 MAX_HOST_RESULTS_BYTES = 256 * 1024**2
@@ -67,6 +69,7 @@ class Adb:
         result = subprocess.run(
             ["adb", "devices"], check=True, text=True,
             stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+            timeout=DEFAULT_ADB_TIMEOUT_S,
         )
         devices = [
             line.split("\t", 1)[0] for line in result.stdout.splitlines()
@@ -83,6 +86,7 @@ class Adb:
         return ["adb", "-s", self.serial]
 
     def run(self, *arguments: str, check: bool = True, **kwargs: Any) -> subprocess.CompletedProcess[str]:
+        kwargs.setdefault("timeout", DEFAULT_ADB_TIMEOUT_S)
         return subprocess.run(
             self.prefix + list(arguments), check=check, text=True,
             stdout=subprocess.PIPE, stderr=subprocess.STDOUT, **kwargs,
@@ -992,8 +996,13 @@ class OverheatError(RuntimeError):
     pass
 
 
-def wait_for_thermal_gate(adb: Adb, stop_server: Callable[[], None]) -> list[dict[str, Any]]:
+def wait_for_thermal_gate(
+    adb: Adb,
+    stop_server: Callable[[], None],
+    timeout_s: float = DEFAULT_COOLDOWN_TIMEOUT_S,
+) -> list[dict[str, Any]]:
     readings: list[dict[str, Any]] = []
+    deadline = time.monotonic() + timeout_s
     while True:
         temperature = read_phone_temperature(adb)
         readings.append({"time": time.time(), "temperature_c": temperature})
@@ -1008,6 +1017,8 @@ def wait_for_thermal_gate(adb: Adb, stop_server: Callable[[], None]) -> list[dic
             - min(item["temperature_c"] for item in readings) <= 1.0
         ):
             return readings
+        if time.monotonic() >= deadline:
+            raise TimeoutError(f"thermal gate did not pass within {timeout_s:.0f} seconds")
         time.sleep(10)
 
 
@@ -1073,6 +1084,8 @@ class TemperatureMonitor:
     def close(self) -> None:
         self._stop.set()
         self._thread.join(timeout=10)
+        if self._thread.is_alive():
+            raise RuntimeError("device resource monitor did not stop within 10 seconds")
 
 
 def _gzip_log(path: Path) -> Path:
@@ -1249,13 +1262,19 @@ def _run_cell_attempt(
     }
 
 
-def _wait_for_cool_device(adb: Adb) -> None:
+def _wait_for_cool_device(
+    adb: Adb,
+    timeout_s: float = DEFAULT_COOLDOWN_TIMEOUT_S,
+) -> None:
     readings: list[float] = []
+    deadline = time.monotonic() + timeout_s
     while True:
         readings.append(read_phone_temperature(adb))
         readings = readings[-7:]
         if len(readings) == 7 and max(readings) <= 32.0 and max(readings) - min(readings) <= 1.0:
             return
+        if time.monotonic() >= deadline:
+            raise TimeoutError(f"device cooldown did not finish within {timeout_s:.0f} seconds")
         time.sleep(10)
 
 

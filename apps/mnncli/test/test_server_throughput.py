@@ -278,6 +278,35 @@ class ResourceGuardTest(unittest.TestCase):
         ))
 
 
+class HarnessTimeoutTest(unittest.TestCase):
+    def test_adb_commands_have_a_default_timeout(self):
+        completed = mock.Mock(stdout="", returncode=0)
+        with mock.patch.object(throughput.subprocess, "run", return_value=completed) as run:
+            throughput.Adb("serial").run("shell", "true")
+
+        self.assertEqual(run.call_args.kwargs["timeout"], throughput.DEFAULT_ADB_TIMEOUT_S)
+
+    def test_thermal_gate_has_a_total_timeout(self):
+        with mock.patch.object(throughput, "read_phone_temperature", return_value=33.0), \
+                mock.patch.object(throughput.time, "sleep"):
+            with self.assertRaisesRegex(TimeoutError, "thermal gate"):
+                throughput.wait_for_thermal_gate(mock.Mock(), mock.Mock(), timeout_s=0)
+
+    def test_cooldown_has_a_total_timeout(self):
+        with mock.patch.object(throughput, "read_phone_temperature", return_value=33.0), \
+                mock.patch.object(throughput.time, "sleep"):
+            with self.assertRaisesRegex(TimeoutError, "cooldown"):
+                throughput._wait_for_cool_device(mock.Mock(), timeout_s=0)
+
+    def test_monitor_close_fails_if_worker_does_not_exit(self):
+        monitor = throughput.TemperatureMonitor(mock.Mock(), mock.Mock(), 123)
+        monitor._thread = mock.Mock()
+        monitor._thread.is_alive.return_value = True
+
+        with self.assertRaisesRegex(RuntimeError, "resource monitor"):
+            monitor.close()
+
+
 class MatrixConfigTest(unittest.TestCase):
     def test_matrix_builds_nine_greedy_low_precision_configs(self):
         host = {"llm_model": "llm.mnn", "llm_weight": "llm.mnn.weight"}

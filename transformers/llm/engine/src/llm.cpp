@@ -1327,7 +1327,8 @@ std::vector<std::vector<int>> Llm::generate(const std::vector<std::vector<int> >
             if (cancelRequested()) {
                 break;
             }
-            std::vector<std::shared_ptr<BatchScheduler::Chunk>> wave = mScheduler->scheduleWave(-1, 8);
+            std::vector<std::shared_ptr<BatchScheduler::Chunk>> wave =
+                mScheduler->scheduleWave(-1, BatchScheduler::MAX_BATCH_SIZE);
             if (wave.empty()) {
                 break;
             }
@@ -1544,33 +1545,17 @@ std::vector<std::vector<int>> Llm::generate(const std::vector<std::vector<int> >
                 break;
             }
         }
-    if (mContext->status == LlmStatus::INTERNAL_ERROR) {
+    if (mContext->status == LlmStatus::INTERNAL_ERROR ||
+        mContext->status == LlmStatus::USER_CANCEL) {
         mScheduler->clearPendingChunks();
     }
     for(int id: reqIds){
         std::vector<int> result = mScheduler->getResult(id);
-        BatchScheduler::RequestTiming timing;
-        const bool hasTiming = mScheduler->getRequestTiming(id, timing);
         // save result
         for(int j = 0; j < bs; j++) {
             if(reqIds[j] == id) {
                 ret[j] = result;
-                if (hasTiming && timing.registeredUs > 0 && timing.firstTokenUs >= timing.registeredUs &&
-                    timing.completedUs >= timing.firstTokenUs) {
-                    auto& metrics = mLastBatchRequestMetrics[j];
-                    metrics.valid = true;
-                    metrics.model_ttft_us = static_cast<int64_t>(timing.firstTokenUs - timing.registeredUs);
-                    metrics.model_latency_us = static_cast<int64_t>(timing.completedUs - timing.registeredUs);
-                    metrics.completion_tokens = timing.completionTokens;
-                    metrics.model_tpot_us = timing.completionTokens > 1 ?
-                        static_cast<int64_t>((timing.completedUs - timing.firstTokenUs) /
-                                             (timing.completionTokens - 1)) : 0;
-                    AcceptanceTrace::log(
-                        "event=batch_request_metrics request_id=%d request_scope=engine model_ttft_us=%lld model_tpot_us=%lld model_latency_us=%lld completion_tokens=%zu",
-                        id, static_cast<long long>(metrics.model_ttft_us),
-                        static_cast<long long>(metrics.model_tpot_us),
-                        static_cast<long long>(metrics.model_latency_us), metrics.completion_tokens);
-                }
+                recordBatchRequestMetrics(j, id);
                 break;
             }
         }
@@ -1585,6 +1570,30 @@ std::vector<std::vector<int>> Llm::generate(const std::vector<std::vector<int> >
         mScheduler->releaseReq(id);
     }
     return ret;
+}
+
+void Llm::recordBatchRequestMetrics(size_t batchIndex, int requestId) {
+    if (batchIndex >= mLastBatchRequestMetrics.size()) {
+        return;
+    }
+    BatchScheduler::RequestTiming timing;
+    if (!mScheduler->getRequestTiming(requestId, timing) || timing.registeredUs == 0 ||
+        timing.firstTokenUs < timing.registeredUs || timing.completedUs < timing.firstTokenUs) {
+        return;
+    }
+    auto& metrics = mLastBatchRequestMetrics[batchIndex];
+    metrics.valid = true;
+    metrics.model_ttft_us = static_cast<int64_t>(timing.firstTokenUs - timing.registeredUs);
+    metrics.model_latency_us = static_cast<int64_t>(timing.completedUs - timing.registeredUs);
+    metrics.completion_tokens = timing.completionTokens;
+    metrics.model_tpot_us = timing.completionTokens > 1 ?
+        static_cast<int64_t>((timing.completedUs - timing.firstTokenUs) /
+                             (timing.completionTokens - 1)) : 0;
+    AcceptanceTrace::log(
+        "event=batch_request_metrics request_id=%d request_scope=engine model_ttft_us=%lld model_tpot_us=%lld model_latency_us=%lld completion_tokens=%zu",
+        requestId, static_cast<long long>(metrics.model_ttft_us),
+        static_cast<long long>(metrics.model_tpot_us),
+        static_cast<long long>(metrics.model_latency_us), metrics.completion_tokens);
 }
 
 std::string Llm::apply_chat_template(const std::string& user_content) const {
@@ -1780,9 +1789,6 @@ Llm::~Llm() {
     resetDualPipelineExecutionState();
     mModulePool.clear();
     mModule.reset();
-#ifdef MNN_QNN_ENABLED
-    QNN::releaseAllRawGraphs();
-#endif
     mRuntimeManager.reset();
     mProcessorRuntimeManager.reset();
 }

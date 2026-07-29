@@ -327,20 +327,20 @@ public:
         };
 
         MNNTEST_ASSERT(scheduler.beginGraphPrefetchWave(waves));
-        MNNTEST_ASSERT(recorder.waitForCount(2));
+        MNNTEST_ASSERT(recorder.waitForCount(1));
         MNNTEST_ASSERT(scheduler.beginStageWave({0, 1}));
         MNNTEST_ASSERT(scheduler.enterGraphStage(0, 0));
         MNNTEST_ASSERT(scheduler.leaveGraphStage(0, 0));
-        MNNTEST_ASSERT(scheduler.enterGraphStage(1, 0));
-        MNNTEST_ASSERT(scheduler.leaveGraphStage(1, 0));
-        MNNTEST_ASSERT(scheduler.finishStageWave());
-        MNNTEST_ASSERT(scheduler.finishGraphPrefetchWave());
+        MNNTEST_ASSERT(!scheduler.enterGraphStage(1, 0));
+        scheduler.cancelStageWave();
+        MNNTEST_ASSERT(!scheduler.finishStageWave());
+        MNNTEST_ASSERT(!scheduler.finishGraphPrefetchWave());
         scheduler.stop();
 
         const std::vector<GraphEvent> events = recorder.snapshot();
-        MNNTEST_ASSERT(events.size() == 4);
+        MNNTEST_ASSERT(events.size() == 2);
         MNNTEST_ASSERT(events[0].type == "load" && events[0].graphId == "active_a");
-        MNNTEST_ASSERT(events[1].type == "load" && events[1].graphId == "active_b");
+        MNNTEST_ASSERT(events[1].type == "release" && events[1].graphId == "active_a");
         return true;
     }
 };

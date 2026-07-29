@@ -197,7 +197,7 @@ private:
     void _processTask(const Task& task);
     void _processGraphRequest(const GraphRequest& request);
     void _processGraphComplete(const std::string& graphId);
-    void _planEvictionsLocked(const std::string& incomingGraphId,
+    bool _planEvictionsLocked(const std::string& incomingGraphId,
                               std::vector<GraphRequest>* releaseRequests);
     size_t _residentGraphCountLocked() const;
     void _grantReadyStagesLocked();

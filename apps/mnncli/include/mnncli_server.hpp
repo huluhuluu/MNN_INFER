@@ -622,7 +622,7 @@ class MnncliServer {
 </body>
 </html>
     )""";
-    void Start(MNN::Transformer::Llm* llm, bool is_r1, const std::string& host = "127.0.0.1", int port = 8000,
+    bool Start(MNN::Transformer::Llm* llm, bool is_r1, const std::string& host = "127.0.0.1", int port = 8000,
                const std::string& scheduler_mode = "single_request");
     bool is_r1_{false};
 private:

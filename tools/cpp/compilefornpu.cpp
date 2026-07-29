@@ -1037,7 +1037,15 @@ int main(int argc, const char* argv[]) {
         for (auto index : inputIndexes) {
             newInputNames.emplace_back(net->tensorName()->GetAsString(index)->str());
         }
-        std::shared_ptr<MNN::Express::Module> m(MNN::Express::Module::load(inputNames, firstOutputNames, (const uint8_t*)bufferPair.first, bufferPair.second), MNN::Express::Module::destroy);
+        MNN::ScheduleConfig hostConfig;
+        std::shared_ptr<MNN::Express::Executor::RuntimeManager> hostRuntime(
+            MNN::Express::Executor::RuntimeManager::createRuntimeManager(hostConfig));
+        hostRuntime->setExternalFile((std::string(srcMNN) + ".weight").c_str());
+        std::shared_ptr<MNN::Express::Module> m(
+            MNN::Express::Module::load(inputNames, firstOutputNames,
+                                       (const uint8_t*)bufferPair.first, bufferPair.second,
+                                       hostRuntime),
+            MNN::Express::Module::destroy);
         for (int i=0; i<inputs.size(); ++i) {
             std::map<std::string, MNN::Express::VARP> vars;
             for (int v=0; v<inputNames.size(); ++v) {

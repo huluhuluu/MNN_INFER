@@ -124,8 +124,8 @@ def main():
     parser.add_argument("--thread_num", type=int, default=1)
     parser.add_argument("--precision", choices=["low", "high"], default="low")
     parser.add_argument("--memory", choices=["low", "high"], default="low")
-    parser.add_argument("--dual_pipeline_max_resident_graphs", type=int, default=2)
-    parser.add_argument("--dual_pipeline_prefetch_window", type=int, default=0)
+    parser.add_argument("--dual_pipeline_max_resident_graphs", type=int, default=30)
+    parser.add_argument("--dual_pipeline_prefetch_window", type=int, default=2)
     args = parser.parse_args()
 
     args.model = args.model.resolve()

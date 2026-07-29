@@ -7,6 +7,7 @@
 //
 
 #include "QNNBackend.hpp"
+#include "QNNRawGraphValidation.hpp"
 #include <MNN/QNNPrefetch.hpp>
 #include "core/MNNFileUtils.h"
 #include "QnnTypeMacros.hpp"
@@ -766,8 +767,19 @@ public:
     bool open(const char* filename) {
         _clean();
         mFile = MNNOpenFile(filename, MNN_FILE_READ);
+        if (mFile == INVALID_FILE) {
+            return false;
+        }
         mSize = MNNGetFileSize(mFile);
+        if (mSize == 0 || mSize == INVALID_SIZE) {
+            _clean();
+            return false;
+        }
         mAddr = MNNMmapFile(mFile, mSize, true);
+        if (mAddr == nullptr) {
+            _clean();
+            return false;
+        }
         return true;
     }
 };
@@ -812,12 +824,22 @@ public:
         if (size > 0) {
             buffer = bufferVec.data();
             std::unique_ptr<FileLoader> binaryFile(new FileLoader(path.c_str()));
-            binaryFile->offset((int64_t)offset);
-            binaryFile->read((char *)buffer, (int64_t)size);
+            if (binaryFile->offset((int64_t)offset) != 0 ||
+                !binaryFile->read((char *)buffer, (int64_t)size)) {
+                MNN_ERROR("MNN_QNN: Failed to read binary range from %s.\n", path.c_str());
+                return false;
+            }
         } else {
-            reader.open(path.c_str());
+            if (!reader.open(path.c_str())) {
+                MNN_ERROR("MNN_QNN: Failed to map binary %s.\n", path.c_str());
+                return false;
+            }
             buffer = reader.addr();
             size = reader.size();
+        }
+        if (buffer == nullptr || size == 0 || allGraphName.empty()) {
+            MNN_ERROR("MNN_QNN: Empty binary or graph metadata for %s.\n", path.c_str());
+            return false;
         }
 
         // 1. Set mGraphsInfo and mGraphCount from the buffer.
@@ -829,10 +851,22 @@ public:
             }
             Qnn_ContextBinarySize_t binarySize = 0;
             const QnnSystemContext_BinaryInfo_t* binaryInfo = nullptr;
-            CALL_QNN(QNN::gContext.systemInterface.systemContextGetBinaryInfo(systemContextHandle, buffer, size, &binaryInfo,&binarySize));
-            copyMetadataToGraphsInfo(binaryInfo, mGraphsInfo, mGraphCount);
+            const int binaryInfoError = QNN::gContext.systemInterface.systemContextGetBinaryInfo(
+                systemContextHandle, buffer, size, &binaryInfo, &binarySize) & 0xFFFF;
+            if (binaryInfoError != QNN_SUCCESS ||
+                !copyMetadataToGraphsInfo(binaryInfo, mGraphsInfo, mGraphCount)) {
+                MNN_ERROR("MNN_QNN: Failed to parse binary metadata for %s, error code %d.\n",
+                          path.c_str(), binaryInfoError);
+                QNN::gContext.systemInterface.systemContextFree(systemContextHandle);
+                return false;
+            }
             if (QNN_SUCCESS != QNN::gContext.systemInterface.systemContextFree(systemContextHandle)) {
                 MNN_ERROR("Could not free system context handle.");
+                return false;
+            }
+            if (!QNN::validateRawGraphMetadata(mGraphCount, allGraphName.size())) {
+                MNN_ERROR("MNN_QNN: Binary graph count %u does not match metadata graph count %zu.\n",
+                          mGraphCount, allGraphName.size());
                 return false;
             }
         }
@@ -848,19 +882,34 @@ public:
             // Create Graph profile
             MNN::QNN::createProfileHandle(QNN::gContext.interface, QNN::gContext.backendHandle, &mQnnProfileHandle);
 
-            CALL_QNN(QNN::gContext.interface.contextCreateFromBinary(QNN::gContext.backendHandle, QNN::gContext.deviceHandle, mQnnContextConfig, buffer, size, &mQnnContextHandle, mQnnProfileHandle));
+            const int createError = QNN::gContext.interface.contextCreateFromBinary(
+                QNN::gContext.backendHandle, QNN::gContext.deviceHandle, mQnnContextConfig,
+                buffer, size, &mQnnContextHandle, mQnnProfileHandle) & 0xFFFF;
+            if (createError != QNN_SUCCESS || mQnnContextHandle == nullptr) {
+                MNN_ERROR("MNN_QNN: Failed to create context from %s, error code %d.\n",
+                          path.c_str(), createError);
+                return false;
+            }
 
             mQnnGraphHandleVec.resize(mGraphCount, nullptr);
 
             std::vector<GraphInfo*> sortedGraphsInfo(mGraphCount, nullptr);
             std::map<std::string, GraphInfo*> graphInfoMap;
             for (int i = 0; i < mGraphCount; ++i) {
+                if (mGraphsInfo[i] == nullptr || mGraphsInfo[i]->graphName == nullptr) {
+                    MNN_ERROR("MNN_QNN: Binary contains an unnamed graph at index %d.\n", i);
+                    return false;
+                }
                 graphInfoMap[mGraphsInfo[i]->graphName] = mGraphsInfo[i];
             }
 
             for (int i = 0; i < mGraphCount; ++i) {
                 auto it = graphInfoMap.find(allGraphName[i]);
-                MNN_ASSERT(it != graphInfoMap.end());
+                if (it == graphInfoMap.end()) {
+                    MNN_ERROR("MNN_QNN: Graph %s is missing from binary %s.\n",
+                              allGraphName[i].c_str(), path.c_str());
+                    return false;
+                }
                 sortedGraphsInfo[i] = it->second;
             }
             for (int i = 0; i < mGraphCount; ++i) {
@@ -868,7 +917,13 @@ public:
             }
 
             for (int i = 0; i < mGraphCount; i++) {
-                CALL_QNN(QNN::gContext.interface.graphRetrieve(mQnnContextHandle, mGraphsInfo[i]->graphName, &(mQnnGraphHandleVec[i])));
+                const int retrieveError = QNN::gContext.interface.graphRetrieve(
+                    mQnnContextHandle, mGraphsInfo[i]->graphName, &(mQnnGraphHandleVec[i])) & 0xFFFF;
+                if (retrieveError != QNN_SUCCESS || mQnnGraphHandleVec[i] == nullptr) {
+                    MNN_ERROR("MNN_QNN: Failed to retrieve graph %s, error code %d.\n",
+                              mGraphsInfo[i]->graphName, retrieveError);
+                    return false;
+                }
             }
         }
 
@@ -878,11 +933,24 @@ public:
 
     bool invokModel(const std::vector<std::pair<const MNN::Tensor *, std::string>>& inputs, std::vector<std::pair<const MNN::Tensor *, std::string>>& outputs, int shapeIndex) {
         std::lock_guard<std::mutex> operationLock(gQnnContextOperationMutex);
+        if (!QNN::validateRawGraphShapeIndex(shapeIndex, mGraphCount) ||
+            static_cast<size_t>(shapeIndex) >= mQnnGraphHandleVec.size()) {
+            MNN_ERROR("MNN_QNN: Invalid shape index %d for %u graphs.\n", shapeIndex, mGraphCount);
+            return false;
+        }
         GraphInfo* graph = mGraphsInfo[shapeIndex];
         Qnn_GraphHandle_t qnnGraphHandle = mQnnGraphHandleVec[shapeIndex];
+        if (graph == nullptr || qnnGraphHandle == nullptr) {
+            MNN_ERROR("MNN_QNN: Missing graph metadata or handle for shape index %d.\n", shapeIndex);
+            return false;
+        }
 
         for (int i=0; i<inputs.size(); ++i) {
             auto t = inputs[i].first;
+            if (t == nullptr || t->host<void>() == nullptr) {
+                MNN_ERROR("MNN_QNN: Input tensor %s has no host buffer.\n", inputs[i].second.c_str());
+                return false;
+            }
             bool find = false;
             for (int j=0; j<graph->numInputTensors; ++j) {
                 auto& dstT = graph->inputTensors[j];
@@ -897,11 +965,17 @@ public:
                 }
             }
             if (!find) {
-                FUNC_PRINT(i);
+                MNN_ERROR("MNN_QNN: Input tensor %s is not present in graph %s.\n",
+                          inputs[i].second.c_str(), graph->graphName);
+                return false;
             }
         }
         for (int i=0; i<outputs.size(); ++i) {
             auto t = outputs[i].first;
+            if (t == nullptr || t->host<void>() == nullptr) {
+                MNN_ERROR("MNN_QNN: Output tensor %s has no host buffer.\n", outputs[i].second.c_str());
+                return false;
+            }
             bool find = false;
             for (int j=0; j<graph->numOutputTensors; ++j) {
                 auto& dstT = graph->outputTensors[j];
@@ -916,7 +990,9 @@ public:
                 }
             }
             if (!find) {
-                FUNC_PRINT(i);
+                MNN_ERROR("MNN_QNN: Output tensor %s is not present in graph %s.\n",
+                          outputs[i].second.c_str(), graph->graphName);
+                return false;
             }
         }
         const int errorCode = (QNN::gContext.interface.graphExecute(qnnGraphHandle, graph->inputTensors, graph->numInputTensors,
@@ -933,7 +1009,7 @@ public:
 struct RawGraphRecord {
     std::shared_ptr<RawExecutorWrapper> executor;
     std::string cacheKey;
-    std::vector<std::string> graphIds;
+    std::map<std::string, QNN::RawGraphAliasOwnership> aliases;
     bool pinned = false;
 };
 
@@ -968,13 +1044,14 @@ static std::string makeRawGraphCacheKey(const std::string& path,
     return key;
 }
 
-static void addGraphIdAliasLocked(const std::string& graphId, const std::shared_ptr<RawGraphRecord>& record) {
+static void acquireGraphIdAliasLocked(const std::string& graphId,
+                                      const std::shared_ptr<RawGraphRecord>& record,
+                                      bool pinResident) {
     if (graphId.empty() || !record) {
         return;
     }
-    if (std::find(record->graphIds.begin(), record->graphIds.end(), graphId) == record->graphIds.end()) {
-        record->graphIds.push_back(graphId);
-    }
+    record->aliases[graphId].acquire(pinResident);
+    record->pinned = record->pinned || pinResident;
     gRawGraphById[graphId] = record;
 }
 
@@ -1007,15 +1084,19 @@ static bool preloadRawGraphInternal(const MNN::QNN::RawGraphPrefetchConfig& conf
     {
         std::map<std::string, std::shared_ptr<RawGraphRecord>>::iterator iter = gRawGraphById.find(config.graphId);
         if (iter != gRawGraphById.end() && iter->second) {
-            iter->second->pinned = iter->second->pinned || config.pinResident;
+            if (iter->second->cacheKey != cacheKey) {
+                MNN_ERROR("MNN_QNN: Graph id %s is already bound to a different binary.\n",
+                          config.graphId.c_str());
+                return false;
+            }
+            acquireGraphIdAliasLocked(config.graphId, iter->second, config.pinResident);
             return true;
         }
     }
     {
         std::map<std::string, std::shared_ptr<RawGraphRecord>>::iterator iter = gRawGraphByKey.find(cacheKey);
         if (iter != gRawGraphByKey.end() && iter->second) {
-            iter->second->pinned = iter->second->pinned || config.pinResident;
-            addGraphIdAliasLocked(config.graphId, iter->second);
+            acquireGraphIdAliasLocked(config.graphId, iter->second, config.pinResident);
             return true;
         }
     }
@@ -1033,7 +1114,7 @@ static bool preloadRawGraphInternal(const MNN::QNN::RawGraphPrefetchConfig& conf
     record->cacheKey = cacheKey;
     record->pinned = config.pinResident;
     gRawGraphByKey[cacheKey] = record;
-    addGraphIdAliasLocked(config.graphId, record);
+    acquireGraphIdAliasLocked(config.graphId, record, config.pinResident);
     return true;
 }
 
@@ -1047,15 +1128,26 @@ static void releaseRawGraphInternal(const std::string& graphId, bool forceReleas
         return;
     }
     std::shared_ptr<RawGraphRecord> record = iter->second;
-    if (unpinAfterRelease) {
-        record->pinned = false;
-    }
-    if (record->pinned && !forceRelease) {
+    std::map<std::string, QNN::RawGraphAliasOwnership>::iterator alias =
+        record->aliases.find(graphId);
+    if (alias == record->aliases.end()) {
+        gRawGraphById.erase(iter);
         return;
     }
-    record->graphIds.erase(std::remove(record->graphIds.begin(), record->graphIds.end(), graphId), record->graphIds.end());
+    if (alias->second.pinned() && !forceRelease) {
+        return;
+    }
+    const bool aliasReleased = alias->second.release(unpinAfterRelease);
+    record->pinned = false;
+    for (const auto& item : record->aliases) {
+        record->pinned = record->pinned || item.second.pinned();
+    }
+    if (!aliasReleased) {
+        return;
+    }
+    record->aliases.erase(alias);
     gRawGraphById.erase(iter);
-    if (record->graphIds.empty()) {
+    if (record->aliases.empty()) {
         gRawGraphByKey.erase(record->cacheKey);
     }
 }
@@ -1089,7 +1181,12 @@ public:
         if (QNN::gContext.deviceHandle == nullptr) {
             return false;
         }
-        mGraphPath = MNNFilePathConcat(ctx->dir_path(), ctx->getAttr("path")->s()->str());
+        auto pathAttr = ctx->getAttr("path");
+        if (pathAttr == nullptr || pathAttr->s() == nullptr || pathAttr->s()->str().empty()) {
+            MNN_ERROR("MNN_QNN: Incorrect Plugin Op, can't find a valid 'path' attr.\n");
+            return false;
+        }
+        mGraphPath = MNNFilePathConcat(ctx->dir_path(), pathAttr->s()->str());
 
         mAllGraphName.clear();
         auto allGraphNameAttr = ctx->getAttr("allGraphName");
@@ -1150,9 +1247,13 @@ public:
             MNN_ERROR("MNN_QNN: Failed to execute Plugin Op.\n");
             return false;
         }
-        auto inputs = ctx->getAttr("inputs")->list();
+        auto inputsAttr = ctx->getAttr("inputs");
+        auto inputs = inputsAttr == nullptr ? nullptr : inputsAttr->list();
         auto inputTensor = ctx->inputs();
-        MNN_ASSERT(inputs->s()->size() == inputTensor.size());
+        if (inputs == nullptr || inputs->s() == nullptr || inputs->s()->size() != inputTensor.size()) {
+            MNN_ERROR("MNN_QNN: Input metadata does not match runtime inputs.\n");
+            return false;
+        }
         mInputs.resize(inputs->s()->size());
         mRealInputs.resize(inputTensor.size());
         for (int i = 0; i < inputs->s()->size(); ++i) {
@@ -1160,9 +1261,13 @@ public:
             mInputs[i].second = inputs->s()->GetAsString(i)->str();
             mInputs[i].first = mRealInputs[i].get();
         }
-        auto outputs = ctx->getAttr("outputs")->list();
+        auto outputsAttr = ctx->getAttr("outputs");
+        auto outputs = outputsAttr == nullptr ? nullptr : outputsAttr->list();
         auto outputTensor = ctx->outputs();
-        MNN_ASSERT(outputs->s()->size() == outputTensor.size());
+        if (outputs == nullptr || outputs->s() == nullptr || outputs->s()->size() != outputTensor.size()) {
+            MNN_ERROR("MNN_QNN: Output metadata does not match runtime outputs.\n");
+            return false;
+        }
         mOutputs.resize(outputs->s()->size());
         mRealOutputs.resize(outputTensor.size());
         for (int i = 0; i < outputs->s()->size(); ++i) {
@@ -1180,12 +1285,21 @@ public:
             MNN_ERROR("MNN_QNN: Failed to execute Plugin Op.\n");
             return false;
         }
+        if (!QNN::validateRawGraphShapeIndex(shapeIndex, mAllGraphName.size())) {
+            MNN_ERROR("MNN_QNN: Shape index %d is outside %zu graph names.\n",
+                      shapeIndex, mAllGraphName.size());
+            return false;
+        }
         #ifdef QNN_VERBOSE
         std::string graphName = ctx->getAttr("allGraphName")->list()->s()->GetAsString(shapeIndex)->str();
         MNN_PRINT("Graph name:%s, %d\n", graphName.c_str(), shapeIndex);
         #endif
         auto inputTensor = ctx->inputs();
         auto outputTensor = ctx->outputs();
+        if (inputTensor.size() != mInputs.size() || outputTensor.size() != mOutputs.size()) {
+            MNN_ERROR("MNN_QNN: Runtime tensor counts changed after resize.\n");
+            return false;
+        }
 
         for (int i=0; i<mInputs.size(); ++i) {
             ctx->backend()->onCopyBuffer(inputTensor[i], mRealInputs[i].get());

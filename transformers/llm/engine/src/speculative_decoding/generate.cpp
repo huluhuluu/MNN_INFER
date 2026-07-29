@@ -57,7 +57,8 @@ std::vector<std::vector<int>> ArGeneration::generateBatch(const std::vector<std:
     mLlm->mScheduler->setMaxNewTokens(maxNewTokens > 0 ? maxNewTokens : mLlm->mConfig->max_new_tokens());
     mLlm->applyKVCacheRuntimeHint(mLlm->mRuntimeManager, true);
 
-    while (std::shared_ptr<BatchScheduler::Chunk> chunk = mLlm->mScheduler->schedule(-1, 4)) {
+    while (std::shared_ptr<BatchScheduler::Chunk> chunk =
+               mLlm->mScheduler->schedule(-1, BatchScheduler::MAX_BATCH_SIZE)) {
         if (mLlm->cancelRequested()) {
             break;
         }
@@ -117,11 +118,16 @@ std::vector<std::vector<int>> ArGeneration::generateBatch(const std::vector<std:
         }
         mLlm->mBatchMeta->sync();
     }
+    if (mContext->status == LlmStatus::INTERNAL_ERROR ||
+        mContext->status == LlmStatus::USER_CANCEL) {
+        mLlm->mScheduler->clearPendingChunks();
+    }
     for(int id: reqIds){
         const auto result = mLlm->mScheduler->getResult(id);
         for(int j = 0; j < bs; j++) {
             if(reqIds[j] == id) {
                 ret[j] = result;
+                mLlm->recordBatchRequestMetrics(j, id);
                 break;
             }
         }

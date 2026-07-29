@@ -500,6 +500,10 @@ void EagleGeneration::generate(GenerationParams& param) {
     MNN::Timer _t;
     VARP inputEmbeds  = param.input_embeds;
     auto inputIds     = param.input_ids;
+    if (mLlm->cancelRequested()) {
+        mBasePendingKV.erase(reqId);
+        return;
+    }
     auto sampleToken  = mLlm->sample(param.outputs[0], param.validLogitStart, param.validLogitSize);
     mContext->current_token = sampleToken;
     mContext->history_tokens.push_back(mContext->current_token);

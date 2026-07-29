@@ -370,6 +370,7 @@ bool BatchScheduler::getRequestTiming(int req_id, RequestTiming& timing) const {
 bool BatchScheduler::releaseReq(int req_id) {
     int ind = mReqIdToIndex.count(req_id) ? mReqIdToIndex.at(req_id) : -1;
     if (ind < 0 || ind >= mRequests.size()) return false;
+    mPendingChunks.clear();
     if (!mRequests[ind]->finished && mActiveCount > 0) {
         mActiveCount--;
     }

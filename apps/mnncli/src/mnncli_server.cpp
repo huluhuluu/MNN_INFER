@@ -6,12 +6,14 @@
 #include "mnncli_server.hpp"
 #include "log_utils.hpp"
 #include "llm/AcceptanceTrace.hpp"
+#include "llm/BatchScheduler.hpp"
 #include <algorithm>
 #include <atomic>
 #include <chrono>
 #include <condition_variable>
 #include <deque>
 #include <iostream>
+#include <limits>
 #include <thread>
 
 namespace mnncli {
@@ -254,7 +256,7 @@ private:
         return Mode::SingleRequest;
     }
 
-    static constexpr size_t kMaxBatchSize = 8;
+    static constexpr size_t kMaxBatchSize = MNN::Transformer::BatchScheduler::MAX_BATCH_SIZE;
     static constexpr std::chrono::milliseconds kBatchCollectWindow{10};
 
     const char* modeName() const {
@@ -601,7 +603,7 @@ void AllowCors(httplib::Response& res) {
     res.set_header("Access-Control-Allow-Headers",  "Content-Type, Authorization");
 }
 
-void MnncliServer::Start(MNN::Transformer::Llm* llm, bool is_r1, const std::string& host, int port,
+bool MnncliServer::Start(MNN::Transformer::Llm* llm, bool is_r1, const std::string& host, int port,
                          const std::string& scheduler_mode) {
     this->is_r1_ = is_r1;
     coordinator_.reset(new RequestCoordinator(llm, scheduler_mode));
@@ -660,6 +662,11 @@ void MnncliServer::Start(MNN::Transformer::Llm* llm, bool is_r1, const std::stri
             return;
         }
         json request_json = json::parse(req.body, nullptr, false);
+        if (!request_json.is_object()) {
+            res.status = 400;
+            res.set_content(json{{"error", "Request body must be a JSON object."}}.dump(), "application/json");
+            return;
+        }
         if (!request_json.contains("messages") || !request_json["messages"].is_array()) {
             res.status = 400;
             res.set_content(json{{"error", "messages must be a non-empty array."}}.dump(), "application/json");
@@ -680,12 +687,49 @@ void MnncliServer::Start(MNN::Transformer::Llm* llm, bool is_r1, const std::stri
             res.set_content(json{{"error", "messages must be a non-empty array."}}.dump(), "application/json");
             return;
         }
+        if (request_json.contains("model") && !request_json["model"].is_string()) {
+            res.status = 400;
+            res.set_content(json{{"error", "model must be a string."}}.dump(), "application/json");
+            return;
+        }
+        if (request_json.contains("stream") && !request_json["stream"].is_boolean()) {
+            res.status = 400;
+            res.set_content(json{{"error", "stream must be a boolean."}}.dump(), "application/json");
+            return;
+        }
+        int max_tokens = -1;
+        if (request_json.contains("max_tokens")) {
+            bool validMaxTokens = false;
+            if (request_json["max_tokens"].is_number_unsigned()) {
+                const uint64_t value = request_json["max_tokens"].get<uint64_t>();
+                validMaxTokens = value > 0 && value <= static_cast<uint64_t>(std::numeric_limits<int>::max());
+                if (validMaxTokens) {
+                    max_tokens = static_cast<int>(value);
+                }
+            } else if (request_json["max_tokens"].is_number_integer()) {
+                const int64_t value = request_json["max_tokens"].get<int64_t>();
+                validMaxTokens = value > 0 && value <= std::numeric_limits<int>::max();
+                if (validMaxTokens) {
+                    max_tokens = static_cast<int>(value);
+                }
+            }
+            if (!validMaxTokens) {
+                res.status = 400;
+                res.set_content(json{{"error", "max_tokens must be a positive integer."}}.dump(), "application/json");
+                return;
+            }
+        }
         if (is_r1_) {
             prompts = ConvertToR1(std::move(prompts));
         }
         const std::string model = request_json.value("model", "undefined-model");
         const bool stream = request_json.value("stream", false);
-        const int max_tokens = request_json.value("max_tokens", -1);
+        if (stream && scheduler_mode != "single_request") {
+            res.status = 400;
+            res.set_content(json{{"error", "stream=true is only supported in single_request mode."}}.dump(),
+                            "application/json");
+            return;
+        }
         auto task = coordinator_->submit(std::move(prompts), max_tokens);
         if (!stream) {
             if (!task->wait()) {
@@ -784,8 +828,10 @@ void MnncliServer::Start(MNN::Transformer::Llm* llm, bool is_r1, const std::stri
     LOG_DEBUG("✅ Model initialized successfully!");
     LOG_DEBUG("🚀 Server ready at http://" + host + ":" + std::to_string(port));
     LOG_DEBUG("💡 Press Ctrl+C to stop the server");
-    if (!server.listen(host.c_str(), port)) {
+    const bool listenSucceeded = server.listen(host.c_str(), port);
+    if (!listenSucceeded) {
         LOG_DEBUG("Error: Could not start server on " + host + ":" + std::to_string(port));
     }
+    return listenSucceeded;
 }
 }
