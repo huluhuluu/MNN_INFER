@@ -25,13 +25,21 @@ void KVCacheCLManager::allocKVCache(const KVMeta* meta, int seqlen) {
     if(mOpenCLBackend->getPrecision() != BackendConfig::Precision_High){
         mByte = 2;
     }
-    reallocKVCache(meta, seqlen, false);
+    // Fully execute reallocKVCache (including Remove and the mPastLength update) in the
+    // resize phase. Otherwise mPastLength keeps meta->previous without subtracting
+    // meta->remove, so after a KV reset the prefill path selection in onResize sees a
+    // non-zero mPastKvSeqlen and skips the chunked path.
+    reallocKVCache(meta, seqlen, true);
+    mReallocDone = true;
 }
 
 bool KVCacheCLManager::reallocKVCache(const KVMeta* meta, int seqlen, bool isExecute) {
     if (!mKVCache) {
         return false;
     }
+    // Sync to the framework's authoritative KV length; prevents drift when onResize is
+    // skipped across repeated same-shape forwards.
+    mPastLength = meta->previous;
     int kvSeqlen = meta->previous + seqlen - meta->remove + meta->computeReverseSize();
     int start = mPastLength - meta->remove;
     cl_int res;
@@ -1679,9 +1687,16 @@ ErrorCode AttentionBufExecution::onExecute(const std::vector<Tensor *> &inputs, 
     MNN_PRINT("start AttentionBufExecution onExecute !\n");
 #endif
     if(nullptr != mMeta){
-        auto shape = inputs[0]->shape();
-        int seqlen = shape[1];
-        mKVCacheCLManager->reallocKVCache(mMeta, seqlen);
+        // allocKVCache already ran reallocKVCache(isExecute=true) during resize, so skip
+        // it here to avoid executing Remove twice. Decode iterations that reuse a resize
+        // leave mReallocDone false, so they still run it.
+        if (mKVCacheCLManager->isReallocDone()) {
+            mKVCacheCLManager->clearReallocDone();
+        } else {
+            auto shape = inputs[0]->shape();
+            int seqlen = shape[1];
+            mKVCacheCLManager->reallocKVCache(mMeta, seqlen);
+        }
     }
     UpdateArgs(inputs, outputs);
 #ifdef ENABLE_OPENCL_TIME_PROFILER

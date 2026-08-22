@@ -38,6 +38,14 @@ public:
     int maxLength() {
         return mMaxLength;
     }
+    // Set when allocKVCache runs reallocKVCache during resize, so onExecute can skip a
+    // second Remove pass.
+    bool isReallocDone() const {
+        return mReallocDone;
+    }
+    void clearReallocDone() {
+        mReallocDone = false;
+    }
     int numHead() {
         return mNumHead;
     }
@@ -50,6 +58,7 @@ public:
 
 private:
     bool mKVCache;
+    bool mReallocDone = false;
     const int mExpandChunk = 64;
     std::shared_ptr<cl::Buffer> mPastKey, mPastValue;
     int mPastLength = 0, mMaxLength = 0, mNumHead = 0, mKvNumHead = 0, mHeadDim = 0;
