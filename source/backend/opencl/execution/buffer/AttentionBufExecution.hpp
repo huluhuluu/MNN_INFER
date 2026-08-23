@@ -68,7 +68,7 @@ private:
     bool mFlashAttn = false;
     int mFaTq = 0, mFaLsz = 0;
     int mFaCausalSkip = 0;
-    int mFaMixed = 0, mFaSeg = 16, mFaSubgroup = 0, mFaHalfLs = 0;
+    int mFaMixed = 0, mFaSeg = 16, mFaSubgroup = 0, mFaHalfLs = 0, mFaRevQ = 0, mFaArithMask = 0;
     bool mFlashReportPending = false;
     void reportTransientMemory(int seqlen, const char* path);
     std::shared_ptr<KernelWrap> mKernel_flash;

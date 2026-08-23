@@ -1651,6 +1651,20 @@ __kernel void matmul_qkv_decode_b4(GLOBAL_SIZE_2_DIMS
 #ifndef FA_SEG
 #define FA_SEG 16
 #endif
+// FA_REVQ: process query tiles in descending order, on the theory that with a causal mask
+// the last q tile scans the whole KV history while the first scans one tile, so the longest
+// workgroups should start first rather than becoming the tail of the dispatch. MEASURED
+// WORSE (attn/conv 0.3585 vs 0.3197 at P=2048): the scheduler already hides the imbalance,
+// and descending order breaks the KV-cache locality that adjacent q tiles share. Kept only
+// so the negative result stays reproducible; do not enable.
+// FA_ARITH_MASK: derive the causal mask from the indices instead of reading the mask tensor.
+// The mask is [seq_len, kv_seq_len] and every head re-reads it, so the traffic is
+// O(seq_len^2 * head_num); computing it costs one comparison. Worth 6.4% (attn/conv 0.3197
+// -> 0.2993 at P=2048).
+// ONLY valid for a strictly lower-triangular mask. MNN's "full" attention_type generates
+// exactly that, but "mix" adds a sliding-window mask that also masks EARLY kv, which this
+// would wrongly unmask. Shape alone cannot distinguish the two, so this stays opt-in until
+// the causal property is actually verified rather than assumed.
 // FA_SUBGROUP: do the cross-thread rowmax/rowsum with sub_group_reduce_* instead of the
 // fp32 lS staging array. lS is the dominant local-memory consumer, and local footprint is
 // what caps residency on this device, so removing it lets FA_TQ grow without losing
@@ -1683,9 +1697,13 @@ void flash_attention_prefill(
         __private const int causal_skip) {
 
     const int tid = get_local_id(0);
+#ifdef FA_REVQ
+    const int qt  = q_tile_num - 1 - (int)get_global_id(1);
+#else
     const int qt  = get_global_id(1);          // query tile index
+#endif
     const int bh  = get_global_id(2);          // batch * head_num
-    if (qt >= q_tile_num || bh >= bh_num) {
+    if (qt < 0 || qt >= q_tile_num || bh >= bh_num) {
         return;
     }
     const int b   = bh / head_num;
@@ -1823,7 +1841,10 @@ void flash_attention_prefill(
             for (int q = 0; q < FA_TQ; ++q) {
                 const int gq = q_start + q;
                 float v = s[q] * scale;
-#if defined(ADD_MASK)
+#if defined(FA_ARITH_MASK)
+                // strictly lower triangular in mask coordinates, no tensor read at all
+                v = (mk_ok && mk > gq) ? FA_NEG : v;
+#elif defined(ADD_MASK)
                 const float mv = (mk_ok && gq < mask_q_len) ? (float)mask[gq * mask_kv_len + mk] : 0.0f;
                 v = fmax(v + mv, FA_NEG);
 #elif defined(SET_MASK)

@@ -1350,6 +1350,8 @@ ErrorCode AttentionBufExecution::flashAttnResize(const std::vector<Tensor *> &in
             buildOption.emplace("-cl-std=CL2.0");
             if(mFaHalfLs) { buildOption.emplace("-DFA_HALF_LS"); }
         }
+        if(mFaRevQ) { buildOption.emplace("-DFA_REVQ"); }
+        if(mFaArithMask) { buildOption.emplace("-DFA_ARITH_MASK"); }
         mKernel_flash = runtime->buildKernel("attention_buf", "flash_attention_prefill", buildOption, mOpenCLBackend->getPrecision(), inputs[0], outputs[0]);
 
         int qTileNum = UP_DIV(seqlen, mFaTq);
@@ -1709,23 +1711,37 @@ ErrorCode AttentionBufExecution::onResize(const std::vector<Tensor *> &inputs, c
         // ---- FlashAttention path selection (opt-in via MNN_OPENCL_FLASH_ATTENTION=1) ----
         if(getFlashAttnEnabled() && seqlen > 1) {
             auto runtime = mOpenCLBackend->getOpenCLRuntime();
-            // Measured optimum on Adreno (SM8750), P=1024, matched GPU clock:
-            //   TQ=4  LSZ=128 -> 14.62 ms  (local 3632 B, ~9 resident workgroups)
-            //   TQ=8  LSZ=64  -> 26.01 ms  (local 4448 B)
-            //   TQ=16 LSZ=128 -> 38.62 ms  (local 12992 B, only ~2 resident)
-            //   TQ=16 LSZ=64  -> 51.57 ms
-            // Occupancy dominates arithmetic intensity here: the highest-intensity
-            // tile is the slowest because its local footprint starves residency.
-            int tq = 4, lsz = 128;
-            // Mixed precision: fp16 multiply with fp16 accumulation over FA_SEG-term runs,
-            // flushed into fp32. Only meaningful when the tensors are actually fp16.
-            int mixed = (mOpenCLBackend->getPrecision() != BackendConfig::Precision_High) ? 1 : 0;
+            // Tile / variant defaults are the measured optimum on Adreno (SM8750) at
+            // P=1024, normalised against Convolution time because the shared device's GPU
+            // clock drifts >2x. attn/conv ratio, lower is better:
+            //   base (prefill/longPrefill)            0.1545 - 0.1558
+            //   TQ=8  LSZ=64  subgroup + fp16 lS      0.1687   <- default
+            //   TQ=4  LSZ=64  subgroup + fp16 lS      0.1714
+            //   TQ=4  LSZ=128 fp32                    0.2198
+            //   TQ=16 LSZ=64  subgroup + fp16 lS      0.2453
+            // Occupancy dominates arithmetic intensity: the highest-intensity tile is the
+            // slowest because its local footprint starves residency. fp16 lS halves the
+            // dominant local consumer, which is why the subgroup variant can afford TQ=8.
+            int tq = 8, lsz = 64;
+            // Mixed precision (fp16 multiply, segmented fp16 accumulation flushed to fp32)
+            // measured SLOWER on this device - private mem grows with FA_SEG and tracks the
+            // slowdown exactly, i.e. Adreno gives no fp16 ALU win here and the half
+            // accumulators only cost registers. Kept available, off by default.
+            int mixed = 0;
             int seg = 16;
-            // Subgroup rowmax needs the workgroup to be exactly one subgroup, so it is only
-            // valid when lsz equals the wave width. Off by default until measured.
-            int subgroup = 0;
-            // fp16 lS is only sound on the subgroup path (see the kernel comment)
-            int halfLs = 0;
+            // Subgroup rowmax/rowsum. Needs one workgroup == one subgroup, so lsz must be
+            // the wave width, and needs -cl-std=CL2.0 (the device advertises
+            // cl_khr_subgroups but MNN compiles at CL_HPP_TARGET_OPENCL_VERSION=110, where
+            // the builtins are rejected). If the build fails the probe below returns
+            // nullptr and we retry without it.
+            int subgroup = 1;
+            // fp16 lS is only sound together with FA_SUBGROUP: there phase 2a reduces S
+            // from registers, so lS only ever holds P in [0,1], never the raw logits.
+            int halfLs = 1;
+            // Both off by default until measured; arith-mask additionally requires a
+            // strictly lower-triangular mask, which cannot be proven from the shape alone.
+            int revq = 0;
+            int arithMask = 0;
             {
                 const char* e = getenv("MNN_FA_TQ");
                 if(nullptr != e) { tq = atoi(e); }
@@ -1739,6 +1755,10 @@ ErrorCode AttentionBufExecution::onResize(const std::vector<Tensor *> &inputs, c
                 if(nullptr != e) { subgroup = atoi(e); }
                 e = getenv("MNN_FA_HALF_LS");
                 if(nullptr != e) { halfLs = atoi(e); }
+                e = getenv("MNN_FA_REVQ");
+                if(nullptr != e) { revq = atoi(e); }
+                e = getenv("MNN_FA_ARITH_MASK");
+                if(nullptr != e) { arithMask = atoi(e); }
             }
             // shape / resource constraints, see the kernel header comment
             bool ok = (headDim % lsz == 0) && (lsz % tq == 0) && (tq % 4 == 0) && tq > 0 && lsz > 0;
@@ -1748,6 +1768,10 @@ ErrorCode AttentionBufExecution::onResize(const std::vector<Tensor *> &inputs, c
             }
             if(!subgroup) {
                 halfLs = 0;
+            }
+            // arithmetic mask replaces a float add-mask read; meaningless without a mask
+            if(!mHasMask || !mIsAddMask) {
+                arithMask = 0;
             }
             if(ok) {
                 // local memory: lQ + lS + lRed + lM + lL + lAlpha, all fp32
@@ -1774,10 +1798,42 @@ ErrorCode AttentionBufExecution::onResize(const std::vector<Tensor *> &inputs, c
                     probeOption.emplace("-cl-std=CL2.0");
                     if(halfLs) { probeOption.emplace("-DFA_HALF_LS"); }
                 }
+                if(revq) { probeOption.emplace("-DFA_REVQ"); }
+                if(arithMask) { probeOption.emplace("-DFA_ARITH_MASK"); }
                 if(mHasMask) {
                     probeOption.emplace(mIsAddMask ? "-DADD_MASK" : "-DSET_MASK");
                 }
                 probe = runtime->buildKernel("attention_buf", "flash_attention_prefill", probeOption, mOpenCLBackend->getPrecision(), inputs[0], outputs[0]);
+                if(nullptr == probe.get() && subgroup) {
+                    // CL2.0 / subgroups unavailable on this driver: fall back to the plain
+                    // variant rather than abandoning the fused path entirely, since it is
+                    // still the memory win even when it is not the fastest.
+                    static bool warnedSg = false;
+                    if(!warnedSg) {
+                        warnedSg = true;
+                        MNN_PRINT("MNN OpenCL: flash attention subgroup build failed, retrying without it\n");
+                    }
+                    subgroup = 0;
+                    halfLs = 0;
+                    tq = 4;
+                    lsz = 128;
+                    if(headDim % lsz != 0 || lsz % tq != 0) {
+                        tq = 4;
+                        lsz = 64;
+                    }
+                    probeOption.erase("-DFA_SUBGROUP");
+                    probeOption.erase("-cl-std=CL2.0");
+                    probeOption.erase("-DFA_HALF_LS");
+                    probeOption.erase("-DFA_TQ=" + std::to_string(8));
+                    probeOption.erase("-DFA_LSZ=" + std::to_string(64));
+                    probeOption.erase("-DFA_DPT=" + std::to_string(headDim / 64));
+                    probeOption.erase("-DFA_NLANE=" + std::to_string(64 / 8));
+                    probeOption.emplace("-DFA_TQ=" + std::to_string(tq));
+                    probeOption.emplace("-DFA_LSZ=" + std::to_string(lsz));
+                    probeOption.emplace("-DFA_DPT=" + std::to_string(headDim / lsz));
+                    probeOption.emplace("-DFA_NLANE=" + std::to_string(lsz / tq));
+                    probe = runtime->buildKernel("attention_buf", "flash_attention_prefill", probeOption, mOpenCLBackend->getPrecision(), inputs[0], outputs[0]);
+                }
                 if(nullptr == probe.get() || (int)runtime->getMaxWorkGroupSize(probe) < lsz) {
                     ok = false;
                 }
@@ -1789,6 +1845,8 @@ ErrorCode AttentionBufExecution::onResize(const std::vector<Tensor *> &inputs, c
                 mFaSeg = seg;
                 mFaSubgroup = subgroup;
                 mFaHalfLs = halfLs;
+                mFaRevQ = revq;
+                mFaArithMask = arithMask;
                 // Skipping whole KV tiles above the diagonal is only valid when the mask is
                 // causal. MNN's LLM generates causal (full) or causal+sliding (mix) float
                 // masks; other users of Attention may not, so require a float add-mask.
@@ -1802,8 +1860,8 @@ ErrorCode AttentionBufExecution::onResize(const std::vector<Tensor *> &inputs, c
                 static bool announced = false;
                 if(!announced) {
                     announced = true;
-                    MNN_PRINT("MNN OpenCL: flash attention ON (headDim=%d Tq=%d Tkv=%d causalSkip=%d mixed=%d seg=%d subgroup=%d halfLS=%d)\n",
-                              headDim, mFaTq, mFaLsz, mFaCausalSkip, mFaMixed, mFaSeg, mFaSubgroup, mFaHalfLs);
+                    MNN_PRINT("MNN OpenCL: flash attention ON (headDim=%d Tq=%d Tkv=%d causalSkip=%d mixed=%d seg=%d subgroup=%d halfLS=%d revq=%d arithMask=%d)\n",
+                              headDim, mFaTq, mFaLsz, mFaCausalSkip, mFaMixed, mFaSeg, mFaSubgroup, mFaHalfLs, mFaRevQ, mFaArithMask);
                     // hard numbers instead of arithmetic guesses about the tile budget
                     size_t kLocal = 0, kPrivate = 0, kMulti = 0, kWg = 0;
                     auto dev = runtime->getFirstGPUDevicePtr();
