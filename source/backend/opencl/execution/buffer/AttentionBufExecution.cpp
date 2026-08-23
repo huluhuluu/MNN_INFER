@@ -11,6 +11,7 @@
 #include "backend/opencl/execution/buffer/AttentionBufExecution.hpp"
 #include "backend/opencl/execution/buffer/PackedAttentionBufExecution.hpp"
 #include <algorithm>
+#include "backend/opencl/core/BufferPool.hpp"
 #include <fstream>
 #include <cstdlib>
 namespace MNN {
@@ -1340,6 +1341,15 @@ ErrorCode AttentionBufExecution::flashAttnResize(const std::vector<Tensor *> &in
         buildOption.emplace("-DFA_LSZ=" + std::to_string(mFaLsz));
         buildOption.emplace("-DFA_DPT=" + std::to_string(headDim / mFaLsz));
         buildOption.emplace("-DFA_NLANE=" + std::to_string(mFaLsz / mFaTq));
+        if(mFaMixed) {
+            buildOption.emplace("-DFA_MIXED");
+            buildOption.emplace("-DFA_SEG=" + std::to_string(mFaSeg));
+        }
+        if(mFaSubgroup) {
+            buildOption.emplace("-DFA_SUBGROUP");
+            buildOption.emplace("-cl-std=CL2.0");
+            if(mFaHalfLs) { buildOption.emplace("-DFA_HALF_LS"); }
+        }
         mKernel_flash = runtime->buildKernel("attention_buf", "flash_attention_prefill", buildOption, mOpenCLBackend->getPrecision(), inputs[0], outputs[0]);
 
         int qTileNum = UP_DIV(seqlen, mFaTq);
@@ -1699,15 +1709,46 @@ ErrorCode AttentionBufExecution::onResize(const std::vector<Tensor *> &inputs, c
         // ---- FlashAttention path selection (opt-in via MNN_OPENCL_FLASH_ATTENTION=1) ----
         if(getFlashAttnEnabled() && seqlen > 1) {
             auto runtime = mOpenCLBackend->getOpenCLRuntime();
-            int tq = 16, lsz = 64;
+            // Measured optimum on Adreno (SM8750), P=1024, matched GPU clock:
+            //   TQ=4  LSZ=128 -> 14.62 ms  (local 3632 B, ~9 resident workgroups)
+            //   TQ=8  LSZ=64  -> 26.01 ms  (local 4448 B)
+            //   TQ=16 LSZ=128 -> 38.62 ms  (local 12992 B, only ~2 resident)
+            //   TQ=16 LSZ=64  -> 51.57 ms
+            // Occupancy dominates arithmetic intensity here: the highest-intensity
+            // tile is the slowest because its local footprint starves residency.
+            int tq = 4, lsz = 128;
+            // Mixed precision: fp16 multiply with fp16 accumulation over FA_SEG-term runs,
+            // flushed into fp32. Only meaningful when the tensors are actually fp16.
+            int mixed = (mOpenCLBackend->getPrecision() != BackendConfig::Precision_High) ? 1 : 0;
+            int seg = 16;
+            // Subgroup rowmax needs the workgroup to be exactly one subgroup, so it is only
+            // valid when lsz equals the wave width. Off by default until measured.
+            int subgroup = 0;
+            // fp16 lS is only sound on the subgroup path (see the kernel comment)
+            int halfLs = 0;
             {
                 const char* e = getenv("MNN_FA_TQ");
                 if(nullptr != e) { tq = atoi(e); }
                 e = getenv("MNN_FA_LSZ");
                 if(nullptr != e) { lsz = atoi(e); }
+                e = getenv("MNN_FA_MIXED");
+                if(nullptr != e) { mixed = atoi(e); }
+                e = getenv("MNN_FA_SEG");
+                if(nullptr != e) { seg = atoi(e); }
+                e = getenv("MNN_FA_SUBGROUP");
+                if(nullptr != e) { subgroup = atoi(e); }
+                e = getenv("MNN_FA_HALF_LS");
+                if(nullptr != e) { halfLs = atoi(e); }
             }
             // shape / resource constraints, see the kernel header comment
             bool ok = (headDim % lsz == 0) && (lsz % tq == 0) && (tq % 4 == 0) && tq > 0 && lsz > 0;
+            if(mixed) {
+                // the segment loop over head_dim is unrolled by FA_SEG, so it must divide
+                if(seg <= 0 || headDim % seg != 0) { mixed = 0; }
+            }
+            if(!subgroup) {
+                halfLs = 0;
+            }
             if(ok) {
                 // local memory: lQ + lS + lRed + lM + lL + lAlpha, all fp32
                 size_t localBytes = ((size_t)headDim * tq + (size_t)lsz * tq + (size_t)tq * (lsz / tq) + 3 * (size_t)tq) * sizeof(float);
@@ -1724,6 +1765,15 @@ ErrorCode AttentionBufExecution::onResize(const std::vector<Tensor *> &inputs, c
                 probeOption.emplace("-DFA_DPT=" + std::to_string(headDim / lsz));
                 probeOption.emplace("-DFA_NLANE=" + std::to_string(lsz / tq));
                 probeOption.emplace("-DNUMHEAD_GROUP_SIZE=" + std::to_string(numHead / kvNumHead));
+                if(mixed) {
+                    probeOption.emplace("-DFA_MIXED");
+                    probeOption.emplace("-DFA_SEG=" + std::to_string(seg));
+                }
+                if(subgroup) {
+                    probeOption.emplace("-DFA_SUBGROUP");
+                    probeOption.emplace("-cl-std=CL2.0");
+                    if(halfLs) { probeOption.emplace("-DFA_HALF_LS"); }
+                }
                 if(mHasMask) {
                     probeOption.emplace(mIsAddMask ? "-DADD_MASK" : "-DSET_MASK");
                 }
@@ -1735,6 +1785,10 @@ ErrorCode AttentionBufExecution::onResize(const std::vector<Tensor *> &inputs, c
             if(ok) {
                 mFaTq = tq;
                 mFaLsz = lsz;
+                mFaMixed = mixed;
+                mFaSeg = seg;
+                mFaSubgroup = subgroup;
+                mFaHalfLs = halfLs;
                 // Skipping whole KV tiles above the diagonal is only valid when the mask is
                 // causal. MNN's LLM generates causal (full) or causal+sliding (mix) float
                 // masks; other users of Attention may not, so require a float add-mask.
@@ -1744,11 +1798,12 @@ ErrorCode AttentionBufExecution::onResize(const std::vector<Tensor *> &inputs, c
                     if(nullptr != e) { mFaCausalSkip = atoi(e); }
                 }
                 mFlashAttn = true;
+                mFlashReportPending = true;
                 static bool announced = false;
                 if(!announced) {
                     announced = true;
-                    MNN_PRINT("MNN OpenCL: flash attention ON (headDim=%d Tq=%d Tkv=%d causalSkip=%d)\n",
-                              headDim, mFaTq, mFaLsz, mFaCausalSkip);
+                    MNN_PRINT("MNN OpenCL: flash attention ON (headDim=%d Tq=%d Tkv=%d causalSkip=%d mixed=%d seg=%d subgroup=%d halfLS=%d)\n",
+                              headDim, mFaTq, mFaLsz, mFaCausalSkip, mFaMixed, mFaSeg, mFaSubgroup, mFaHalfLs);
                     // hard numbers instead of arithmetic guesses about the tile budget
                     size_t kLocal = 0, kPrivate = 0, kMulti = 0, kWg = 0;
                     auto dev = runtime->getFirstGPUDevicePtr();
@@ -1758,11 +1813,27 @@ ErrorCode AttentionBufExecution::onResize(const std::vector<Tensor *> &inputs, c
                         probe->get().getWorkGroupInfo(*dev, CL_KERNEL_PREFERRED_WORK_GROUP_SIZE_MULTIPLE, &kMulti);
                         probe->get().getWorkGroupInfo(*dev, CL_KERNEL_WORK_GROUP_SIZE, &kWg);
                     }
+                    if(nullptr != dev) {
+                        // subgroup / wave capabilities decide whether the fp32 rowmax
+                        // array in local memory can be replaced by a wave reduction
+                        std::string ext = dev->getInfo<CL_DEVICE_EXTENSIONS>();
+                        MNN_PRINT("MNN OpenCL: device extensions = %s\n", ext.c_str());
+                        MNN_PRINT("MNN OpenCL: subgroup search  cl_khr_subgroups=%d  cl_intel_subgroups=%d  cl_qcom_subgroup=%d  cl_khr_fp16=%d  shuffle=%d\n",
+                                  (int)(ext.find("cl_khr_subgroups") != std::string::npos),
+                                  (int)(ext.find("cl_intel_subgroups") != std::string::npos),
+                                  (int)(ext.find("cl_qcom_subgroup") != std::string::npos),
+                                  (int)(ext.find("cl_khr_fp16") != std::string::npos),
+                                  (int)(ext.find("shuffle") != std::string::npos));
+                    }
                     MNN_PRINT("MNN OpenCL: flash kernel  DEVICE_LOCAL_MEM=%llu  KERNEL_LOCAL_MEM=%llu  KERNEL_PRIVATE_MEM=%llu (spill if >0)  PREFERRED_WG_MULTIPLE=%llu  KERNEL_MAX_WG=%llu\n",
                               (unsigned long long)runtime->getMaxLocalMem(), (unsigned long long)kLocal,
                               (unsigned long long)kPrivate, (unsigned long long)kMulti, (unsigned long long)kWg);
                 }
-                return flashAttnResize(inputs, outputs);
+                {
+                    auto code = flashAttnResize(inputs, outputs);
+                    reportTransientMemory(seqlen, "flashAttn");
+                    return code;
+                }
             }
             static bool warned = false;
             if(!warned) {
@@ -1806,9 +1877,50 @@ ErrorCode AttentionBufExecution::onResize(const std::vector<Tensor *> &inputs, c
         }else{
             prefillResize(inputs, outputs);
         }
+        reportTransientMemory(seqlen, mLongPrefill ? "longPrefill" : "prefill");
     }
 
     return NO_ERROR;
+}
+
+// MNN_OPENCL_MEM_REPORT=1 prints the peak transient (per-forward scratch) OpenCL bytes.
+// VmRSS cannot see these buffers - they are kgsl device mappings - so this is the only
+// way to compare the attention paths' memory use.
+void AttentionBufExecution::reportTransientMemory(int seqlen, const char* path) {
+    static int enabled = -1;
+    if (enabled < 0) {
+        const char* e = getenv("MNN_OPENCL_MEM_REPORT");
+        enabled = (nullptr != e && e[0] == '1') ? 1 : 0;
+    }
+    if (!enabled) {
+        return;
+    }
+    // Exact per-op attribution: the scratch tensors THIS attention layer asked for. The
+    // pool totals below are process-wide and include every other op, so they are noisy for
+    // attribution; these numbers are computed straight from the tensor shapes this path
+    // allocated, and are what actually scale with seqlen.
+    auto bytesOf = [this](const std::shared_ptr<Tensor>& t) -> double {
+        if (nullptr == t.get()) {
+            return 0.0;
+        }
+        return (double)t->elementSize() * mOpenCLBackend->getBytes(t.get());
+    };
+    double own = 0.0;
+    if (!mFlashAttn) {
+        own = bytesOf(mTempQK) + bytesOf(mTempSoftMax) + bytesOf(mTempQ) + bytesOf(mTempMask);
+    }
+    static double ownMax = 0.0;
+    if (own > ownMax) {
+        ownMax = own;
+    }
+    static size_t lastPeak = 0;
+    size_t peak = clTransientPeakBytes();
+    if (peak != lastPeak || own >= ownMax) {
+        lastPeak = peak;
+        MNN_PRINT("[MNN_MEM] path=%s seqlen=%d kvlen=%d  attnScratch=%.3f MiB  poolPeak=%.2f MiB  poolLive=%.2f MiB\n",
+                  path, seqlen, mKvSeqlen, own / 1048576.0, peak / 1048576.0,
+                  clTransientLiveBytes() / 1048576.0);
+    }
 }
 
 int AttentionBufExecution::getExecuteTime(){

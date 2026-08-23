@@ -24,10 +24,25 @@ struct OpenCLBufferNode{
     std::shared_ptr<cl::Buffer> buffer;
 };
 
+// Transient (DYNAMIC / DYNAMIC_IN_EXECUTION) OpenCL buffer accounting.
+//
+// On Adreno every cl::Buffer here is created with CL_MEM_ALLOC_HOST_PTR and ends up as a
+// /dev/kgsl-3d0 device mapping. Pages the GPU writes and the host never maps do NOT enter
+// the process VmRSS, so sampling /proc/<pid>/status cannot see these allocations at all -
+// a 64 MiB attention QK buffer is invisible there. This counter is the only way to measure
+// them. Weights live in the STATIC pool and are excluded, so the number reflects just the
+// per-forward scratch memory.
+void clTrackTransientAlloc(size_t bytes);
+size_t clTransientPeakBytes();
+size_t clTransientLiveBytes();
+void clResetTransientPeak();
+
 class BufferPool : public NonCopyable {
 public:
-    BufferPool(cl::Context& context, cl_mem_flags flags) : mContext(context) {
+    // isTransient: true for the per-forward DYNAMIC pools, false for the STATIC weight pool
+    BufferPool(cl::Context& context, cl_mem_flags flags, bool isTransient = false) : mContext(context) {
         mFlag = flags;
+        mIsTransient = isTransient;
     }
 
     cl::Buffer* alloc(size_t size, bool separate = false);
@@ -43,6 +58,7 @@ private:
     cl::Context& mContext;
     cl_mem_flags mFlag;
     size_t mTotalSize = 0;
+    bool mIsTransient = false;
 };
 
 class BufferExecutionPool : public NonCopyable {

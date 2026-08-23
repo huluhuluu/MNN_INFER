@@ -249,7 +249,12 @@ void CLRuntime::onGabageCollect(int level) {
 
 float CLRuntime::onGetMemoryInMB() {
     auto staticMemoryInMB = mBufferPool->totalSize() / 1024.0f / 1024.0f;
-    return staticMemoryInMB;
+    // The backend's DYNAMIC / DYNAMIC_IN_EXECUTION pools are separate objects from this
+    // runtime-level static pool, so they were not counted here at all. They hold the
+    // per-forward scratch (attention QK/softmax tensors and friends), which is exactly the
+    // memory that scales with seqlen, so include their peak.
+    auto transientPeakInMB = clTransientPeakBytes() / 1024.0f / 1024.0f;
+    return staticMemoryInMB + transientPeakInMB;
 }
 
 bool CLRuntime::isCLRuntimeError() {
@@ -293,7 +298,7 @@ OpenCLBackend::OpenCLBackend(BackendConfig::PrecisionMode precision, BackendConf
         }
 
         mImagePoolFirst.reset(new ImagePool(mOpenCLRuntime->context()));
-        mBufferPoolFirst.reset(new BufferPool(mOpenCLRuntime->context(), CL_MEM_READ_WRITE | CL_MEM_ALLOC_HOST_PTR));
+        mBufferPoolFirst.reset(new BufferPool(mOpenCLRuntime->context(), CL_MEM_READ_WRITE | CL_MEM_ALLOC_HOST_PTR, true));
         mExecutionBufferPool.reset(new BufferExecutionPool(mOpenCLRuntime->context(), mOpenCLRuntime->commandQueue(), CL_MEM_READ_WRITE | CL_MEM_ALLOC_HOST_PTR));
         mImagePool = mImagePoolFirst.get();
         mBufferPool = mBufferPoolFirst.get();
@@ -531,7 +536,7 @@ bool OpenCLBackend::onSelectDynamicAllocator(int index, int maxIndex) {
     }
     if (maxIndex > 1 && mImagePoolSecond.get() == nullptr) {
         mImagePoolSecond.reset(new ImagePool(mOpenCLRuntime->context()));
-        mBufferPoolSecond.reset(new BufferPool(mOpenCLRuntime->context(), CL_MEM_READ_WRITE | CL_MEM_ALLOC_HOST_PTR));
+        mBufferPoolSecond.reset(new BufferPool(mOpenCLRuntime->context(), CL_MEM_READ_WRITE | CL_MEM_ALLOC_HOST_PTR, true));
     }
     if (index == 0) {
         mImagePool = mImagePoolFirst.get();

@@ -1,6 +1,9 @@
 #ifdef MNN_SUPPORT_FP16
 #pragma OPENCL EXTENSION cl_khr_fp16 : enable
 #endif
+#ifdef FA_SUBGROUP
+#pragma OPENCL EXTENSION cl_khr_subgroups : enable
+#endif
 
 #define GLOBAL_SIZE_3_DIMS \
     __private const int global_size_dim0, __private const int global_size_dim1, __private const int global_size_dim2,
@@ -1639,7 +1642,22 @@ __kernel void matmul_qkv_decode_b4(GLOBAL_SIZE_2_DIMS
 #ifndef FA_NLANE
 #define FA_NLANE (FA_LSZ / FA_TQ)
 #endif
+// FA_MIXED: multiply in fp16 and accumulate in fp16 for runs of FA_SEG terms, then flush
+// into an fp32 running sum. Adreno runs half math at up to 2x the fp32 rate, and Q/K/V/P
+// are already fp16 in memory, so the fp32 path was both converting on every load and giving
+// up that rate. Error compounds only within a segment (FA_SEG terms) instead of across all
+// head_dim * kv_seq_len terms, so this is far closer to fp32 than a fully fp16 accumulator.
+// The online-softmax state (m, l, acc) stays fp32 regardless.
+#ifndef FA_SEG
+#define FA_SEG 16
+#endif
+// FA_SUBGROUP: do the cross-thread rowmax/rowsum with sub_group_reduce_* instead of the
+// fp32 lS staging array. lS is the dominant local-memory consumer, and local footprint is
+// what caps residency on this device, so removing it lets FA_TQ grow without losing
+// occupancy. Requires cl_khr_subgroups (present on this Adreno) and FA_LSZ == subgroup size
+// so that one workgroup is exactly one subgroup.
 #define FA_NEG (-1e30f)
+#define FA_QG (FA_TQ / 4)
 
 __kernel __attribute__((reqd_work_group_size(FA_LSZ, 1, 1)))
 void flash_attention_prefill(
@@ -1678,7 +1696,17 @@ void flash_attention_prefill(
     // fp16 for Q and P: same precision they already have in global memory, and
     // halving the local footprint is what lets several workgroups stay resident
     __local FLOAT lQ[FA_HD * FA_TQ];       // [d][q], so the q loop can vload4
+#if defined(FA_SUBGROUP) && defined(FA_HALF_LS)
+    // On the subgroup path lS only ever holds P in [0,1], never the raw logits, so fp16 is
+    // safe here and halves the dominant local-memory consumer.
+    __local FLOAT lS[FA_LSZ * FA_TQ];      // [kv][q], kv-major for phase 3 vload4
+    #define FA_LS_LOAD4(ptr) convert_float4(vload4(0, (ptr)))
+    #define FA_LS_STORE(ptr, v) (*(ptr) = (FLOAT)(v))
+#else
     __local float lS[FA_LSZ * FA_TQ];      // [kv][q], kv-major for phase 3 vload4
+    #define FA_LS_LOAD4(ptr) vload4(0, (ptr))
+    #define FA_LS_STORE(ptr, v) (*(ptr) = (v))
+#endif
     __local float lRed[FA_TQ * FA_NLANE];
     __local float lM[FA_TQ];
     __local float lL[FA_TQ];
@@ -1735,6 +1763,42 @@ void flash_attention_prefill(
         }
         if (kv_ok) {
             const int kbase = koff + kv_base;
+#ifdef FA_MIXED
+            // past_key and lQ are both already fp16, so this loop does no conversions at
+            // all in the inner body - only one convert per FA_SEG terms at the flush.
+            float4 sacc[FA_QG];
+            #pragma unroll
+            for (int g = 0; g < FA_QG; ++g) {
+                sacc[g] = (float4)0.0f;
+            }
+            for (int dseg = 0; dseg < FA_HD; dseg += FA_SEG) {
+                half4 hacc[FA_QG];
+                #pragma unroll
+                for (int g = 0; g < FA_QG; ++g) {
+                    hacc[g] = (half4)0.0h;
+                }
+                #pragma unroll
+                for (int dd = 0; dd < FA_SEG; ++dd) {
+                    const int d = dseg + dd;
+                    const half4 kval = (half4)((half)past_key[kbase + d * max_len]);
+                    #pragma unroll
+                    for (int g = 0; g < FA_QG; ++g) {
+                        hacc[g] = mad(kval, vload4(0, lQ + d * FA_TQ + g * 4), hacc[g]);
+                    }
+                }
+                #pragma unroll
+                for (int g = 0; g < FA_QG; ++g) {
+                    sacc[g] += convert_float4(hacc[g]);
+                }
+            }
+            #pragma unroll
+            for (int g = 0; g < FA_QG; ++g) {
+                s[g * 4 + 0] = sacc[g].s0;
+                s[g * 4 + 1] = sacc[g].s1;
+                s[g * 4 + 2] = sacc[g].s2;
+                s[g * 4 + 3] = sacc[g].s3;
+            }
+#else
             for (int d = 0; d < FA_HD; ++d) {
                 const float kval = (float)past_key[kbase + d * max_len];
                 #pragma unroll
@@ -1746,6 +1810,7 @@ void flash_attention_prefill(
                     s[q + 3] = mad(kval, qv.s3, s[q + 3]);
                 }
             }
+#endif
         }
 
         // ---- mask, then publish S so the row max can be reduced across threads.
@@ -1767,12 +1832,30 @@ void flash_attention_prefill(
 #endif
                 v = (kv_ok && gq < seq_len) ? v : FA_NEG;
                 s[q] = v;
+#ifndef FA_SUBGROUP
                 lS[tid * FA_TQ + q] = v;
+#endif
+            }
+        }
+#ifndef FA_SUBGROUP
+        barrier(CLK_LOCAL_MEM_FENCE);
+#endif
+
+        // ---- phase 2a: running max and the rescale factor alpha ----
+#ifdef FA_SUBGROUP
+        // One reduction per query row across the whole subgroup; no local staging.
+        #pragma unroll
+        for (int q = 0; q < FA_TQ; ++q) {
+            const float tmax = sub_group_reduce_max(s[q]);
+            if (tid == 0) {
+                const float m_prev = lM[q];
+                const float m_new  = fmax(m_prev, tmax);
+                lAlpha[q] = native_exp(m_prev - m_new);
+                lM[q] = m_new;
             }
         }
         barrier(CLK_LOCAL_MEM_FENCE);
-
-        // ---- phase 2a: running max and the rescale factor alpha ----
+#else
         {
             float pmax = FA_NEG;
             const int kend = (r_lane + 1) * FA_TQ;
@@ -1796,8 +1879,23 @@ void flash_attention_prefill(
             lM[tid] = m_new;
         }
         barrier(CLK_LOCAL_MEM_FENCE);
+#endif
 
         // ---- phase 2b: P = exp(S - m_new), straight from registers ----
+#ifdef FA_SUBGROUP
+        // one pass: compute P, publish it, and reduce its row sum in the same loop
+        #pragma unroll
+        for (int q = 0; q < FA_TQ; ++q) {
+            const float sv = s[q];
+            const float pq = (sv <= FA_NEG) ? 0.0f : native_exp(sv - lM[q]);
+            FA_LS_STORE(lS + tid * FA_TQ + q, pq);
+            const float tsum = sub_group_reduce_add(pq);
+            if (tid == 0) {
+                lL[q] = lL[q] * lAlpha[q] + tsum;
+            }
+        }
+        barrier(CLK_LOCAL_MEM_FENCE);
+#else
         #pragma unroll
         for (int q = 0; q < FA_TQ; ++q) {
             const float sv = s[q];
@@ -1821,6 +1919,7 @@ void flash_attention_prefill(
             }
             lL[tid] = lL[tid] * lAlpha[tid] + tsum;
         }
+#endif
 
         // ---- phase 3: acc = acc * alpha + P * V ----
         #pragma unroll
@@ -1833,6 +1932,47 @@ void flash_attention_prefill(
         }
         {
             const int kend = min(FA_LSZ, kv_seq_len - kv_base);
+#ifdef FA_MIXED
+            // Same segmenting over the KV dimension. acc itself stays fp32 across tiles -
+            // it is the online-softmax state and sees thousands of terms.
+            for (int kseg = 0; kseg < kend; kseg += FA_SEG) {
+                const int kstop = min(kseg + FA_SEG, kend);
+                half4 hacc[FA_QG][FA_DPT];
+                #pragma unroll
+                for (int g = 0; g < FA_QG; ++g) {
+                    #pragma unroll
+                    for (int d = 0; d < FA_DPT; ++d) {
+                        hacc[g][d] = (half4)0.0h;
+                    }
+                }
+                for (int k = kseg; k < kstop; ++k) {
+                    half vv[FA_DPT];
+                    #pragma unroll
+                    for (int d = 0; d < FA_DPT; ++d) {
+                        vv[d] = (half)past_value[voff + (kv_base + k) * FA_HD + d];
+                    }
+                    #pragma unroll
+                    for (int g = 0; g < FA_QG; ++g) {
+                        const half4 pv = convert_half4(FA_LS_LOAD4(lS + k * FA_TQ + g * 4));
+                        #pragma unroll
+                        for (int d = 0; d < FA_DPT; ++d) {
+                            hacc[g][d] = mad(pv, (half4)vv[d], hacc[g][d]);
+                        }
+                    }
+                }
+                #pragma unroll
+                for (int g = 0; g < FA_QG; ++g) {
+                    #pragma unroll
+                    for (int d = 0; d < FA_DPT; ++d) {
+                        const float4 f = convert_float4(hacc[g][d]);
+                        acc[g * 4 + 0][d] += f.s0;
+                        acc[g * 4 + 1][d] += f.s1;
+                        acc[g * 4 + 2][d] += f.s2;
+                        acc[g * 4 + 3][d] += f.s3;
+                    }
+                }
+            }
+#else
             for (int k = 0; k < kend; ++k) {
                 float vv[FA_DPT];
                 #pragma unroll
@@ -1841,7 +1981,7 @@ void flash_attention_prefill(
                 }
                 #pragma unroll
                 for (int q = 0; q < FA_TQ; q += 4) {
-                    const float4 pv = vload4(0, lS + k * FA_TQ + q);
+                    const float4 pv = FA_LS_LOAD4(lS + k * FA_TQ + q);
                     #pragma unroll
                     for (int d = 0; d < FA_DPT; ++d) {
                         acc[q + 0][d] = mad(pv.s0, vv[d], acc[q + 0][d]);
@@ -1851,6 +1991,7 @@ void flash_attention_prefill(
                     }
                 }
             }
+#endif
         }
         barrier(CLK_LOCAL_MEM_FENCE);
     }

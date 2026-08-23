@@ -9,6 +9,20 @@
 #include "backend/opencl/core/BufferPool.hpp"
 namespace MNN {
 namespace OpenCL {
+
+// See the comment in BufferPool.hpp: OpenCL buffers are kgsl device mappings and are
+// invisible to VmRSS, so transient allocation has to be counted explicitly.
+static size_t gTransientLive = 0;
+static size_t gTransientPeak = 0;
+void clTrackTransientAlloc(size_t bytes) {
+    gTransientLive += bytes;
+    if (gTransientLive > gTransientPeak) {
+        gTransientPeak = gTransientLive;
+    }
+}
+size_t clTransientPeakBytes() { return gTransientPeak; }
+size_t clTransientLiveBytes() { return gTransientLive; }
+void clResetTransientPeak() { gTransientPeak = gTransientLive; }
 cl::Buffer* BufferPool::alloc(size_t size, bool separate) {
     if (!separate) {
         auto iter = mFreeList.lower_bound(size);
@@ -21,6 +35,9 @@ cl::Buffer* BufferPool::alloc(size_t size, bool separate) {
     std::shared_ptr<OpenCLBufferNode> node(new OpenCLBufferNode);
     cl_int ret = CL_SUCCESS;
     mTotalSize += size;
+    if (mIsTransient) {
+        clTrackTransientAlloc(size);
+    }
     node->size = size;
     node->buffer.reset(new cl::Buffer(mContext, mFlag, size, NULL, &ret));
     if (nullptr == node->buffer.get() || ret != CL_SUCCESS) {
@@ -74,6 +91,7 @@ std::shared_ptr<OpenCLBufferNode> BufferExecutionPool::alloc(size_t size, bool s
             auto maxIter = mFreeList.rbegin();
             auto node = maxIter->second;
             mTotalSize += size - node.get()->size;
+            clTrackTransientAlloc(size - node.get()->size);
             node.get()->size = size;
             node.get()->buffer.reset(new cl::Buffer(mContext, mFlag, size, NULL, &ret));
             if (nullptr == node.get()->buffer.get() || ret != CL_SUCCESS) {
@@ -87,6 +105,7 @@ std::shared_ptr<OpenCLBufferNode> BufferExecutionPool::alloc(size_t size, bool s
     std::shared_ptr<OpenCLBufferNode> node(new OpenCLBufferNode);
     cl_int ret = CL_SUCCESS;
     mTotalSize += size;
+    clTrackTransientAlloc(size);
     node->size = size;
     node->buffer.reset(new cl::Buffer(mContext, mFlag, size, NULL, &ret));
     if (nullptr == node->buffer.get() || ret != CL_SUCCESS) {

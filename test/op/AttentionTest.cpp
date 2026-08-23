@@ -816,6 +816,18 @@ public:
             MNN_ERROR("FlashAttentionTest[%s]: output size mismatch\n", name);
             return false;
         }
+        // Guard against silent fallback. If the fused kernel fails to build (bad tile
+        // params, an unsupported extension, ...) onResize quietly falls back to
+        // prefillResize, both passes run the SAME code, and every naive check passes with a
+        // zero diff. Different accumulation orders can never agree bit-for-bit across a
+        // whole tensor, so bit-identical output means the fused kernel did not run.
+        if (::memcmp(res[0].data(), res[1].data(), res[0].size() * sizeof(float)) == 0) {
+            MNN_ERROR("FlashAttentionTest[%s] FAILED: flash output is bit-identical to the "
+                      "default path, so the fused kernel did not run (silent fallback - "
+                      "check the OpenCL build log for a kernel build error)\n", name);
+            return false;
+        }
+
         // direct A/B diff over the whole tensor
         double abMax = 0.0, abSq = 0.0, refSq = 0.0;
         for (size_t i = 0; i < res[0].size(); ++i) {
