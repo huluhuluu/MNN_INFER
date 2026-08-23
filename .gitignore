@@ -396,3 +396,6 @@ task_plan.md
 context.md
 .clangd
 .codex_backups
+project/android/fa_results*/
+project/android/fa_sweep_p*/
+project/android/fa_paired_p*/

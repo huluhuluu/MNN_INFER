@@ -105,6 +105,7 @@ public:
     uint64_t GetKernelWaveSize(std::shared_ptr<KernelWrap> kernel);
     std::vector<uint32_t> getMaxWorkItemSizes();
     uint64_t getMaxLocalMem() const;
+    ::cl::Device* getFirstGPUDevicePtr() const { return mFirstGPUDevicePtr.get(); }
     uint32_t getUseRecordableQueueSize(){
         return mUseRecordableQueueSize;
     }

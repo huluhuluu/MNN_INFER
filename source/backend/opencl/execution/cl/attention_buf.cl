@@ -1595,3 +1595,279 @@ __kernel void matmul_qkv_decode_b4(GLOBAL_SIZE_2_DIMS
     const int output_offset = y * head_dim + x4;
     vstore4(CONVERT_FLOAT4(out0), 0, output + output_offset);
 }
+// ---------------------------------------------------------------------------
+// FlashAttention: Q*K^T -> online softmax -> P*V fused into one kernel. The
+// S tile lives in local memory / registers and never reaches global memory, so
+// nothing here scales with seqlen^2.
+//
+// Compile-time parameters, chosen in AttentionBufExecution::onResize from the
+// measured device limits (CL_DEVICE_LOCAL_MEM_SIZE, CL_KERNEL_WORK_GROUP_SIZE,
+// CL_KERNEL_PREFERRED_WORK_GROUP_SIZE_MULTIPLE):
+//   FA_HD    head_dim, must be a multiple of FA_LSZ
+//   FA_TQ    query rows per workgroup tile; multiple of 4, divides FA_LSZ
+//   FA_LSZ   workgroup size, and also the KV rows per tile (Tkv == FA_LSZ)
+//   FA_DPT   FA_HD / FA_LSZ, head-dim columns each thread owns during P*V
+//   FA_NLANE FA_LSZ / FA_TQ, threads cooperating on one row's reduction
+// Optional: ADD_MASK / SET_MASK (same semantics as the other kernels here).
+//
+// Thread mapping
+//   phase 1  thread tid owns KV column tid and computes S[q][tid] for all q
+//   phase 2  threads regroup as (row, lane) for the cross-thread reductions
+//   phase 3  thread tid owns head-dim columns [tid*FA_DPT, tid*FA_DPT+FA_DPT)
+//
+// Precision: m, l and acc are fp32 (fp16 loses too much over thousands of
+// accumulated terms). Q/K/V/P in local memory stay fp16, which is exactly the
+// precision they already have in global memory, so nothing is lost there.
+//
+// Register pressure matters more than anything else here: every loop over q or
+// d is fully unrolled and free of break/continue so that s[]/acc[] stay in
+// registers. A data-dependent exit in those loops forces the arrays into
+// private (scratch) memory and costs ~2x.
+// ---------------------------------------------------------------------------
+#ifndef FA_HD
+#define FA_HD 128
+#endif
+#ifndef FA_TQ
+#define FA_TQ 16
+#endif
+#ifndef FA_LSZ
+#define FA_LSZ 64
+#endif
+#ifndef FA_DPT
+#define FA_DPT (FA_HD / FA_LSZ)
+#endif
+#ifndef FA_NLANE
+#define FA_NLANE (FA_LSZ / FA_TQ)
+#endif
+#define FA_NEG (-1e30f)
+
+__kernel __attribute__((reqd_work_group_size(FA_LSZ, 1, 1)))
+void flash_attention_prefill(
+        __global const FLOAT *query,     // [batch, seq_len, head_num, head_dim]
+        __global const FLOAT *past_key,  // [batch, kv_head_num, head_dim, max_len]
+        __global const FLOAT *past_value,// [batch, kv_head_num, max_len, head_dim]
+#ifdef ADD_MASK
+        __global const FLOAT *mask,      // [.., mask_q_len, mask_kv_len]
+#elif defined(SET_MASK)
+        __global const int *mask,
+#endif
+        __global FLOAT *output,          // [batch, seq_len, head_num, head_dim]
+        __private const float scale,
+        __private const int seq_len,
+        __private const int kv_seq_len,
+        __private const int max_len,
+        __private const int mask_q_len,
+        __private const int mask_kv_len,
+        __private const int head_num,
+        __private const int kv_head_num,
+        __private const int q_tile_num,
+        __private const int bh_num,
+        __private const int causal_skip) {
+
+    const int tid = get_local_id(0);
+    const int qt  = get_global_id(1);          // query tile index
+    const int bh  = get_global_id(2);          // batch * head_num
+    if (qt >= q_tile_num || bh >= bh_num) {
+        return;
+    }
+    const int b   = bh / head_num;
+    const int hn  = bh % head_num;
+    const int kvh = hn / NUMHEAD_GROUP_SIZE;
+    const int q_start = qt * FA_TQ;
+
+    // fp16 for Q and P: same precision they already have in global memory, and
+    // halving the local footprint is what lets several workgroups stay resident
+    __local FLOAT lQ[FA_HD * FA_TQ];       // [d][q], so the q loop can vload4
+    __local float lS[FA_LSZ * FA_TQ];      // [kv][q], kv-major for phase 3 vload4
+    __local float lRed[FA_TQ * FA_NLANE];
+    __local float lM[FA_TQ];
+    __local float lL[FA_TQ];
+    __local float lAlpha[FA_TQ];
+
+    // ---- load the Q tile verbatim (scale is applied to S instead, so this is
+    //      an exact fp16 -> fp16 copy) ----
+    for (int i = tid; i < FA_HD * FA_TQ; i += FA_LSZ) {
+        const int q = i / FA_HD;
+        const int d = i - q * FA_HD;           // consecutive tid -> consecutive d
+        const int gq = q_start + q;
+        lQ[d * FA_TQ + q] = (gq < seq_len) ? query[((b * seq_len + gq) * head_num + hn) * FA_HD + d] : (FLOAT)0;
+    }
+    if (tid < FA_TQ) {
+        lM[tid] = FA_NEG;
+        lL[tid] = 0.0f;
+    }
+
+    float acc[FA_TQ][FA_DPT];
+    #pragma unroll
+    for (int q = 0; q < FA_TQ; ++q) {
+        #pragma unroll
+        for (int d = 0; d < FA_DPT; ++d) {
+            acc[q][d] = 0.0f;
+        }
+    }
+    barrier(CLK_LOCAL_MEM_FENCE);
+
+    const int r_row  = tid % FA_TQ;            // consecutive tid -> consecutive
+    const int r_lane = tid / FA_TQ;            // lS address, no bank conflict
+    const int d0 = tid * FA_DPT;
+
+    // Causal bound. The mask maps kv -> kv + mask_kv_len - kv_seq_len and
+    // q -> q_start + ql, and everything whose mask-kv index exceeds its mask-q
+    // index is masked out, so a KV tile starting past the tile's last query row
+    // contributes nothing and can be skipped outright. That is ~half the QK
+    // FLOPs at long prompts.
+    const int kv_limit = causal_skip
+            ? min(kv_seq_len, q_start + FA_TQ + kv_seq_len - mask_kv_len)
+            : kv_seq_len;
+
+    const int koff = (b * kv_head_num + kvh) * FA_HD * max_len + tid;
+    const int voff = (b * kv_head_num + kvh) * max_len * FA_HD + d0;
+
+    for (int kv_base = 0; kv_base < kv_limit; kv_base += FA_LSZ) {
+        const int kv = kv_base + tid;
+        const int kv_ok = (kv < kv_seq_len);
+
+        // ---- phase 1: S[q][tid] = sum_d Q[q][d] * K[d][kv] ----
+        float s[FA_TQ];
+        #pragma unroll
+        for (int q = 0; q < FA_TQ; ++q) {
+            s[q] = 0.0f;
+        }
+        if (kv_ok) {
+            const int kbase = koff + kv_base;
+            for (int d = 0; d < FA_HD; ++d) {
+                const float kval = (float)past_key[kbase + d * max_len];
+                #pragma unroll
+                for (int q = 0; q < FA_TQ; q += 4) {
+                    const float4 qv = convert_float4(vload4(0, lQ + d * FA_TQ + q));
+                    s[q + 0] = mad(kval, qv.s0, s[q + 0]);
+                    s[q + 1] = mad(kval, qv.s1, s[q + 1]);
+                    s[q + 2] = mad(kval, qv.s2, s[q + 2]);
+                    s[q + 3] = mad(kval, qv.s3, s[q + 3]);
+                }
+            }
+        }
+
+        // ---- mask, then publish S so the row max can be reduced across threads.
+        //      No break/continue here: that would stop the unroll and push s[]
+        //      into scratch memory.
+        {
+            const int mk = kv + mask_kv_len - kv_seq_len;
+            const int mk_ok = kv_ok && (mk >= 0) && (mk < mask_kv_len);
+            #pragma unroll
+            for (int q = 0; q < FA_TQ; ++q) {
+                const int gq = q_start + q;
+                float v = s[q] * scale;
+#if defined(ADD_MASK)
+                const float mv = (mk_ok && gq < mask_q_len) ? (float)mask[gq * mask_kv_len + mk] : 0.0f;
+                v = fmax(v + mv, FA_NEG);
+#elif defined(SET_MASK)
+                const int mvi = (mk_ok && gq < mask_q_len) ? mask[gq * mask_kv_len + mk] : 0;
+                v = (mvi == 0) ? FA_NEG : v;
+#endif
+                v = (kv_ok && gq < seq_len) ? v : FA_NEG;
+                s[q] = v;
+                lS[tid * FA_TQ + q] = v;
+            }
+        }
+        barrier(CLK_LOCAL_MEM_FENCE);
+
+        // ---- phase 2a: running max and the rescale factor alpha ----
+        {
+            float pmax = FA_NEG;
+            const int kend = (r_lane + 1) * FA_TQ;
+            for (int k = r_lane * FA_TQ; k < kend; ++k) {
+                pmax = fmax(pmax, lS[k * FA_TQ + r_row]);
+            }
+            lRed[r_lane * FA_TQ + r_row] = pmax;
+        }
+        barrier(CLK_LOCAL_MEM_FENCE);
+        if (tid < FA_TQ) {
+            float tmax = lRed[tid];
+            #pragma unroll
+            for (int l = 1; l < FA_NLANE; ++l) {
+                tmax = fmax(tmax, lRed[l * FA_TQ + tid]);
+            }
+            const float m_prev = lM[tid];
+            const float m_new  = fmax(m_prev, tmax);
+            // both operands are finite (S is clamped to FA_NEG), so this can
+            // never produce inf - inf
+            lAlpha[tid] = native_exp(m_prev - m_new);
+            lM[tid] = m_new;
+        }
+        barrier(CLK_LOCAL_MEM_FENCE);
+
+        // ---- phase 2b: P = exp(S - m_new), straight from registers ----
+        #pragma unroll
+        for (int q = 0; q < FA_TQ; ++q) {
+            const float sv = s[q];
+            lS[tid * FA_TQ + q] = (sv <= FA_NEG) ? 0.0f : native_exp(sv - lM[q]);
+        }
+        barrier(CLK_LOCAL_MEM_FENCE);
+        {
+            float psum = 0.0f;
+            const int kend = (r_lane + 1) * FA_TQ;
+            for (int k = r_lane * FA_TQ; k < kend; ++k) {
+                psum += lS[k * FA_TQ + r_row];
+            }
+            lRed[r_lane * FA_TQ + r_row] = psum;
+        }
+        barrier(CLK_LOCAL_MEM_FENCE);
+        if (tid < FA_TQ) {
+            float tsum = lRed[tid];
+            #pragma unroll
+            for (int l = 1; l < FA_NLANE; ++l) {
+                tsum += lRed[l * FA_TQ + tid];
+            }
+            lL[tid] = lL[tid] * lAlpha[tid] + tsum;
+        }
+
+        // ---- phase 3: acc = acc * alpha + P * V ----
+        #pragma unroll
+        for (int q = 0; q < FA_TQ; ++q) {
+            const float a = lAlpha[q];
+            #pragma unroll
+            for (int d = 0; d < FA_DPT; ++d) {
+                acc[q][d] *= a;
+            }
+        }
+        {
+            const int kend = min(FA_LSZ, kv_seq_len - kv_base);
+            for (int k = 0; k < kend; ++k) {
+                float vv[FA_DPT];
+                #pragma unroll
+                for (int d = 0; d < FA_DPT; ++d) {
+                    vv[d] = (float)past_value[voff + (kv_base + k) * FA_HD + d];
+                }
+                #pragma unroll
+                for (int q = 0; q < FA_TQ; q += 4) {
+                    const float4 pv = vload4(0, lS + k * FA_TQ + q);
+                    #pragma unroll
+                    for (int d = 0; d < FA_DPT; ++d) {
+                        acc[q + 0][d] = mad(pv.s0, vv[d], acc[q + 0][d]);
+                        acc[q + 1][d] = mad(pv.s1, vv[d], acc[q + 1][d]);
+                        acc[q + 2][d] = mad(pv.s2, vv[d], acc[q + 2][d]);
+                        acc[q + 3][d] = mad(pv.s3, vv[d], acc[q + 3][d]);
+                    }
+                }
+            }
+        }
+        barrier(CLK_LOCAL_MEM_FENCE);
+    }
+
+    // ---- epilogue: out = acc / l. Predicated store, not an early break, so the
+    //      loop still unrolls and acc[] stays in registers.
+    #pragma unroll
+    for (int q = 0; q < FA_TQ; ++q) {
+        const int gq = q_start + q;
+        const float lsum = lL[q];
+        const float inv = (lsum > 0.0f) ? (1.0f / lsum) : 0.0f;
+        if (gq < seq_len) {
+            const int ooff = ((b * seq_len + gq) * head_num + hn) * FA_HD + d0;
+            #pragma unroll
+            for (int d = 0; d < FA_DPT; ++d) {
+                output[ooff + d] = (FLOAT)(acc[q][d] * inv);
+            }
+        }
+    }
+}

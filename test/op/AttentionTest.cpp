@@ -601,6 +601,293 @@ SpeedAttentionTest() = default;
     }
 };
 
+
+// ---------------------------------------------------------------------------
+// FlashAttention correctness test (OpenCL only).
+//
+// Runs the same Attention op three ways on identical inputs and compares:
+//   A) default prefillResize / longPrefillResize path
+//   B) MNN_OPENCL_FLASH_ATTENTION=1 fused path
+//   C) a double-precision host reference over head 0
+// The inputs are pre-rounded to fp16 so the host reference sees exactly the
+// values the GPU sees; the only remaining differences are accumulation order
+// and accumulator precision. Pass criterion is "FlashAttention is at least as
+// close to the double reference as the default path is", which is the property
+// that actually matters and does not depend on the default path's own error.
+// ---------------------------------------------------------------------------
+class FlashAttentionTest : public MNNTestCase {
+public:
+    virtual ~FlashAttentionTest() = default;
+
+    // round-to-nearest-even into IEEE fp16 precision, kept in a float
+    static float quantHalf(float f) {
+        uint32_t x;
+        ::memcpy(&x, &f, 4);
+        const uint32_t sign = x & 0x80000000u;
+        int exp = (int)((x >> 23) & 0xffu) - 127;
+        uint32_t man = x & 0x7fffffu;
+        if (exp < -14) {
+            float z = 0.0f;
+            return sign ? -z : z;
+        }
+        uint32_t keep = man >> 13;
+        const uint32_t rem = man & 0x1fffu;
+        if (rem > 0x1000u || (rem == 0x1000u && (keep & 1u))) {
+            keep++;
+        }
+        if (keep == 0x400u) { keep = 0; exp++; }
+        const uint32_t y = sign | ((uint32_t)(exp + 127) << 23) | (keep << 13);
+        float r;
+        ::memcpy(&r, &y, 4);
+        return r;
+    }
+
+    static VARP makeQKV(int seqLen, int heads, int headDim, int seed, std::vector<float>& host) {
+        VARP v = _Input({1, seqLen, heads, headDim}, NCHW, halide_type_of<float>());
+        auto ptr = v->writeMap<float>();
+        const int total = seqLen * heads * headDim;
+        host.resize(total);
+        unsigned int st = (unsigned int)(seed * 2654435761u + 12345u);
+        for (int i = 0; i < total; ++i) {
+            st = st * 1103515245u + 12345u;
+            float val = (float)((st >> 16) & 0x7fffu) / 32767.0f * 0.5f - 0.25f;
+            val = quantHalf(val);
+            ptr[i] = val;
+            host[i] = val;
+        }
+        v->unMap();
+        return v;
+    }
+    static VARP makeCausalMask(int seqLen) {
+        VARP m = _Input({1, 1, seqLen, seqLen}, NCHW, halide_type_of<float>());
+        auto ptr = m->writeMap<float>();
+        for (int i = 0; i < seqLen; ++i) {
+            for (int j = 0; j < seqLen; ++j) {
+                ptr[i * seqLen + j] = (j > i) ? std::numeric_limits<float>::lowest() : 0.0f;
+            }
+        }
+        m->unMap();
+        return m;
+    }
+
+    // The shared _makeAttentionModule uses numThread = 1, but the OpenCL Attention creator
+    // is only registered for BUFFER while OpenCLBackend defaults to IMAGE on Adreno, so the
+    // op would silently land on the CPU backup backend. Llm sets numThread |= 64
+    // (MNN_GPU_MEMORY_BUFFER) for exactly this reason.
+    static std::shared_ptr<Module> makeModuleBuffer() {
+        auto Q = _Input();
+        auto K = _Input();
+        auto V = _Input();
+        auto mask = _Input();
+        std::shared_ptr<MNN::OpT> attention(new MNN::OpT);
+        attention->type = MNN::OpType_Attention;
+        attention->main.type = MNN::OpParameter_AttentionParam;
+        attention->main.value = new MNN::AttentionParamT;
+        attention->main.AsAttentionParam()->kv_cache = true;
+        auto o = Variable::create(Expr::create(attention.get(), {Q, K, V, mask}));
+        auto buffer = Variable::save({o});
+        MNN::ScheduleConfig config;
+        auto status = MNNTestSuite::get()->pStaus;
+        config.type = (MNNForwardType)status.forwardType;
+        MNN::BackendConfig bnConfig;
+        bnConfig.memory = (MNN::BackendConfig::MemoryMode)status.memory;
+        bnConfig.precision = (MNN::BackendConfig::PrecisionMode)status.precision;
+        bnConfig.power = (MNN::BackendConfig::PowerMode)status.power;
+        config.backendConfig = &bnConfig;
+        config.numThread = 1;
+        if (config.type == MNN_FORWARD_OPENCL) {
+            config.numThread |= 64;
+        }
+        std::shared_ptr<Executor::RuntimeManager> rtmgr(Executor::RuntimeManager::createRuntimeManager(config));
+        rtmgr->setHintPtr(MNN::Interpreter::KVCACHE_INFO, &gMeta);
+        rtmgr->setHint(MNN::Interpreter::ATTENTION_OPTION, 8);
+        std::shared_ptr<Module> m(Module::load({}, {}, (uint8_t*)buffer.data(), buffer.size(), rtmgr));
+        return m;
+    }
+
+    static void setFlash(int on) {
+#if defined(_WIN32)
+        _putenv_s("MNN_OPENCL_FLASH_ATTENTION", on ? "1" : "0");
+#else
+        setenv("MNN_OPENCL_FLASH_ATTENTION", on ? "1" : "0", 1);
+#endif
+    }
+
+    // double-precision attention for one query head, causal, over the whole KV history
+    static void goldHead(const std::vector<float>& q, int qLen, int numHead, int headDim,
+                         const std::vector<float>& kAll, const std::vector<float>& vAll,
+                         int kvLen, int kvNumHead, int pastLen, int head,
+                         std::vector<double>& out) {
+        const int group = numHead / kvNumHead;
+        const int kvh = head / group;
+        const double scale = 1.0 / sqrt((double)headDim);
+        out.assign((size_t)qLen * headDim, 0.0);
+        std::vector<double> logits(kvLen);
+        for (int i = 0; i < qLen; ++i) {
+            const float* qp = q.data() + ((size_t)i * numHead + head) * headDim;
+            const int last = pastLen + i;
+            double mx = -1e300;
+            for (int j = 0; j <= last && j < kvLen; ++j) {
+                const float* kp = kAll.data() + ((size_t)j * kvNumHead + kvh) * headDim;
+                double acc = 0.0;
+                for (int d = 0; d < headDim; ++d) {
+                    acc += (double)qp[d] * (double)kp[d];
+                }
+                logits[j] = acc * scale;
+                if (logits[j] > mx) { mx = logits[j]; }
+            }
+            double sum = 0.0;
+            for (int j = 0; j <= last && j < kvLen; ++j) {
+                logits[j] = exp(logits[j] - mx);
+                sum += logits[j];
+            }
+            double* op = out.data() + (size_t)i * headDim;
+            for (int j = 0; j <= last && j < kvLen; ++j) {
+                const double p = logits[j] / sum;
+                const float* vp = vAll.data() + ((size_t)j * kvNumHead + kvh) * headDim;
+                for (int d = 0; d < headDim; ++d) {
+                    op[d] += p * (double)vp[d];
+                }
+            }
+        }
+    }
+
+    struct Err { double maxAbs = 0.0; double relL2 = 0.0; };
+    static Err compareHead(const std::vector<float>& got, const std::vector<double>& gold,
+                           int qLen, int numHead, int headDim, int head) {
+        Err e;
+        double sumSq = 0.0, sumRef = 0.0;
+        for (int i = 0; i < qLen; ++i) {
+            for (int d = 0; d < headDim; ++d) {
+                const double g = gold[(size_t)i * headDim + d];
+                const double v = (double)got[((size_t)i * numHead + head) * headDim + d];
+                const double diff = v - g;
+                e.maxAbs = fmax(e.maxAbs, fabs(diff));
+                sumSq += diff * diff;
+                sumRef += g * g;
+            }
+        }
+        e.relL2 = (sumRef > 0.0) ? sqrt(sumSq / sumRef) : sqrt(sumSq);
+        return e;
+    }
+
+    // chunks: sequence of prefill lengths run back to back against one KV cache.
+    // The output of the LAST chunk is what gets compared.
+    bool runCase(const char* name, std::vector<int> chunks, int numHead, int kvNumHead, int headDim, bool doGold) {
+        NumHead = numHead; KvNumHead = kvNumHead; HeadDim = headDim;
+        const int nChunk = (int)chunks.size();
+        std::vector<VARP> Qs(nChunk), Ks(nChunk), Vs(nChunk), Ms(nChunk);
+        std::vector<std::vector<float>> qh(nChunk), kh(nChunk), vh(nChunk);
+        for (int c = 0; c < nChunk; ++c) {
+            Qs[c] = makeQKV(chunks[c], numHead, headDim, 11 + c * 7, qh[c]);
+            Ks[c] = makeQKV(chunks[c], kvNumHead, headDim, 12 + c * 7, kh[c]);
+            Vs[c] = makeQKV(chunks[c], kvNumHead, headDim, 13 + c * 7, vh[c]);
+            Ms[c] = makeCausalMask(chunks[c]);
+        }
+        std::vector<float> res[2];
+        for (int pass = 0; pass < 2; ++pass) {
+            setFlash(pass);
+            gMeta.previous = 0; gMeta.remove = 0; gMeta.n_reserve = 0; gMeta.reserve = nullptr;
+            auto m = makeModuleBuffer();
+            if (nullptr == m) {
+                MNN_ERROR("FlashAttentionTest[%s]: module load failed\n", name);
+                return false;
+            }
+            VARP out;
+            for (int c = 0; c < nChunk; ++c) {
+                gMeta.add = chunks[c];
+                out = m->onForward({Qs[c], Ks[c], Vs[c], Ms[c]})[0];
+                if (c + 1 < nChunk) {
+                    out->readMap<float>();
+                    gMeta.sync();
+                }
+            }
+            auto info = out->getInfo();
+            auto ptr = out->readMap<float>();
+            if (nullptr == info || nullptr == ptr) {
+                MNN_ERROR("FlashAttentionTest[%s]: null output\n", name);
+                return false;
+            }
+            res[pass].assign(ptr, ptr + info->size);
+            gMeta.sync();
+        }
+        setFlash(0);
+        if (res[0].size() != res[1].size() || res[0].empty()) {
+            MNN_ERROR("FlashAttentionTest[%s]: output size mismatch\n", name);
+            return false;
+        }
+        // direct A/B diff over the whole tensor
+        double abMax = 0.0, abSq = 0.0, refSq = 0.0;
+        for (size_t i = 0; i < res[0].size(); ++i) {
+            const double d = (double)res[1][i] - (double)res[0][i];
+            abMax = fmax(abMax, fabs(d));
+            abSq += d * d;
+            refSq += (double)res[0][i] * (double)res[0][i];
+        }
+        const double abRel = (refSq > 0.0) ? sqrt(abSq / refSq) : sqrt(abSq);
+        MNN_PRINT("[%s] default-vs-flash: maxAbs=%.3e relL2=%.3e\n", name, abMax, abRel);
+
+        bool ok = true;
+        if (doGold) {
+            const int qLen = chunks[nChunk - 1];
+            int pastLen = 0;
+            for (int c = 0; c + 1 < nChunk; ++c) { pastLen += chunks[c]; }
+            std::vector<float> kAll, vAll;
+            for (int c = 0; c < nChunk; ++c) {
+                kAll.insert(kAll.end(), kh[c].begin(), kh[c].end());
+                vAll.insert(vAll.end(), vh[c].begin(), vh[c].end());
+            }
+            const int kvLen = pastLen + qLen;
+            const int heads[2] = {0, numHead - 1};
+            for (int hi = 0; hi < 2; ++hi) {
+                const int head = heads[hi];
+                std::vector<double> gold;
+                goldHead(qh[nChunk - 1], qLen, numHead, headDim, kAll, vAll, kvLen, kvNumHead, pastLen, head, gold);
+                auto eRef = compareHead(res[0], gold, qLen, numHead, headDim, head);
+                auto eFa  = compareHead(res[1], gold, qLen, numHead, headDim, head);
+                MNN_PRINT("[%s] head %2d vs fp64: default maxAbs=%.3e relL2=%.3e | flash maxAbs=%.3e relL2=%.3e\n",
+                          name, head, eRef.maxAbs, eRef.relL2, eFa.maxAbs, eFa.relL2);
+                // FlashAttention must not be worse than the path it replaces (small slack
+                // for the fp16 output rounding), and must be accurate in absolute terms.
+                if (!(eFa.relL2 <= eRef.relL2 * 1.5 + 1e-4)) {
+                    MNN_ERROR("[%s] head %d: flash relL2 %.3e worse than default %.3e\n", name, head, eFa.relL2, eRef.relL2);
+                    ok = false;
+                }
+                if (!(eFa.relL2 < 1e-2)) {
+                    MNN_ERROR("[%s] head %d: flash relL2 %.3e too large\n", name, head, eFa.relL2);
+                    ok = false;
+                }
+            }
+        } else {
+            if (!(abRel < 1e-2)) {
+                MNN_ERROR("[%s] default-vs-flash relL2 %.3e too large\n", name, abRel);
+                ok = false;
+            }
+        }
+        return ok;
+    }
+
+    virtual bool run(int precision) {
+        auto type = MNNTestSuite::get()->pStaus.forwardType;
+        if (type != MNN_FORWARD_OPENCL) {
+            MNN_PRINT("FlashAttentionTest: OpenCL only, skip (forwardType=%d)\n", type);
+            return true;
+        }
+        bool ok = true;
+        ok = runCase("seq64",       {64},       16, 8, 128, true)  && ok;
+        ok = runCase("seq128",      {128},      16, 8, 128, true)  && ok;
+        ok = runCase("seq200_tail", {200},      16, 8, 128, true)  && ok;
+        ok = runCase("seq640_long", {640},      16, 8, 128, true)  && ok;
+        ok = runCase("seq1024",     {1024},     16, 8, 128, false) && ok;
+        ok = runCase("chunk64+32",  {64, 32},   16, 8, 128, true)  && ok;
+        ok = runCase("chunk512+128",{512, 128}, 16, 8, 128, true)  && ok;
+        return ok;
+    }
+};
+
+MNNTestSuiteRegister(FlashAttentionTest, "op/flashattention");
+
+
 MNNTestSuiteRegister(AttentionTest, "op/attention");
 MNNTestSuiteRegister(SpeedAttentionTest, "speed/attention");
 #endif

@@ -11,6 +11,7 @@
 #include "backend/opencl/execution/buffer/AttentionBufExecution.hpp"
 #include "backend/opencl/execution/buffer/PackedAttentionBufExecution.hpp"
 #include <algorithm>
+#include <fstream>
 #include <cstdlib>
 namespace MNN {
 namespace OpenCL {
@@ -20,6 +21,15 @@ namespace OpenCL {
 static bool useOnlineSoftmax() {
     const char* value = std::getenv("MNN_ONLINE_SOFTMAX");
     return value != nullptr && value[0] == '1';
+}
+
+// FlashAttention is opt-in so the default path is untouched and A/B comparison is one
+// env var away: MNN_OPENCL_FLASH_ATTENTION=1
+// Read on every resize (not cached) so a single process can A/B both paths, which the
+// correctness test relies on. onResize is rare, so getenv cost is irrelevant.
+static bool getFlashAttnEnabled() {
+    const char* e = getenv("MNN_OPENCL_FLASH_ATTENTION");
+    return (nullptr != e && e[0] == '1');
 }
 
 void AttentionBufExecution::handleKVCache(const std::vector<Tensor *> &inputs, const std::vector<Tensor *> &outputs) {
@@ -80,6 +90,9 @@ ErrorCode AttentionBufExecution::init() {
     mQkvUpdateInfo.update_kernel_args.clear();
     mQkvUpdateInfo.update_global_size.clear();
     mQkvUpdateInfo.update_local_size.clear();
+    mFlashUpdateInfo.update_kernel_args.clear();
+    mFlashUpdateInfo.update_global_size.clear();
+    mFlashUpdateInfo.update_local_size.clear();
 
     return NO_ERROR;
 }
@@ -125,6 +138,36 @@ ErrorCode AttentionBufExecution::UpdateArgs(const std::vector<Tensor *> &inputs,
         // key value static memory has been changed, need reset args
         if(mKeyValueMaxlen != ROUND_UP(mKVCacheCLManager->maxLength(), 4)){
             mKeyValueMaxlen = ROUND_UP(mKVCacheCLManager->maxLength(), 4);
+        }
+        if(mFlashAttn){
+            // No seqlen^2 temporaries to re-acquire. Only the KV cache handles and the KV
+            // length can move between executions.
+            #ifndef ENABLE_OPENCL_TIME_PROFILER
+            if(mOpenCLBackend->isUseRecordQueue()){
+                int base = 0;
+                mRgUpdateInfo.update_kernel_args[base].arg_value = &(*(mKVCacheCLManager->key()))();
+                mRgVUpdateInfo.update_kernel_args[base].arg_value = &(*(mKVCacheCLManager->value()))();
+                mFlashUpdateInfo.update_kernel_args[0].arg_value = &(*(mKVCacheCLManager->key()))();
+                mFlashUpdateInfo.update_kernel_args[1].arg_value = &(*(mKVCacheCLManager->value()))();
+            } else {
+            #endif
+                cl_int ret = CL_SUCCESS;
+                ret |= mKernel_rearrange->get().setArg(4, *mKVCacheCLManager->key());
+                ret |= mKernel_rearrange->get().setArg(5, mPastKvSeqlen);
+                ret |= mKernel_rearrange->get().setArg(6, mKeyValueMaxlen);
+                ret |= mKernel_rearrangeV->get().setArg(4, *mKVCacheCLManager->value());
+                ret |= mKernel_rearrangeV->get().setArg(5, mPastKvSeqlen);
+                ret |= mKernel_rearrangeV->get().setArg(6, mKeyValueMaxlen);
+                const uint32_t kvIdx = mHasMask ? 7 : 6;
+                ret |= mKernel_flash->get().setArg(1, *mKVCacheCLManager->key());
+                ret |= mKernel_flash->get().setArg(2, *mKVCacheCLManager->value());
+                ret |= mKernel_flash->get().setArg(kvIdx, mKvSeqlen);
+                ret |= mKernel_flash->get().setArg(kvIdx + 1, mKeyValueMaxlen);
+                MNN_CHECK_CL_SUCCESS(ret, "reSetArg flash_attention_prefill");
+            #ifndef ENABLE_OPENCL_TIME_PROFILER
+            }
+            #endif
+            return NO_ERROR;
         }
         if(false == mLongPrefill){
             mGlobalWorkSizeQk0 = UP_DIV(mKvSeqlen, 4);
@@ -1169,6 +1212,183 @@ ErrorCode AttentionBufExecution::prefillResize(const std::vector<Tensor *> &inpu
     return NO_ERROR;
 }
 
+// FlashAttention prefill: rearrange_k / rearrange_v fill the KV cache (same layout as the
+// other paths), then a single fused kernel does QK^T -> online softmax -> P*V with the S
+// tile held in local memory. No mTempQK / mTempSoftMax / mTempQ / mTempMask allocation, so
+// device memory no longer grows with seqlen^2.
+ErrorCode AttentionBufExecution::flashAttnResize(const std::vector<Tensor *> &inputs, const std::vector<Tensor *> &outputs){
+    auto runtime = mOpenCLBackend->getOpenCLRuntime();
+    auto query = inputs[0];
+    auto key = inputs[1];
+    auto value = inputs[2];
+    auto shape = query->shape();
+
+    int batch = shape[0];
+    int seqlen = shape[1];
+    int numHead = shape[2];
+    int kvNumHead = key->shape()[2];
+    int headDim = shape[3];
+    int groupSize = numHead / kvNumHead;
+    float scale = 1.0 / sqrt(headDim);
+
+    int maskQlen = seqlen;
+    int maskKvlen = mKvSeqlen;
+    if(mHasMask) {
+        auto mask = inputs[3];
+        auto mask_shape = mask->shape();
+        int dim = mask->dimensions();
+        MNN_ASSERT(dim >= 2);
+        maskQlen = mask_shape[dim - 2];
+        maskKvlen = mask_shape[dim - 1];
+    }
+
+    cl::Buffer keyBuffer, valueBuffer;
+    if(nullptr != mMeta) {
+        keyBuffer = *mKVCacheCLManager->key();
+        valueBuffer = *mKVCacheCLManager->value();
+    } else {
+        mTempK.reset(Tensor::createDevice<float>({ROUND_UP(seqlen, 4) * ROUND_UP(headDim, 4) * numHead * batch}));
+        mTempV.reset(Tensor::createDevice<float>({ROUND_UP(seqlen, 4) * ROUND_UP(headDim, 4) * numHead * batch}));
+        mOpenCLBackend->onAcquireBuffer(mTempK.get(), Backend::DYNAMIC);
+        mOpenCLBackend->onAcquireBuffer(mTempV.get(), Backend::DYNAMIC);
+        mOpenCLBackend->onReleaseBuffer(mTempV.get(), Backend::DYNAMIC);
+        mOpenCLBackend->onReleaseBuffer(mTempK.get(), Backend::DYNAMIC);
+        keyBuffer = openCLBuffer(mTempK.get());
+        valueBuffer = openCLBuffer(mTempV.get());
+    }
+
+    {
+        // rearrange key -> past_key [batch, kv_head_num, head_dim, max_len]
+        std::set<std::string> buildOption;
+        buildOption.emplace("-DOPENCL_PREFILL_ATTENTION");
+        mKernel_rearrange = runtime->buildKernel("attention_buf", "rearrange_k", buildOption, mOpenCLBackend->getPrecision(), inputs[0], outputs[0]);
+        auto maxWorkGroupSize  = static_cast<uint32_t>(runtime->getMaxWorkGroupSize(mKernel_rearrange));
+        mGlobalWorkSizeRearrg = {static_cast<uint32_t>(UP_DIV(seqlen, 4)), \
+                                static_cast<uint32_t>(UP_DIV(headDim, 4)), \
+                                static_cast<uint32_t>(kvNumHead * batch)};
+        uint32_t index = 0;
+        cl_int ret = CL_SUCCESS;
+        ret |= mKernel_rearrange->get().setArg(index++, mGlobalWorkSizeRearrg[0]);
+        ret |= mKernel_rearrange->get().setArg(index++, mGlobalWorkSizeRearrg[1]);
+        ret |= mKernel_rearrange->get().setArg(index++, mGlobalWorkSizeRearrg[2]);
+        ret |= mKernel_rearrange->get().setArg(index++, openCLBuffer(key));
+        ret |= mKernel_rearrange->get().setArg(index++, keyBuffer);
+        ret |= mKernel_rearrange->get().setArg(index++, mPastKvSeqlen);
+        ret |= mKernel_rearrange->get().setArg(index++, mKeyValueMaxlen);
+        ret |= mKernel_rearrange->get().setArg(index++, seqlen);
+        ret |= mKernel_rearrange->get().setArg(index++, kvNumHead);
+        ret |= mKernel_rearrange->get().setArg(index++, numHead);
+        ret |= mKernel_rearrange->get().setArg(index++, headDim);
+        MNN_CHECK_CL_SUCCESS(ret, "setArg rearrange_k flash");
+        mLocalWorkSizeRearrg = localWS3DDefault(mGlobalWorkSizeRearrg, maxWorkGroupSize, runtime, "rearrange_k", mKernel_rearrange, mOpenCLBackend->getCLTuneLevel(), "attention_buf").first;
+        mGlobalWorkSizeRearrg[0] = ROUND_UP(mGlobalWorkSizeRearrg[0], std::max((uint32_t)1, mLocalWorkSizeRearrg[0]));
+        mGlobalWorkSizeRearrg[1] = ROUND_UP(mGlobalWorkSizeRearrg[1], std::max((uint32_t)1, mLocalWorkSizeRearrg[1]));
+        mGlobalWorkSizeRearrg[2] = ROUND_UP(mGlobalWorkSizeRearrg[2], std::max((uint32_t)1, mLocalWorkSizeRearrg[2]));
+        if(nullptr != mMeta) {
+            mRgUpdateInfo.update_kernel_args.push_back({0, 4, sizeof(cl_mem), &(*(mKVCacheCLManager->key()))()});
+        }
+        mRgUpdateInfo.update_kernel_args.push_back({0, 5, sizeof(mPastKvSeqlen), &mPastKvSeqlen});
+        mRgUpdateInfo.update_kernel_args.push_back({0, 6, sizeof(mKeyValueMaxlen), &mKeyValueMaxlen});
+        mOpRecordUpdateInfo.emplace_back(&mRgUpdateInfo);
+        mOpenCLBackend->recordKernel3d(mKernel_rearrange, mGlobalWorkSizeRearrg, mLocalWorkSizeRearrg, &mRgUpdateInfo);
+    }
+    {
+        // rearrange value -> past_value [batch, kv_head_num, max_len, head_dim]
+        std::set<std::string> buildOption;
+        buildOption.emplace("-DOPENCL_PREFILL_ATTENTION");
+        mKernel_rearrangeV = runtime->buildKernel("attention_buf", "rearrange_v", buildOption, mOpenCLBackend->getPrecision(), inputs[0], outputs[0]);
+        auto maxWorkGroupSize  = static_cast<uint32_t>(runtime->getMaxWorkGroupSize(mKernel_rearrangeV));
+        mGlobalWorkSizeRearrgV = {static_cast<uint32_t>(UP_DIV(headDim, 4)), \
+            static_cast<uint32_t>(UP_DIV(seqlen, 4)), \
+            static_cast<uint32_t>(kvNumHead * batch)};
+        uint32_t index = 0;
+        cl_int ret = CL_SUCCESS;
+        ret |= mKernel_rearrangeV->get().setArg(index++, mGlobalWorkSizeRearrgV[0]);
+        ret |= mKernel_rearrangeV->get().setArg(index++, mGlobalWorkSizeRearrgV[1]);
+        ret |= mKernel_rearrangeV->get().setArg(index++, mGlobalWorkSizeRearrgV[2]);
+        ret |= mKernel_rearrangeV->get().setArg(index++, openCLBuffer(value));
+        ret |= mKernel_rearrangeV->get().setArg(index++, valueBuffer);
+        ret |= mKernel_rearrangeV->get().setArg(index++, mPastKvSeqlen);
+        ret |= mKernel_rearrangeV->get().setArg(index++, mKeyValueMaxlen);
+        ret |= mKernel_rearrangeV->get().setArg(index++, seqlen);
+        ret |= mKernel_rearrangeV->get().setArg(index++, kvNumHead);
+        ret |= mKernel_rearrangeV->get().setArg(index++, headDim);
+        MNN_CHECK_CL_SUCCESS(ret, "setArg rearrange_v flash");
+        mLocalWorkSizeRearrgV = localWS3DDefault(mGlobalWorkSizeRearrgV, maxWorkGroupSize, runtime, "rearrange_v", mKernel_rearrangeV, mOpenCLBackend->getCLTuneLevel(), "attention_buf").first;
+        mGlobalWorkSizeRearrgV[0] = ROUND_UP(mGlobalWorkSizeRearrgV[0], std::max((uint32_t)1, mLocalWorkSizeRearrgV[0]));
+        mGlobalWorkSizeRearrgV[1] = ROUND_UP(mGlobalWorkSizeRearrgV[1], std::max((uint32_t)1, mLocalWorkSizeRearrgV[1]));
+        mGlobalWorkSizeRearrgV[2] = ROUND_UP(mGlobalWorkSizeRearrgV[2], std::max((uint32_t)1, mLocalWorkSizeRearrgV[2]));
+        if(nullptr != mMeta) {
+            mRgVUpdateInfo.update_kernel_args.push_back({0, 4, sizeof(cl_mem), &(*(mKVCacheCLManager->value()))()});
+        }
+        mRgVUpdateInfo.update_kernel_args.push_back({0, 5, sizeof(mPastKvSeqlen), &mPastKvSeqlen});
+        mRgVUpdateInfo.update_kernel_args.push_back({0, 6, sizeof(mKeyValueMaxlen), &mKeyValueMaxlen});
+        mOpRecordUpdateInfo.emplace_back(&mRgVUpdateInfo);
+        mOpenCLBackend->recordKernel3d(mKernel_rearrangeV, mGlobalWorkSizeRearrgV, mLocalWorkSizeRearrgV, &mRgVUpdateInfo);
+    }
+    {
+        // fused flash attention
+        std::set<std::string> buildOption;
+        if(mIsAddMask){
+            buildOption.emplace("-DADD_MASK");
+        } else if(mHasMask) {
+            buildOption.emplace("-DSET_MASK");
+        }
+        buildOption.emplace("-DNUMHEAD_GROUP_SIZE=" + std::to_string(groupSize));
+        buildOption.emplace("-DFA_HD=" + std::to_string(headDim));
+        buildOption.emplace("-DFA_TQ=" + std::to_string(mFaTq));
+        buildOption.emplace("-DFA_LSZ=" + std::to_string(mFaLsz));
+        buildOption.emplace("-DFA_DPT=" + std::to_string(headDim / mFaLsz));
+        buildOption.emplace("-DFA_NLANE=" + std::to_string(mFaLsz / mFaTq));
+        mKernel_flash = runtime->buildKernel("attention_buf", "flash_attention_prefill", buildOption, mOpenCLBackend->getPrecision(), inputs[0], outputs[0]);
+
+        int qTileNum = UP_DIV(seqlen, mFaTq);
+        int bhNum = numHead * batch;
+        mGlobalWorkSizeFlash = {static_cast<uint32_t>(mFaLsz), static_cast<uint32_t>(qTileNum), static_cast<uint32_t>(bhNum)};
+        mLocalWorkSizeFlash = {static_cast<uint32_t>(mFaLsz), 1, 1};
+
+        uint32_t index = 0;
+        cl_int ret = CL_SUCCESS;
+        ret |= mKernel_flash->get().setArg(index++, openCLBuffer(query));
+        ret |= mKernel_flash->get().setArg(index++, keyBuffer);
+        ret |= mKernel_flash->get().setArg(index++, valueBuffer);
+        if(mHasMask) {
+            ret |= mKernel_flash->get().setArg(index++, openCLBuffer(inputs[3]));
+        }
+        ret |= mKernel_flash->get().setArg(index++, openCLBuffer(outputs[0]));
+        ret |= mKernel_flash->get().setArg(index++, scale);
+        ret |= mKernel_flash->get().setArg(index++, seqlen);
+        ret |= mKernel_flash->get().setArg(index++, mKvSeqlen);
+        ret |= mKernel_flash->get().setArg(index++, mKeyValueMaxlen);
+        ret |= mKernel_flash->get().setArg(index++, maskQlen);
+        ret |= mKernel_flash->get().setArg(index++, maskKvlen);
+        ret |= mKernel_flash->get().setArg(index++, numHead);
+        ret |= mKernel_flash->get().setArg(index++, kvNumHead);
+        ret |= mKernel_flash->get().setArg(index++, qTileNum);
+        ret |= mKernel_flash->get().setArg(index++, bhNum);
+        ret |= mKernel_flash->get().setArg(index++, mFaCausalSkip);
+        MNN_CHECK_CL_SUCCESS(ret, "setArg flash_attention_prefill");
+
+        // args that move when the KV cache is reallocated / the KV length grows
+        const int kvIdx = mHasMask ? 7 : 6;
+        if(nullptr != mMeta) {
+            mFlashUpdateInfo.update_kernel_args.push_back({0, 1, sizeof(cl_mem), &(*(mKVCacheCLManager->key()))()});
+            mFlashUpdateInfo.update_kernel_args.push_back({0, 2, sizeof(cl_mem), &(*(mKVCacheCLManager->value()))()});
+        }
+        mFlashUpdateInfo.update_kernel_args.push_back({0, (uint32_t)kvIdx, sizeof(mKvSeqlen), &mKvSeqlen});
+        mFlashUpdateInfo.update_kernel_args.push_back({0, (uint32_t)(kvIdx + 1), sizeof(mKeyValueMaxlen), &mKeyValueMaxlen});
+        mFlashGlobal_size[0] = mGlobalWorkSizeFlash[0];
+        mFlashGlobal_size[1] = mGlobalWorkSizeFlash[1];
+        mFlashGlobal_size[2] = mGlobalWorkSizeFlash[2];
+        mFlashUpdateInfo.update_global_size.push_back({0, mFlashGlobal_size});
+        mOpRecordUpdateInfo.emplace_back(&mFlashUpdateInfo);
+        mOpenCLBackend->recordKernel3d(mKernel_flash, mGlobalWorkSizeFlash, mLocalWorkSizeFlash, &mFlashUpdateInfo);
+    }
+    mOpenCLBackend->endRecord(mRecording);
+
+    return NO_ERROR;
+}
+
 ErrorCode AttentionBufExecution::decodeResize(const std::vector<Tensor *> &inputs, const std::vector<Tensor *> &outputs){
 
     auto runtime = mOpenCLBackend->getOpenCLRuntime();
@@ -1472,9 +1692,84 @@ ErrorCode AttentionBufExecution::onResize(const std::vector<Tensor *> &inputs, c
     handleKVCache(inputs, outputs);
 
     mLongPrefill = false;
+    mFlashAttn = false;
     if(mIsDecode) {
         return decodeResize(inputs, outputs);
     } else {
+        // ---- FlashAttention path selection (opt-in via MNN_OPENCL_FLASH_ATTENTION=1) ----
+        if(getFlashAttnEnabled() && seqlen > 1) {
+            auto runtime = mOpenCLBackend->getOpenCLRuntime();
+            int tq = 16, lsz = 64;
+            {
+                const char* e = getenv("MNN_FA_TQ");
+                if(nullptr != e) { tq = atoi(e); }
+                e = getenv("MNN_FA_LSZ");
+                if(nullptr != e) { lsz = atoi(e); }
+            }
+            // shape / resource constraints, see the kernel header comment
+            bool ok = (headDim % lsz == 0) && (lsz % tq == 0) && (tq % 4 == 0) && tq > 0 && lsz > 0;
+            if(ok) {
+                // local memory: lQ + lS + lRed + lM + lL + lAlpha, all fp32
+                size_t localBytes = ((size_t)headDim * tq + (size_t)lsz * tq + (size_t)tq * (lsz / tq) + 3 * (size_t)tq) * sizeof(float);
+                if(localBytes > runtime->getMaxLocalMem()) {
+                    ok = false;
+                }
+            }
+            std::shared_ptr<KernelWrap> probe;
+            if(ok) {
+                std::set<std::string> probeOption;
+                probeOption.emplace("-DFA_HD=" + std::to_string(headDim));
+                probeOption.emplace("-DFA_TQ=" + std::to_string(tq));
+                probeOption.emplace("-DFA_LSZ=" + std::to_string(lsz));
+                probeOption.emplace("-DFA_DPT=" + std::to_string(headDim / lsz));
+                probeOption.emplace("-DFA_NLANE=" + std::to_string(lsz / tq));
+                probeOption.emplace("-DNUMHEAD_GROUP_SIZE=" + std::to_string(numHead / kvNumHead));
+                if(mHasMask) {
+                    probeOption.emplace(mIsAddMask ? "-DADD_MASK" : "-DSET_MASK");
+                }
+                probe = runtime->buildKernel("attention_buf", "flash_attention_prefill", probeOption, mOpenCLBackend->getPrecision(), inputs[0], outputs[0]);
+                if(nullptr == probe.get() || (int)runtime->getMaxWorkGroupSize(probe) < lsz) {
+                    ok = false;
+                }
+            }
+            if(ok) {
+                mFaTq = tq;
+                mFaLsz = lsz;
+                // Skipping whole KV tiles above the diagonal is only valid when the mask is
+                // causal. MNN's LLM generates causal (full) or causal+sliding (mix) float
+                // masks; other users of Attention may not, so require a float add-mask.
+                mFaCausalSkip = (mHasMask && mIsAddMask) ? 1 : 0;
+                {
+                    const char* e = getenv("MNN_FA_CAUSAL_SKIP");
+                    if(nullptr != e) { mFaCausalSkip = atoi(e); }
+                }
+                mFlashAttn = true;
+                static bool announced = false;
+                if(!announced) {
+                    announced = true;
+                    MNN_PRINT("MNN OpenCL: flash attention ON (headDim=%d Tq=%d Tkv=%d causalSkip=%d)\n",
+                              headDim, mFaTq, mFaLsz, mFaCausalSkip);
+                    // hard numbers instead of arithmetic guesses about the tile budget
+                    size_t kLocal = 0, kPrivate = 0, kMulti = 0, kWg = 0;
+                    auto dev = runtime->getFirstGPUDevicePtr();
+                    if(nullptr != dev) {
+                        probe->get().getWorkGroupInfo(*dev, CL_KERNEL_LOCAL_MEM_SIZE, &kLocal);
+                        probe->get().getWorkGroupInfo(*dev, CL_KERNEL_PRIVATE_MEM_SIZE, &kPrivate);
+                        probe->get().getWorkGroupInfo(*dev, CL_KERNEL_PREFERRED_WORK_GROUP_SIZE_MULTIPLE, &kMulti);
+                        probe->get().getWorkGroupInfo(*dev, CL_KERNEL_WORK_GROUP_SIZE, &kWg);
+                    }
+                    MNN_PRINT("MNN OpenCL: flash kernel  DEVICE_LOCAL_MEM=%llu  KERNEL_LOCAL_MEM=%llu  KERNEL_PRIVATE_MEM=%llu (spill if >0)  PREFERRED_WG_MULTIPLE=%llu  KERNEL_MAX_WG=%llu\n",
+                              (unsigned long long)runtime->getMaxLocalMem(), (unsigned long long)kLocal,
+                              (unsigned long long)kPrivate, (unsigned long long)kMulti, (unsigned long long)kWg);
+                }
+                return flashAttnResize(inputs, outputs);
+            }
+            static bool warned = false;
+            if(!warned) {
+                warned = true;
+                MNN_PRINT("MNN OpenCL: flash attention requested but not applicable (headDim=%d tq=%d lsz=%d), fall back\n", headDim, tq, lsz);
+            }
+        }
         if(mPastKvSeqlen == 0){
             std::pair<std::vector<uint32_t>, uint32_t> tuneInfo;
             std::string info = "attention_" + std::to_string(batch) + "_" + std::to_string(numHead) + "_" + std::to_string(headDim) + "_" + std::to_string(kvNumHead);
@@ -1578,6 +1873,16 @@ ErrorCode AttentionBufExecution::onExecute(const std::vector<Tensor *> &inputs, 
     }
     UpdateArgs(inputs, outputs);
 #ifdef ENABLE_OPENCL_TIME_PROFILER
+    if(mFlashAttn) {
+        cl::Event event0, event1, event2;
+        run3DKernelDefault(mKernel_rearrange, mGlobalWorkSizeRearrg, mLocalWorkSizeRearrg, mOpenCLBackend->getOpenCLRuntime(), &event0);
+        mOpenCLBackend->getOpenCLRuntime()->pushEvent({"rearrange_k", event0});
+        run3DKernelDefault(mKernel_rearrangeV, mGlobalWorkSizeRearrgV, mLocalWorkSizeRearrgV, mOpenCLBackend->getOpenCLRuntime(), &event1);
+        mOpenCLBackend->getOpenCLRuntime()->pushEvent({"rearrange_v", event1});
+        run3DKernelDefault(mKernel_flash, mGlobalWorkSizeFlash, mLocalWorkSizeFlash, mOpenCLBackend->getOpenCLRuntime(), &event2);
+        mOpenCLBackend->getOpenCLRuntime()->pushEvent({"flash_attention", event2});
+        return NO_ERROR;
+    }
     if(mLongPrefill) {
         int seq_idx = 0;
         cl::Event event0, event1, event2, event3, event4, event5, event6;
@@ -1642,6 +1947,12 @@ ErrorCode AttentionBufExecution::onExecute(const std::vector<Tensor *> &inputs, 
         return NO_ERROR;
     }
 
+    if(mFlashAttn) {
+        run3DKernelDefault(mKernel_rearrange, mGlobalWorkSizeRearrg, mLocalWorkSizeRearrg, mOpenCLBackend->getOpenCLRuntime());
+        run3DKernelDefault(mKernel_rearrangeV, mGlobalWorkSizeRearrgV, mLocalWorkSizeRearrgV, mOpenCLBackend->getOpenCLRuntime());
+        run3DKernelDefault(mKernel_flash, mGlobalWorkSizeFlash, mLocalWorkSizeFlash, mOpenCLBackend->getOpenCLRuntime());
+        return NO_ERROR;
+    }
     if(mLongPrefill) {
         int seq_idx = 0;
         run3DKernelDefault(mKernel_rearrange_vec[seq_idx], mGwsRearrgVec[seq_idx], mLwsRearrgVec[seq_idx], mOpenCLBackend->getOpenCLRuntime());

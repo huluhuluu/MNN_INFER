@@ -24,6 +24,7 @@ public:
     AttentionBufExecution(std::shared_ptr<KVCacheCLManager> manager, const MNN::Op *op, Backend *backend);
     ErrorCode longPrefillResize(const std::vector<Tensor *> &inputs, const std::vector<Tensor *> &outputs);
     ErrorCode prefillResize(const std::vector<Tensor *> &inputs, const std::vector<Tensor *> &outputs);
+    ErrorCode flashAttnResize(const std::vector<Tensor *> &inputs, const std::vector<Tensor *> &outputs);
     ErrorCode decodeResize(const std::vector<Tensor *> &inputs, const std::vector<Tensor *> &outputs);
 
     ErrorCode UpdateArgs(const std::vector<Tensor *> &inputs, const std::vector<Tensor *> &outputs);
@@ -61,6 +62,17 @@ private:
     std::vector<RecordUpdateInfo*> mOpRecordUpdateInfo;
     std::shared_ptr<KVCacheCLManager> mKVCacheCLManager;
     std::shared_ptr<Tensor> mTempQK, mTempSoftMax;
+private:
+    // FlashAttention fused path: QK^T -> online softmax -> P*V in one kernel, the
+    // S tile stays in local memory so no O(seqlen^2) global buffer is allocated.
+    bool mFlashAttn = false;
+    int mFaTq = 0, mFaLsz = 0;
+    int mFaCausalSkip = 0;
+    std::shared_ptr<KernelWrap> mKernel_flash;
+    std::vector<uint32_t> mGlobalWorkSizeFlash;
+    std::vector<uint32_t> mLocalWorkSizeFlash;
+    RecordUpdateInfo mFlashUpdateInfo;
+    size_t mFlashGlobal_size[3];
 private:
     int mAlignQ, mAlignKV, mAlignHDK, mAlignHDN;
     bool mLongPrefill = false;
