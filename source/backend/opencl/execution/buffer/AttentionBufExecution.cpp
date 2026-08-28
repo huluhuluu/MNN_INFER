@@ -11,8 +11,16 @@
 #include "backend/opencl/execution/buffer/AttentionBufExecution.hpp"
 #include "backend/opencl/execution/buffer/PackedAttentionBufExecution.hpp"
 #include <algorithm>
+#include <cstdlib>
 namespace MNN {
 namespace OpenCL {
+
+// Opt-in A/B switch. Decode keeps the existing kernel; online softmax is used
+// for the two prefill paths where the score tensor dominates memory traffic.
+static bool useOnlineSoftmax() {
+    const char* value = std::getenv("MNN_ONLINE_SOFTMAX");
+    return value != nullptr && value[0] == '1';
+}
 
 void AttentionBufExecution::handleKVCache(const std::vector<Tensor *> &inputs, const std::vector<Tensor *> &outputs) {
     if(mHasMask) {
@@ -649,7 +657,8 @@ ErrorCode AttentionBufExecution::longPrefillResize(const std::vector<Tensor *> &
             std::set<std::string> buildOption;
             buildOption.emplace("-DSOFTMAX_LOCAL_SIZE=" + std::to_string(localSize));
 
-            mKernel_softmax_vec[seq_idx] = runtime->buildKernel("self_attention_buf", "softmax_inside", buildOption, mOpenCLBackend->getPrecision(), inputs[0], outputs[0]);
+            const char* softmaxKernelName = useOnlineSoftmax() ? "softmax_inside_online" : "softmax_inside";
+            mKernel_softmax_vec[seq_idx] = runtime->buildKernel("self_attention_buf", softmaxKernelName, buildOption, mOpenCLBackend->getPrecision(), inputs[0], outputs[0]);
             mGwsSoftMaxVec[seq_idx] =  {static_cast<uint32_t>(localSize), static_cast<uint32_t>(softmaxShape[1]), static_cast<uint32_t>(softmaxShape[0])};
 
             uint32_t index = 0;
@@ -1050,7 +1059,8 @@ ErrorCode AttentionBufExecution::prefillResize(const std::vector<Tensor *> &inpu
 
         std::set<std::string> buildOption;
         buildOption.emplace("-DSOFTMAX_LOCAL_SIZE=" + std::to_string(localSize));
-        mKernel_softmax = runtime->buildKernel("softmax_buf", "softmax_v4_buf", buildOption, mOpenCLBackend->getPrecision());
+        const char* softmaxKernelName = useOnlineSoftmax() ? "softmax_v4_online_buf" : "softmax_v4_buf";
+        mKernel_softmax = runtime->buildKernel("softmax_buf", softmaxKernelName, buildOption, mOpenCLBackend->getPrecision());
         mGlobalWorkSizeSoftMax = {static_cast<uint32_t>(localSize), static_cast<uint32_t>(UP_DIV(inside, 4)), static_cast<uint32_t>(outside)};
         auto maxWorkGroupSize  = static_cast<uint32_t>(runtime->getMaxWorkGroupSize(mKernel_softmax));
 

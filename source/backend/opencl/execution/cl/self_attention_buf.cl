@@ -295,6 +295,131 @@ __kernel void softmax_inside(GLOBAL_SIZE_3_DIMS
 #endif
 }
 
+// ---------------------------------------------------------------------------
+// Online (single-pass statistics) softmax.
+//
+// Baseline softmax_inside traverses the row 3 times:
+//   pass1 max, pass2 sum(exp(x-max)), pass3 write exp(x-max)/sum
+// This variant folds pass1+pass2 into one traversal by keeping a running
+// (m, l) pair and rescaling l whenever a new maximum appears:
+//   m' = max(m, x); l' = l * exp(m - m') + exp(x - m')
+// The pair-merge is associative, so the per-thread partials can be combined
+// with the same tree reduction the baseline uses for max/sum:
+//   m = max(mA, mB);  l = lA*exp(mA-m) + lB*exp(mB-m)
+// A second traversal is still needed to write exp(x-m)/l, so this is a
+// 2-pass kernel (2 global reads + 1 write) versus the baseline 3-pass
+// (3 global reads + 1 write).
+//
+// Accumulators are fp32 (see the fp16 accumulation hazard for long rows);
+// only the loads/stores stay FLOAT.
+// ---------------------------------------------------------------------------
+__kernel void softmax_inside_online(GLOBAL_SIZE_3_DIMS
+                            __global const FLOAT *input, // [batch * mNumHead, ROUND_UP(seqLen, tile), ROUND_UP(seqLen, tile)]
+                            __global FLOAT *output,
+                            __private const int inside_len,
+                            __private const int4 shape // [batch * mNumHead, ROUND_UP(seqLen, tile), ROUND_UP(seqLen, tile)]
+                            ) {
+    const int inside = get_global_id(0);
+    const int axis = get_global_id(1);
+    const int outside = get_global_id(2);
+    DEAL_NON_UNIFORM_DIM3(inside, axis, outside);
+
+    const int offset = (outside * shape.y + axis) * shape.z + 0;
+
+#if SOFTMAX_LOCAL_SIZE >= 4
+    int lid = get_local_id(0);
+    float local sum_mnn[SOFTMAX_LOCAL_SIZE];
+    float local max_mnn[SOFTMAX_LOCAL_SIZE];
+
+    /* Pass 1: running max + running sum in a single traversal */
+    float runMax = (float)(-FLT_MAX);
+    float runSum = 0.0f;
+    for (int i = lid; i < inside_len; i += SOFTMAX_LOCAL_SIZE) {
+        float v = (float)input[offset + i];
+        if (v > runMax) {
+            // new record: rescale the accumulated sum onto the new max
+            runSum = runSum * exp(runMax - v) + 1.0f;
+            runMax = v;
+        } else {
+            runSum += exp(v - runMax);
+        }
+    }
+    max_mnn[lid] = runMax;
+    sum_mnn[lid] = runSum;
+    barrier(CLK_LOCAL_MEM_FENCE);
+    /* associative (m,l) pair merge */
+    #pragma unroll
+    for(int i = SOFTMAX_LOCAL_SIZE/2; i > 0; i >>= 1){
+        if (lid < i) {
+            float mA = max_mnn[lid],       lA = sum_mnn[lid];
+            float mB = max_mnn[lid + i],   lB = sum_mnn[lid + i];
+            float m  = fmax(mA, mB);
+            max_mnn[lid] = m;
+            sum_mnn[lid] = lA * exp(mA - m) + lB * exp(mB - m);
+        }
+        barrier(CLK_LOCAL_MEM_FENCE);
+    }
+    float maxValue = max_mnn[0];
+    float sumValue = sum_mnn[0];
+
+    #ifdef OUTPUT_TRANSPOSE
+    const int out_offset = (outside * shape.z + 0) * shape.y + axis;
+    #endif
+    /* Pass 2: write out */
+    for (int i=lid; i<inside_len; i+=SOFTMAX_LOCAL_SIZE) {
+        float value = exp((float)input[offset+ i] - maxValue) / sumValue;
+        #ifdef OUTPUT_TRANSPOSE
+        output[out_offset+ i*shape.y] = value;
+        #else
+        output[offset+ i] = value;
+        #endif
+    }
+    if(shape.z > inside_len){
+        for(int i = lid + inside_len; i < shape.z; i+=SOFTMAX_LOCAL_SIZE){
+            #ifdef OUTPUT_TRANSPOSE
+            output[out_offset+ i*shape.y] = (FLOAT)0;
+            #else
+            output[offset+ i] = (FLOAT)0;
+            #endif
+        }
+    }
+#else
+    /* Pass 1: running max + running sum */
+    float maxValue = (float)(-FLT_MAX);
+    float sumValue = 0.0f;
+    for (int i=0; i<inside_len; i++) {
+        float v = (float)input[offset + i];
+        if (v > maxValue) {
+            sumValue = sumValue * exp(maxValue - v) + 1.0f;
+            maxValue = v;
+        } else {
+            sumValue += exp(v - maxValue);
+        }
+    }
+    #ifdef OUTPUT_TRANSPOSE
+    const int out_offset = (outside * shape.z + 0) * shape.y + axis;
+    #endif
+    /* Pass 2: write out */
+    for (int i=0; i<inside_len; i++) {
+        float value = exp((float)input[offset+ i] - maxValue) / sumValue;
+        #ifdef OUTPUT_TRANSPOSE
+        output[out_offset+ i*shape.y] = value;
+        #else
+        output[offset+ i] = value;
+        #endif
+    }
+    if(shape.z > inside_len){
+        for(int i = inside_len; i < shape.z; i++){
+            #ifdef OUTPUT_TRANSPOSE
+            output[out_offset+ i*shape.y] = (FLOAT)0;
+            #else
+            output[offset+ i] = (FLOAT)0;
+            #endif
+        }
+    }
+#endif
+}
+
 // [N X Y4 4] -> [N Y X]
 __kernel void trans_3d_buf(GLOBAL_SIZE_3_DIMS
                         __global const FLOAT* input,

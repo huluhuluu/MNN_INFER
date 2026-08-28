@@ -230,3 +230,87 @@ __kernel void softmax_v4_buf(GLOBAL_SIZE_3_DIMS
     }
 #endif
 }
+
+// ---------------------------------------------------------------------------
+// Online (single-pass statistics) variant of softmax_v4_buf.
+//
+// Baseline reads the reduction axis 3x (max / expsum / write). This variant
+// keeps a running (m, l) pair so the max and the exp-sum are produced in ONE
+// traversal:  m' = max(m, x),  l' = l*exp(m-m') + exp(x-m')
+// The pair merge is associative, so per-thread partials combine with the same
+// tree reduction shape the baseline uses. A second traversal writes
+// exp(x-m)/l, so the kernel is 2 reads + 1 write instead of 3 reads + 1 write.
+//
+// Accumulators are float4 (not COMPUTE_FLOAT4): at precision low
+// COMPUTE_FLOAT is half, and l is summed over thousands of terms.
+// ---------------------------------------------------------------------------
+__kernel void softmax_v4_online_buf(GLOBAL_SIZE_3_DIMS
+                              __global const FLOAT *input,
+                              __global FLOAT *output,
+                              __private const int inside,
+                              __private const int outside,
+                              __private const int dim) {
+
+    const int x = get_global_id(0);
+    const int y = get_global_id(1); // inside
+    const int z = get_global_id(2); // outside
+    DEAL_NON_UNIFORM_DIM3(x, y, z);
+
+    const int offset = z * dim * inside + (y << 2);
+#if SOFTMAX_LOCAL_SIZE >= 4
+    int lid = get_local_id(0);
+    float4 local sum_mnn[SOFTMAX_LOCAL_SIZE];
+    float4 local max_mnn[SOFTMAX_LOCAL_SIZE];
+
+    /* Pass 1: running max + running sum, single traversal */
+    float4 runMax = (float4)(-FLT_MAX);
+    float4 runSum = (float4)0;
+    for (int i = lid; i < dim; i+=SOFTMAX_LOCAL_SIZE) {
+        float4 v = convert_float4(vload4(0, input+offset+i*inside));
+        if (any(isgreater(v, runMax))) {
+            float4 m = fmax(runMax, v);
+            runSum = runSum * exp(runMax - m) + exp(v - m);
+            runMax = m;
+        } else {
+            runSum += exp(v - runMax);
+        }
+    }
+    max_mnn[lid] = runMax;
+    sum_mnn[lid] = runSum;
+    barrier(CLK_LOCAL_MEM_FENCE);
+    /* associative (m,l) pair merge */
+    for(int i = SOFTMAX_LOCAL_SIZE/2; i > 0; i /= 2){
+        if (lid < i) {
+            float4 mA = max_mnn[lid],     lA = sum_mnn[lid];
+            float4 mB = max_mnn[lid + i], lB = sum_mnn[lid + i];
+            float4 m  = fmax(mA, mB);
+            max_mnn[lid] = m;
+            sum_mnn[lid] = lA * exp(mA - m) + lB * exp(mB - m);
+        }
+        barrier(CLK_LOCAL_MEM_FENCE);
+    }
+    float4 maxValue = max_mnn[0];
+    float4 sumValue = sum_mnn[0];
+
+    /* Pass 2: write out */
+    for(int i = lid; i < dim; i+=SOFTMAX_LOCAL_SIZE){
+        vstore4(CONVERT_FLOAT4(exp(convert_float4(vload4(0, input+offset+i*inside)) - maxValue) / sumValue), 0, output+offset+i*inside);
+    }
+#else
+    float4 maxValue = (float4)(-FLT_MAX);
+    float4 sumValue = (float4)0;
+    for (int i = 0; i < dim; i++) {
+        float4 v = convert_float4(vload4(0, input+offset+i*inside));
+        if (any(isgreater(v, maxValue))) {
+            float4 m = fmax(maxValue, v);
+            sumValue = sumValue * exp(maxValue - m) + exp(v - m);
+            maxValue = m;
+        } else {
+            sumValue += exp(v - maxValue);
+        }
+    }
+    for(int i = 0; i < dim; i++){
+        vstore4(CONVERT_FLOAT4(exp(convert_float4(vload4(0, input+offset+i*inside)) - maxValue) / sumValue), 0, output+offset+i*inside);
+    }
+#endif
+}
