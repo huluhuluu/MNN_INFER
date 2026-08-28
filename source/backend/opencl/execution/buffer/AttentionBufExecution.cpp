@@ -1558,9 +1558,13 @@ ErrorCode AttentionBufExecution::onExecute(const std::vector<Tensor *> &inputs, 
     MNN_PRINT("start AttentionBufExecution onExecute !\n");
 #endif
     if(mNeedKvCache && nullptr != mMeta){
-        auto shape = inputs[0]->shape();
-        int seqlen = shape[1];
-        mKVCacheCLManager->reallocKVCache(mMeta, seqlen);
+        if (mKVCacheCLManager->isReallocDone()) {
+            mKVCacheCLManager->clearReallocDone();
+        } else {
+            auto shape = inputs[0]->shape();
+            int seqlen = shape[1];
+            mKVCacheCLManager->reallocKVCache(mMeta, seqlen);
+        }
     }
     UpdateArgs(inputs, outputs);
 #ifdef ENABLE_OPENCL_TIME_PROFILER
