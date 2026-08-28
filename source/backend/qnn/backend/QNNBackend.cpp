@@ -864,7 +864,8 @@ public:
                 MNN_ERROR("Could not free system context handle.");
                 return false;
             }
-            if (!QNN::validateRawGraphMetadata(mGraphCount, allGraphName.size())) {
+            if (!QNN::validateRawGraphMetadata(mGraphCount, allGraphName.size()) ||
+                !QNN::validateRawGraphNames(allGraphName)) {
                 MNN_ERROR("MNN_QNN: Binary graph count %u does not match metadata graph count %zu.\n",
                           mGraphCount, allGraphName.size());
                 return false;
@@ -895,12 +896,19 @@ public:
 
             std::vector<GraphInfo*> sortedGraphsInfo(mGraphCount, nullptr);
             std::map<std::string, GraphInfo*> graphInfoMap;
+            std::vector<std::string> binaryGraphNames;
+            binaryGraphNames.reserve(mGraphCount);
             for (int i = 0; i < mGraphCount; ++i) {
                 if (mGraphsInfo[i] == nullptr || mGraphsInfo[i]->graphName == nullptr) {
                     MNN_ERROR("MNN_QNN: Binary contains an unnamed graph at index %d.\n", i);
                     return false;
                 }
-                graphInfoMap[mGraphsInfo[i]->graphName] = mGraphsInfo[i];
+                binaryGraphNames.emplace_back(mGraphsInfo[i]->graphName);
+                graphInfoMap.emplace(binaryGraphNames.back(), mGraphsInfo[i]);
+            }
+            if (!QNN::validateRawGraphNames(binaryGraphNames)) {
+                MNN_ERROR("MNN_QNN: Binary %s contains empty or duplicate graph names.\n", path.c_str());
+                return false;
             }
 
             for (int i = 0; i < mGraphCount; ++i) {
@@ -942,6 +950,35 @@ public:
         Qnn_GraphHandle_t qnnGraphHandle = mQnnGraphHandleVec[shapeIndex];
         if (graph == nullptr || qnnGraphHandle == nullptr) {
             MNN_ERROR("MNN_QNN: Missing graph metadata or handle for shape index %d.\n", shapeIndex);
+            return false;
+        }
+
+        std::vector<std::string> expectedInputs;
+        std::vector<std::string> expectedOutputs;
+        std::vector<std::string> providedInputs;
+        std::vector<std::string> providedOutputs;
+        expectedInputs.reserve(graph->numInputTensors);
+        expectedOutputs.reserve(graph->numOutputTensors);
+        providedInputs.reserve(inputs.size());
+        providedOutputs.reserve(outputs.size());
+        for (int i = 0; i < graph->numInputTensors; ++i) {
+            const char* name = graph->inputTensors[i].v1.name;
+            expectedInputs.emplace_back(name == nullptr ? "" : name);
+        }
+        for (int i = 0; i < graph->numOutputTensors; ++i) {
+            const char* name = graph->outputTensors[i].v1.name;
+            expectedOutputs.emplace_back(name == nullptr ? "" : name);
+        }
+        for (const auto& input : inputs) {
+            providedInputs.push_back(input.second);
+        }
+        for (const auto& output : outputs) {
+            providedOutputs.push_back(output.second);
+        }
+        if (!QNN::validateRawGraphBindings(expectedInputs, providedInputs) ||
+            !QNN::validateRawGraphBindings(expectedOutputs, providedOutputs)) {
+            MNN_ERROR("MNN_QNN: Graph %s tensor bindings are incomplete or duplicated.\n",
+                      graph->graphName);
             return false;
         }
 
@@ -1010,7 +1047,6 @@ struct RawGraphRecord {
     std::shared_ptr<RawExecutorWrapper> executor;
     std::string cacheKey;
     std::map<std::string, QNN::RawGraphAliasOwnership> aliases;
-    bool pinned = false;
 };
 
 static std::mutex gRawGraphPoolMutex;
@@ -1051,7 +1087,6 @@ static void acquireGraphIdAliasLocked(const std::string& graphId,
         return;
     }
     record->aliases[graphId].acquire(pinResident);
-    record->pinned = record->pinned || pinResident;
     gRawGraphById[graphId] = record;
 }
 
@@ -1112,7 +1147,6 @@ static bool preloadRawGraphInternal(const MNN::QNN::RawGraphPrefetchConfig& conf
     std::shared_ptr<RawGraphRecord> record(new RawGraphRecord);
     record->executor = executor;
     record->cacheKey = cacheKey;
-    record->pinned = config.pinResident;
     gRawGraphByKey[cacheKey] = record;
     acquireGraphIdAliasLocked(config.graphId, record, config.pinResident);
     return true;
@@ -1138,10 +1172,6 @@ static void releaseRawGraphInternal(const std::string& graphId, bool forceReleas
         return;
     }
     const bool aliasReleased = alias->second.release(unpinAfterRelease);
-    record->pinned = false;
-    for (const auto& item : record->aliases) {
-        record->pinned = record->pinned || item.second.pinned();
-    }
     if (!aliasReleased) {
         return;
     }

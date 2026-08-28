@@ -35,6 +35,7 @@ MAX_HOST_RESULTS_BYTES = 256 * 1024**2
 REMOTE_PORT = 18080
 MIN_DEVICE_AVAILABLE_BYTES = 2 * 1024**3
 MAX_PROCESS_RSS_FRACTION = 0.80
+MIN_BATTERY_PERCENT = 10
 
 
 @dataclass(frozen=True)
@@ -143,6 +144,7 @@ class RemoteServer:
         readiness_timeout: float,
         pid_ready: Callable[[int], None] | None = None,
     ) -> str:
+        self.adb.run("shell", f"rm -f {shlex.quote(self.remote_pid_file)}", check=False)
         self.adb.run("push", str(local_config), self.remote_config)
         self.local_port = _unused_local_port()
         self.adb.run("forward", f"tcp:{self.local_port}", f"tcp:{REMOTE_PORT}")
@@ -306,8 +308,9 @@ def summarize(
         for wave in waves
         if wave.get("successful_requests", 0) and wave.get("wall_time_s", 0) > 0
     ]
-    first = statistics.fmean(wave_rates[:5]) if wave_rates else None
-    last = statistics.fmean(wave_rates[-5:]) if wave_rates else None
+    drift_window = min(5, len(wave_rates) // 2)
+    first = statistics.fmean(wave_rates[:drift_window]) if drift_window else None
+    last = statistics.fmean(wave_rates[-drift_window:]) if drift_window else None
     drift = None
     if first is not None and last is not None and first > 0:
         drift = (last - first) / first * 100.0
@@ -487,6 +490,13 @@ def resource_guard_reason(
     temperature = float(sample.get("temperature_c", 0.0))
     if temperature > 42.0:
         return f"temperature {temperature:.1f} C exceeds 42.0 C"
+    battery_level = sample.get("battery_level_percent")
+    if (
+        isinstance(battery_level, (int, float))
+        and battery_level <= MIN_BATTERY_PERCENT
+        and not bool(sample.get("battery_charging", False))
+    ):
+        return f"battery level {battery_level}% is at or below {MIN_BATTERY_PERCENT}% and not charging"
     available = int(sample.get("mem_available_bytes", 0))
     if available < min_available_bytes:
         return f"available memory {available} bytes is below {min_available_bytes}"
@@ -499,6 +509,10 @@ def resource_guard_reason(
 
 def resource_guard_enabled(args: argparse.Namespace) -> bool:
     return not getattr(args, "disable_resource_guard", False)
+
+
+def drift_retry_enabled(args: argparse.Namespace) -> bool:
+    return args.phase == "full" and not getattr(args, "disable_drift_retry", False)
 
 
 def close_optional_monitor(monitor: TemperatureMonitor | None) -> None:
@@ -514,6 +528,8 @@ def run_load(
     timeout: float = DEFAULT_TIMEOUT_S,
     request_fn: Callable[[str, dict[str, Any], int, float], tuple[int, dict[str, Any]]] = post_completion,
     allow_partial_final_wave: bool = False,
+    progress_output: str | Path | None = None,
+    stop_on_wave_failure: bool = True,
 ) -> dict[str, Any]:
     if concurrency <= 0:
         raise ValueError("concurrency must be > 0")
@@ -523,6 +539,12 @@ def run_load(
         raise ValueError(
             f"partial wave refused: {len(records)} requests is not divisible by concurrency {concurrency}"
         )
+
+    progress_path = Path(progress_output) if progress_output is not None else None
+    if progress_path is not None:
+        progress_path.parent.mkdir(parents=True, exist_ok=True)
+        _responses_path(progress_path).write_text("", encoding="utf-8")
+        _waves_path(progress_path).write_text("", encoding="utf-8")
 
     responses: list[dict[str, Any]] = []
     waves: list[dict[str, Any]] = []
@@ -556,7 +578,7 @@ def run_load(
             wave_wall_time = time.monotonic() - wave_start
             responses.extend(wave_responses)
             wave_successes = [record for record in wave_responses if record["ok"]]
-            waves.append({
+            wave_result = {
                 "wave_index": wave_index,
                 "request_count": len(wave_responses),
                 "successful_requests": len(wave_successes),
@@ -567,7 +589,16 @@ def run_load(
                     sum(record["completion_tokens"] for record in wave_successes) / wave_wall_time
                     if wave_wall_time > 0 else 0.0
                 ),
-            })
+            }
+            waves.append(wave_result)
+            if progress_path is not None:
+                with _responses_path(progress_path).open("a", encoding="utf-8") as stream:
+                    for response in wave_responses:
+                        stream.write(json.dumps(response, ensure_ascii=False) + "\n")
+                with _waves_path(progress_path).open("a", encoding="utf-8") as stream:
+                    stream.write(json.dumps(wave_result, ensure_ascii=False) + "\n")
+            if stop_on_wave_failure and len(wave_successes) != len(wave_responses):
+                break
     wall_time_s = time.monotonic() - measurement_start
     responses.sort(key=lambda item: item["dataset_index"])
     return {
@@ -746,6 +777,10 @@ def validate_server_log(
 
 def _responses_path(output: Path) -> Path:
     return output.with_name(output.stem + ".responses.jsonl")
+
+
+def _waves_path(output: Path) -> Path:
+    return output.with_name(output.stem + ".waves.jsonl")
 
 
 def write_load_result(output: str | Path, result: dict[str, Any], metadata: dict[str, Any]) -> None:
@@ -961,15 +996,30 @@ def _remote_model_hashes(adb: Adb, model_dir: str, config: dict[str, Any]) -> di
     return hashes
 
 
-def read_phone_temperature(adb: Adb) -> float:
-    output = adb.shell("dumpsys battery")
+def parse_battery_status(output: str) -> dict[str, Any]:
     match = re.search(r"^\s*PhoneTemp\s*:\s*(-?\d+(?:\.\d+)?)\s*$", output, re.MULTILINE)
     if match is None:
         match = re.search(r"^\s*temperature\s*:\s*(-?\d+(?:\.\d+)?)\s*$", output, re.MULTILINE)
     if match is None:
         raise RuntimeError("dumpsys battery has no PhoneTemp or temperature field")
     value = float(match.group(1))
-    return value / 10.0 if abs(value) > 100 else value
+    level_match = re.search(r"^\s*level\s*:\s*(\d+)\s*$", output, re.MULTILINE)
+    status_match = re.search(r"^\s*status\s*:\s*(\d+)\s*$", output, re.MULTILINE)
+    powered = bool(re.search(
+        r"^\s*(?:AC|USB|Wireless|Dock) powered\s*:\s*true\s*$",
+        output, re.MULTILINE | re.IGNORECASE,
+    ))
+    status = int(status_match.group(1)) if status_match else None
+    return {
+        "temperature_c": value / 10.0 if abs(value) > 100 else value,
+        "battery_level_percent": int(level_match.group(1)) if level_match else None,
+        "battery_status": status,
+        "battery_charging": powered or status in (2, 5),
+    }
+
+
+def read_phone_temperature(adb: Adb) -> float:
+    return float(parse_battery_status(adb.shell("dumpsys battery"))["temperature_c"])
 
 
 def _kib_field(text: str, name: str) -> int:
@@ -982,13 +1032,14 @@ def _kib_field(text: str, name: str) -> int:
 def read_device_resource_sample(adb: Adb, pid: int) -> dict[str, Any]:
     meminfo = adb.shell("cat /proc/meminfo")
     process_status = adb.shell(f"cat /proc/{pid}/status")
+    battery = parse_battery_status(adb.shell("dumpsys battery"))
     return {
         "time": time.time(),
-        "temperature_c": read_phone_temperature(adb),
         "mem_total_bytes": _kib_field(meminfo, "MemTotal"),
         "mem_available_bytes": _kib_field(meminfo, "MemAvailable"),
         "process_rss_bytes": _kib_field(process_status, "VmRSS"),
         "pid": pid,
+        **battery,
     }
 
 
@@ -1168,6 +1219,7 @@ def _run_cell_attempt(
             base_url, records[:cell.limit], cell.max_tokens,
             cell.concurrency, args.timeout,
             allow_partial_final_wave=getattr(args, "allow_partial_final_wave", False),
+            progress_output=result_path,
         )
         close_optional_monitor(monitor)
         end_temperature = read_phone_temperature(adb)
@@ -1211,7 +1263,11 @@ def _run_cell_attempt(
     else:
         result_path.write_text(json.dumps({
             "metadata": metadata,
-            "error": str(caught) if caught else "cell ended without a result",
+            "error": (
+                str(caught) or type(caught).__name__
+                if caught is not None
+                else "cell ended without a result"
+            ),
             "log_errors": log_errors,
         }, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
     compressed_log = _gzip_log(log_path) if log_path.exists() else None
@@ -1253,6 +1309,7 @@ def _run_cell_attempt(
         "artifacts": {
             "result": str(result_path),
             "responses": str(_responses_path(result_path)),
+            "waves_checkpoint": str(_waves_path(result_path)),
             "server_log_gzip": str(compressed_log) if compressed_log else None,
             "resources": str(resource_path) if monitor else None,
             "config": str(config_path),
@@ -1466,7 +1523,7 @@ def _run_matrix_live(args: argparse.Namespace) -> int:
                         break
                     raise
                 drift = cell_result["summary"]["first_to_last_wave_drift_percent"]
-                if args.phase == "full" and drift is not None and abs(drift) > 10.0:
+                if drift_retry_enabled(args) and drift is not None and abs(drift) > 10.0:
                     cell_result["accepted"] = False
                     cell_result["rejection_reason"] = (
                         f"first/last five-wave throughput drift is {drift:.2f}%"
@@ -1492,7 +1549,7 @@ def _run_matrix_live(args: argparse.Namespace) -> int:
         if deferred_errors:
             raise RuntimeError("; ".join(deferred_errors))
     except BaseException as exc:
-        matrix_error = str(exc)
+        matrix_error = str(exc) or type(exc).__name__
         try:
             inventory["after_failure"] = _device_storage_inventory(adb, [
                 args.host_model_dir, args.qnn_model_dir, args.qnn_runtime_dir,
@@ -1529,7 +1586,8 @@ def run_load_command(args: argparse.Namespace) -> int:
             args.concurrency, args.timeout,
         )
     result = run_load(
-        args.base_url, records, args.max_tokens, args.concurrency, args.timeout
+        args.base_url, records, args.max_tokens, args.concurrency, args.timeout,
+        progress_output=args.output,
     )
     write_load_result(args.output, result, {
         "base_url": args.base_url,
@@ -1576,6 +1634,11 @@ def create_parser() -> argparse.ArgumentParser:
     matrix_parser.add_argument("--timeout", type=float, default=DEFAULT_TIMEOUT_S)
     matrix_parser.add_argument("--readiness-timeout", type=float, default=900.0)
     matrix_parser.add_argument("--scorer", help="optional path to the legacy gsm8k_eval.py")
+    matrix_parser.add_argument(
+        "--disable-drift-retry",
+        action="store_true",
+        help="record throughput drift without rejecting or rerunning the cell",
+    )
     matrix_parser.set_defaults(func=run_matrix_command)
     dual_parser = subparsers.add_parser(
         "dual-bench", help="run protected QNN dual-pipeline C6/C8 tests"
@@ -1604,6 +1667,11 @@ def create_parser() -> argparse.ArgumentParser:
         "--disable-resource-guard",
         action="store_true",
         help="disable thermal, memory, RSS, and ADB automatic stop checks",
+    )
+    dual_parser.add_argument(
+        "--disable-drift-retry",
+        action="store_true",
+        help="record throughput drift without rejecting or rerunning the cell",
     )
     dual_parser.set_defaults(
         func=run_dual_benchmark_command,

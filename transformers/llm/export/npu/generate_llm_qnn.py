@@ -53,6 +53,14 @@ def convert_component(args, component, cache_root, output_root):
         config_path.name,
     ], cwd=component_cache)
 
+    compiled_model = qnn_dir / model_file
+    compiled_binaries = list(qnn_dir.glob("*.bin"))
+    if not compiled_model.is_file() or not compiled_binaries:
+        raise RuntimeError(
+            f"{component} export is incomplete: model={compiled_model.is_file()}, "
+            f"binary_count={len(compiled_binaries)}"
+        )
+
     converter = Path(__file__).resolve().parents[4] / "source" / "backend" / "qnn" / "npu_convert.py"
     run([
         sys.executable,
@@ -131,6 +139,8 @@ def main():
     args.model = args.model.resolve()
     args.mnn_path = args.mnn_path.resolve()
     args.cache_path = args.cache_path.resolve()
+    if args.cache_path == Path("/") or args.cache_path == args.model:
+        parser.error("cache_path must be a disposable directory outside the model directory")
     args.buckets = sorted(set(args.buckets))
     if args.buckets != [1, 32, 256, 512]:
         parser.error("QNN buckets are fixed to 1 32 256 512")

@@ -687,6 +687,7 @@ static bool _fuse(MNN::NetT* net, MNN::NetT* srcNet) {
             dstPlugin.insert(std::make_pair(op->name, op.get()));
         }
     }
+    std::set<std::string> matchedPlugins;
     for (auto& op : srcNet->oplists) {
         if (op->type != OpType_Plugin) {
             continue;
@@ -694,10 +695,15 @@ static bool _fuse(MNN::NetT* net, MNN::NetT* srcNet) {
         auto iter = dstPlugin.find(op->name);
         if (iter == dstPlugin.end()) {
             MNN_ERROR("Can't find plugin: %s\n", op->name.c_str());
-            continue;
+            return false;
         }
         auto dst = iter->second->main.AsPlugin();
         auto src = op->main.AsPlugin();
+        if (dst == nullptr || src == nullptr) {
+            MNN_ERROR("Invalid plugin metadata: %s\n", op->name.c_str());
+            return false;
+        }
+        matchedPlugins.insert(op->name);
         std::map<std::string, AttributeT*> dstKeys;
         for (auto& dstAttr : dst->attr) {
             dstKeys.insert(std::make_pair(dstAttr->key, dstAttr.get()));
@@ -717,6 +723,11 @@ static bool _fuse(MNN::NetT* net, MNN::NetT* srcNet) {
                 dstIter->second->list->i.insert(dstIter->second->list->i.end(), srcAttr->list->i.begin(), srcAttr->list->i.end());
             }
         }
+    }
+    if (matchedPlugins.size() != dstPlugin.size()) {
+        MNN_ERROR("Plugin count changed between shape buckets: expected %zu, found %zu\n",
+                  dstPlugin.size(), matchedPlugins.size());
+        return false;
     }
     return true;
 }
@@ -745,9 +756,17 @@ static bool _reIndexTensor(MNN::NetT* net) {
             if (index < 0) {
                 continue; // optional input, ignore it
             }
+            if (index >= tensorValid.size()) {
+                MNN_ERROR("compilefornpu: input tensor index %d is out of range\n", index);
+                return false;
+            }
             tensorValid[index] = true;
         }
         for (auto index : op->outputIndexes) {
+            if (index < 0 || index >= tensorValid.size()) {
+                MNN_ERROR("compilefornpu: output tensor index %d is out of range\n", index);
+                return false;
+            }
             tensorValid[index] = true;
         }
     }
@@ -818,7 +837,7 @@ static bool _reIndexTensor(MNN::NetT* net) {
 int main(int argc, const char* argv[]) {
     if (argc < 3) {
         MNN_PRINT("Usage: ./compilefornpu src.mnn dst.mnn npu.json\n");
-        return 0;
+        return 1;
     }
     const char* srcMNN = argv[1];
     const char* dstMNN = argv[2];
@@ -836,7 +855,11 @@ int main(int argc, const char* argv[]) {
         document.Parse(outputStr.c_str());
         if (document.HasParseError()) {
             MNN_ERROR("Invalid json\n");
-            return 0;
+            return 1;
+        }
+        if (!document.HasMember("type") || !document["type"].IsString()) {
+            MNN_ERROR("Missing string field: type\n");
+            return 1;
         }
         gNPUName = document["type"].GetString();
         if (gNPUName == "QNN") {
@@ -962,7 +985,6 @@ int main(int argc, const char* argv[]) {
         }
         MNN_ERROR("\n");
     }
-    auto firstInputIndex = inputIndexes;
     auto firstOutputIndex = MNN::Tools::collectExplicitSkipOutputs(net, skipOps);
     std::vector<bool> keepOp(net->oplists()->size(), false);
     {
@@ -1126,7 +1148,10 @@ int main(int argc, const char* argv[]) {
     // Fuse And Store
     auto dstNet = allNets[0].get();
     for (int i=1; i<allNets.size(); ++i) {
-        _fuse(dstNet, allNets[i].get());
+        if (!_fuse(dstNet, allNets[i].get())) {
+            MNN_ERROR("compilefornpu: shape bucket %d has incompatible plugin partitions\n", i);
+            return 1;
+        }
         allNets[i].reset();
     }
     flatbuffers::FlatBufferBuilder builder;

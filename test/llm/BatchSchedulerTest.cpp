@@ -10,6 +10,8 @@
 #include "../../transformers/llm/engine/src/llmconfig.hpp"
 #include "../../source/backend/qnn/backend/QNNRawGraphValidation.hpp"
 
+#include <algorithm>
+
 using namespace MNN::Transformer;
 
 class BatchSchedulerDualPipelineSplitTest : public MNNTestCase {
@@ -487,6 +489,7 @@ class BatchSchedulerReleaseDropsPendingSegmentsTest : public MNNTestCase {
 public:
     virtual bool run(int precision) {
         auto config = std::make_shared<LlmConfig>();
+        config->config_.document.SetObject();
         auto batchMeta = std::make_shared<BatchKVMeta>();
         BatchScheduler scheduler(config, batchMeta);
         scheduler.setDualPipelineMode(true, 2);
@@ -530,6 +533,22 @@ public:
     }
 };
 
+class QNNRawGraphNameAndBindingValidationTest : public MNNTestCase {
+public:
+    virtual bool run(int precision) {
+        MNNTEST_ASSERT(MNN::QNN::validateRawGraphNames({"graph_0", "graph_1"}));
+        MNNTEST_ASSERT(!MNN::QNN::validateRawGraphNames({"graph_0", "graph_0"}));
+        MNNTEST_ASSERT(!MNN::QNN::validateRawGraphNames({""}));
+        MNNTEST_ASSERT(MNN::QNN::validateRawGraphBindings(
+            {"input_0", "input_1"}, {"input_1", "input_0"}));
+        MNNTEST_ASSERT(!MNN::QNN::validateRawGraphBindings(
+            {"input_0", "input_1"}, {"input_0"}));
+        MNNTEST_ASSERT(!MNN::QNN::validateRawGraphBindings(
+            {"input_0", "input_1"}, {"input_0", "input_0"}));
+        return true;
+    }
+};
+
 class QNNRawGraphMultiOwnerLifetimeTest : public MNNTestCase {
 public:
     virtual bool run(int precision) {
@@ -566,4 +585,5 @@ MNNTestSuiteRegister(EagleDraftLaneKVResetCleanupTest, "llm/eagle_draft_lane_kv_
 MNNTestSuiteRegister(BatchSchedulerReleaseDropsPendingSegmentsTest, "llm/batch_scheduler_release_drops_pending_segments");
 MNNTestSuiteRegister(QNNRawGraphMetadataValidationTest, "llm/qnn_raw_graph_metadata_validation");
 MNNTestSuiteRegister(QNNRawGraphShapeIndexValidationTest, "llm/qnn_raw_graph_shape_index_validation");
+MNNTestSuiteRegister(QNNRawGraphNameAndBindingValidationTest, "llm/qnn_raw_graph_name_binding_validation");
 MNNTestSuiteRegister(QNNRawGraphMultiOwnerLifetimeTest, "llm/qnn_raw_graph_multi_owner_lifetime");

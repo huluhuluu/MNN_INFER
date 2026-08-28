@@ -341,6 +341,16 @@ bool DualPipelineScheduler::finishGraphPrefetchWave() {
             return true;
         }
         succeeded = !mGraphPrefetchCancelled;
+        // Pipeline callbacks do not invoke the matching after-callback when an
+        // operator fails. Once the caller cancels the wave and joins execution,
+        // clear that orphaned QNN stage so completion tasks can be drained.
+        if (mGraphPrefetchCancelled) {
+            mQnnExecutionActive = false;
+            for (std::map<int, PipelineGraphState>::iterator iter = mPipelineGraphs.begin();
+                 iter != mPipelineGraphs.end(); ++iter) {
+                iter->second.executingGraphIndex = -1;
+            }
+        }
         for (std::map<int, PipelineGraphState>::iterator iter = mPipelineGraphs.begin(); iter != mPipelineGraphs.end(); ++iter) {
             PipelineGraphState& state = iter->second;
             succeeded = succeeded && state.completedGraphIndex == state.currentGraphIndex && state.executingGraphIndex < 0;

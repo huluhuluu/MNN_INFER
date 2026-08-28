@@ -7,6 +7,9 @@
 #define MNN_QNN_RAW_GRAPH_VALIDATION_HPP
 
 #include <cstddef>
+#include <set>
+#include <string>
+#include <vector>
 
 namespace MNN {
 namespace QNN {
@@ -17,6 +20,26 @@ inline bool validateRawGraphMetadata(size_t graphCount, size_t graphNameCount) {
 
 inline bool validateRawGraphShapeIndex(int shapeIndex, size_t graphCount) {
     return shapeIndex >= 0 && static_cast<size_t>(shapeIndex) < graphCount;
+}
+
+inline bool validateRawGraphNames(const std::vector<std::string>& names) {
+    std::set<std::string> uniqueNames;
+    for (const auto& name : names) {
+        if (name.empty() || !uniqueNames.insert(name).second) {
+            return false;
+        }
+    }
+    return !names.empty();
+}
+
+inline bool validateRawGraphBindings(const std::vector<std::string>& expected,
+                                     const std::vector<std::string>& provided) {
+    if (!validateRawGraphNames(expected) || !validateRawGraphNames(provided) ||
+        expected.size() != provided.size()) {
+        return false;
+    }
+    return std::set<std::string>(expected.begin(), expected.end()) ==
+           std::set<std::string>(provided.begin(), provided.end());
 }
 
 class RawGraphAliasOwnership {

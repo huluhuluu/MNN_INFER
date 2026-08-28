@@ -1,9 +1,10 @@
 #!/usr/bin/python
-import sys
 import json
 import os
+import shutil
 import subprocess
-import json
+import sys
+from pathlib import Path
 post_treat = {}
 qnn_sdk = os.environ["QNN_SDK_ROOT"]
 print(qnn_sdk)
@@ -60,7 +61,6 @@ htp_backend_extensions = {
 
 for key in post_treat["merge"]:
     srcs = merges[key]
-    dst = key
     dstname = key.split('/')
     dstname = dstname[len(dstname)-1]
     dstname = dstname.replace('.bin', '')
@@ -74,14 +74,24 @@ for key in post_treat["merge"]:
         graphs.append(graphname)
         workdir = os.path.join(os.getcwd(), src)
         workdirs.append(workdir)
-        print(subprocess.run("tar -cf " + graphname + '.bin' + ' *.raw', cwd=workdir, capture_output=True, text=True, shell=True))
+        raw_files = sorted(path.name for path in Path(workdir).glob('*.raw'))
+        if not raw_files:
+            raise RuntimeError('no raw graph files found in ' + workdir)
+        subprocess.run(['tar', '-cf', graphname + '.bin', *raw_files], cwd=workdir, check=True)
         if clean_tmp:
-            print(subprocess.run('rm *.raw', cwd=workdir, capture_output=True, text=True, shell=True))
+            for raw_file in raw_files:
+                (Path(workdir) / raw_file).unlink()
         # Compile
-        compile_cmd = 'python3 ' + qnnModelLibGenerator + ' -c ' + os.path.join(workdir, graphname + '.cpp') + ' -b ' + os.path.join(workdir, graphname + '.bin') + ' -t x86_64-linux-clang -o ' + workdir
-        print(os.popen(compile_cmd).read())
+        subprocess.run([
+            sys.executable,
+            qnnModelLibGenerator,
+            '-c', os.path.join(workdir, graphname + '.cpp'),
+            '-b', os.path.join(workdir, graphname + '.bin'),
+            '-t', 'x86_64-linux-clang',
+            '-o', workdir,
+        ], check=True)
         if clean_tmp:
-            os.popen("rm " + os.path.join(workdir, graphname + '.bin')).read()
+            (Path(workdir) / (graphname + '.bin')).unlink()
         libs.append(os.path.join(workdir, 'x86_64-linux-clang', 'lib' + graphname + '.so'))
     if separate_graphs:
         for i, (graph, lib) in enumerate(zip(graphs, libs)):
@@ -101,14 +111,15 @@ for key in post_treat["merge"]:
         htp_backend_extensions['graphs'][0]['graph_names'] = graphs
         with open('htp_backend_extensions.json', 'w') as f:
             f.write(json.dumps(htp_backend_extensions, indent=4))
-        libsStr = ""
-        for i in range(0, len(libs)):
-            if i > 0:
-                libsStr+=','
-            libsStr += libs[i]
-        print(os.popen(qnnContextBinaryGenerator + ' --model ' + libsStr + ' --backend '+ htp_so + ' --binary_file ' + dstname + ' --config_file ./context_config.json ' + ' --output_dir ' + cache_dir).read())
+        subprocess.run([
+            qnnContextBinaryGenerator,
+            '--model', ','.join(libs),
+            '--backend', htp_so,
+            '--binary_file', dstname,
+            '--config_file', './context_config.json',
+            '--output_dir', cache_dir,
+        ], check=True)
     if clean_tmp:
         for workdir in workdirs:
-            os.popen("rm -rf " + workdir).read()
-
+            shutil.rmtree(workdir)
 

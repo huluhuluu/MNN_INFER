@@ -558,13 +558,16 @@ void EagleGeneration::generate(GenerationParams& param) {
         mSpecContext.steps++;
         MNN::Timer targetTimer;
         auto decodingInfo = treeDecoding(draftInfo);
-        if (decodingInfo.size() < 2 || decodingInfo[0] == nullptr || decodingInfo[1] == nullptr ||
-            decodingInfo[0]->readMap<float>() == nullptr || decodingInfo[1]->readMap<float>() == nullptr) {
-            mContext->status = LlmStatus::INTERNAL_ERROR;
-            break;
-        }
-        
-        auto acceptInfo = evaluatePosterior(draftInfo, decodingInfo[0]);
+          if (decodingInfo.size() < 2 || decodingInfo[0] == nullptr || decodingInfo[1] == nullptr ||
+              decodingInfo[0]->readMap<float>() == nullptr || decodingInfo[1]->readMap<float>() == nullptr) {
+              mContext->status = LlmStatus::INTERNAL_ERROR;
+              break;
+          }
+          if (mLlm->cancelRequested()) {
+              break;
+          }
+
+          auto acceptInfo = evaluatePosterior(draftInfo, decodingInfo[0]);
         int acceptLimit = 0;
         bool stop = false;
         for (int token : acceptInfo.acceptTokens) {

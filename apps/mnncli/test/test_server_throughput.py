@@ -150,6 +150,31 @@ class LoadRunnerTest(unittest.TestCase):
         self.assertEqual(result["summary"]["http_errors"], 1)
         self.assertEqual({record["status"] for record in result["responses"]}, {"error"})
 
+    def test_failed_wave_stops_and_preserves_checkpoint(self):
+        calls = []
+
+        def request_fn(base_url, record, max_tokens, timeout):
+            calls.append(record["id"])
+            if record["id"] == 0:
+                raise socket.timeout("late")
+            return 200, completion_response()
+
+        with tempfile.TemporaryDirectory() as directory:
+            output = Path(directory) / "cell.json"
+            result = throughput.run_load(
+                "http://localhost:8000",
+                [{"id": index, "prompt": "p"} for index in range(4)],
+                max_tokens=4, concurrency=2, timeout=1, request_fn=request_fn,
+                progress_output=output,
+            )
+            checkpoint = throughput._responses_path(output).read_text(encoding="utf-8").splitlines()
+            waves = throughput._waves_path(output).read_text(encoding="utf-8").splitlines()
+
+        self.assertEqual(sorted(calls), [0, 1])
+        self.assertEqual(len(result["responses"]), 2)
+        self.assertEqual(len(checkpoint), 2)
+        self.assertEqual(len(waves), 1)
+
     def test_invalid_response_json_is_a_protocol_error(self):
         def request_fn(*args):
             raise json.JSONDecodeError("bad response", "{", 1)
@@ -218,6 +243,14 @@ class StatisticsTest(unittest.TestCase):
         self.assertAlmostEqual(summary["request_latency_s"]["p50"], 1.5)
         self.assertAlmostEqual(summary["wave_tokens_per_s"]["p50"], 15.0)
 
+    def test_short_run_drift_uses_disjoint_windows(self):
+        waves = [
+            {"successful_requests": 1, "completion_tokens": tokens, "wall_time_s": 1.0}
+            for tokens in (10, 10, 5, 5)
+        ]
+        summary = throughput.summarize([], waves, wall_time_s=4.0)
+        self.assertEqual(summary["first_to_last_wave_drift_percent"], -50.0)
+
     def test_timing_distributions_use_real_model_fields(self):
         responses = [
             {"ok": True, "latency_s": 2.0, "completion_tokens": 4, "wave_index": 0,
@@ -266,6 +299,8 @@ class ResourceGuardTest(unittest.TestCase):
             "mem_total_bytes": 16 * 1024**3,
             "mem_available_bytes": 8 * 1024**3,
             "process_rss_bytes": 4 * 1024**3,
+            "battery_level_percent": 80,
+            "battery_charging": False,
         }
 
         self.assertIsNone(throughput.resource_guard_reason(healthy))
@@ -276,6 +311,24 @@ class ResourceGuardTest(unittest.TestCase):
         self.assertIn("RSS", throughput.resource_guard_reason(
             {**healthy, "process_rss_bytes": int(16 * 1024**3 * 0.81)}
         ))
+        self.assertIn("battery", throughput.resource_guard_reason(
+            {**healthy, "battery_level_percent": 10}
+        ))
+        self.assertIsNone(throughput.resource_guard_reason(
+            {**healthy, "battery_level_percent": 4, "battery_charging": True}
+        ))
+
+    def test_battery_status_parser(self):
+        sample = throughput.parse_battery_status("""
+            USB powered: false
+            Wireless powered: false
+            status: 3
+            level: 9
+            temperature: 315
+        """)
+        self.assertEqual(sample["temperature_c"], 31.5)
+        self.assertEqual(sample["battery_level_percent"], 9)
+        self.assertFalse(sample["battery_charging"])
 
 
 class HarnessTimeoutTest(unittest.TestCase):
@@ -436,6 +489,18 @@ class AcceptanceTraceTest(unittest.TestCase):
 
 
 class MatrixOrchestrationTest(unittest.TestCase):
+    def test_matrix_can_disable_drift_retry(self):
+        args = throughput.create_parser().parse_args([
+            "matrix",
+            "--binary", "/tmp/mnncli",
+            "--dataset", "/tmp/data.jsonl",
+            "--phase", "full",
+            "--output-dir", "/tmp/results",
+            "--disable-drift-retry",
+        ])
+
+        self.assertFalse(throughput.drift_retry_enabled(args))
+
     def test_dual_benchmark_can_disable_resource_guard(self):
         args = throughput.create_parser().parse_args([
             "dual-bench",
@@ -444,9 +509,11 @@ class MatrixOrchestrationTest(unittest.TestCase):
             "--phase", "full",
             "--output-dir", "/tmp/results",
             "--disable-resource-guard",
+            "--disable-drift-retry",
         ])
 
         self.assertFalse(throughput.resource_guard_enabled(args))
+        self.assertFalse(throughput.drift_retry_enabled(args))
         self.assertTrue(args.allow_partial_final_wave)
         self.assertTrue(args.continue_on_cell_failure)
 
@@ -545,7 +612,11 @@ class MatrixOrchestrationTest(unittest.TestCase):
                 pass
 
         class FakeAdb:
+            def __init__(self):
+                self.calls = []
+
             def run(self, *arguments, check=True, **kwargs):
+                self.calls.append(arguments)
                 if arguments[:2] == ("shell", "cat /stage/throughput-cell.pid"):
                     return Result(stdout="321\n")
                 return Result()
@@ -557,8 +628,9 @@ class MatrixOrchestrationTest(unittest.TestCase):
             root = Path(directory)
             config = root / "config.json"
             config.write_text("{}", encoding="utf-8")
+            adb = FakeAdb()
             server = throughput.RemoteServer(
-                adb=FakeAdb(), remote_stage="/stage", local_log=root / "server.log",
+                adb=adb, remote_stage="/stage", local_log=root / "server.log",
                 cell_id="cell", qnn_runtime_dir=None, trace=False,
             )
             events = []
@@ -568,6 +640,10 @@ class MatrixOrchestrationTest(unittest.TestCase):
             server.close()
 
         self.assertEqual(events, ["pid:321", "readiness"])
+        self.assertLess(
+            adb.calls.index(("shell", "rm -f /stage/throughput-cell.pid")),
+            next(index for index, call in enumerate(adb.calls) if call[0] == "push"),
+        )
 
 
 if __name__ == "__main__":

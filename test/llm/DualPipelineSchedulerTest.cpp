@@ -422,6 +422,26 @@ public:
     }
 };
 
+class DualPipelineSchedulerCancelledActiveGraphTest : public MNNTestCase {
+public:
+    virtual bool run(int precision) {
+        GraphRecorder recorder;
+        DualPipelineScheduler scheduler;
+        MNNTEST_ASSERT(startScheduler(scheduler, recorder, 1, 0));
+        MNNTEST_ASSERT(scheduler.beginGraphPrefetchWave({makeWave(0, 51, {"failed_qnn"})}));
+        MNNTEST_ASSERT(scheduler.beginStageWave({0}));
+        MNNTEST_ASSERT(scheduler.enterGraphStage(0, 0));
+
+        // Model an operator failure: the execution framework omits the after-callback.
+        scheduler.cancelStageWave();
+        scheduler.cancelGraphPrefetchWave();
+        MNNTEST_ASSERT(!scheduler.finishStageWave());
+        MNNTEST_ASSERT(!scheduler.finishGraphPrefetchWave());
+        scheduler.stop();
+        return true;
+    }
+};
+
 MNNTestSuiteRegister(DualPipelineSchedulerExecutionOrderGapTest, "llm/dual_pipeline_scheduler_execution_order_gap");
 MNNTestSuiteRegister(DualPipelineSchedulerDynamicLoadPriorityTest, "llm/dual_pipeline_scheduler_dynamic_load_priority");
 MNNTestSuiteRegister(DualPipelineSchedulerSharedGraphTest, "llm/dual_pipeline_scheduler_shared_graph");
@@ -431,3 +451,4 @@ MNNTestSuiteRegister(DualPipelineSchedulerResidentLruTest, "llm/dual_pipeline_sc
 MNNTestSuiteRegister(DualPipelineSchedulerDraftGraphLruTest, "llm/dual_pipeline_scheduler_draft_graph_lru");
 MNNTestSuiteRegister(DualPipelineSchedulerActiveGraphProtectionTest, "llm/dual_pipeline_scheduler_active_graph_protection");
 MNNTestSuiteRegister(DualPipelineSchedulerExecutionBeforeLookaheadTest, "llm/dual_pipeline_scheduler_execution_before_lookahead");
+MNNTestSuiteRegister(DualPipelineSchedulerCancelledActiveGraphTest, "llm/dual_pipeline_scheduler_cancelled_active_graph");

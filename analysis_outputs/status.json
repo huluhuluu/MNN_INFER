@@ -1,0 +1,36 @@
+{
+  "status": "review_complete_with_blockers",
+  "review_date": "2026-07-28",
+  "baseline": "origin/feature/batch@d37ea6d2",
+  "head": "c57e89bd",
+  "worktree_included": true,
+  "implementation": {
+    "server_three_modes": true,
+    "real_dual_pipeline_runtime": true,
+    "adb_harness_present_in_worktree": true,
+    "adb_harness_tracked": false,
+    "current_worktree_device_acceptance": false,
+    "c6_c8_eagle_semantics": false
+  },
+  "fresh_verification": {
+    "llm_build": "passed",
+    "focused_cpp_tests": {
+      "passed": 40,
+      "failed": 0
+    },
+    "throughput_harness_tests": {
+      "passed": 26,
+      "failed": 0
+    },
+    "python_compile": "passed",
+    "shell_syntax": "passed",
+    "diff_check": "passed",
+    "adb_preflight": "passed_read_only",
+    "adb_inference_run": "not_run"
+  },
+  "blocking_findings": [
+    "Eagle internal wave remains capped at four requests",
+    "pending split chunks survive cancellation and Eagle errors",
+    "QNN raw executor lacks deployment metadata and bounds validation"
+  ]
+}

@@ -69,14 +69,14 @@ dev 只验证 HTTP、配置和调度，不能形成性能结论。
 
 `full` 小规模验收每个 cell 精确使用前 20 条数据、每条最多 512 token。
 由于 20 不能被 6 或 8 整除，C6 执行 `6+6+6+2`，C8 执行
-`8+8+4`；最后一个 partial wave 会单独记录。若某个 cell 出现失败，工具仍会
-执行另一个 cell，最后在汇总中统一标记失败。
+`8+8+4`；最后一个 partial wave 会单独记录。任一 wave 失败后会立即停止当前
+cell，工具仍会执行另一个 cell，最后在汇总中统一标记失败。
 
 数据字段默认使用 `prompt`。当 QNN 导出不能容纳 few-shot 长前缀时，可用
 `--prompt-field question` 测试同一 JSONL 的短题面。实际字段会记录为结果元数据
 `dataset_prompt_field`，原始 JSONL 和其他字段不修改。
 
-`--disable-resource-guard` 会关闭模型加载、warmup 和测量期间的温度、可用
+`--disable-resource-guard` 会关闭模型加载、warmup 和测量期间的温度、电量、可用
 内存、进程 RSS 与 ADB 失败自动停止，同时跳过 full 的冷却门和 32°C 起始温度
 限制。默认不启用该选项；启用时结果元数据记录
 `resource_guard_enabled=false`，且不生成 `.resources.jsonl`。
@@ -100,7 +100,7 @@ full 对每个 backend/mode 分别启动独立的 C1 和 C4 server，共 18 个 
 - CPU mode 顺序为 single/continuous/dual；OpenCL 向前轮换一次；QNN 再轮换一次；
 - server load、模型初始化、warmup 和温控等待不进入测量 wall time。
 
-warmup 后，full 要求连续一分钟的 `PhoneTemp` 都不超过 32.0 C 且波动不超过 1.0 C。测量期间每 5 秒检查一次，超过 42.0 C 会立即 kill 本 cell 的精确 PID。首五与末五 wave 的平均吞吐漂移绝对值超过 10% 时，冷却后用新的 server 重跑，最多三次。
+warmup 后，full 要求连续一分钟的 `PhoneTemp` 都不超过 32.0 C 且波动不超过 1.0 C。测量期间每 5 秒检查一次；超过 42.0 C，或设备未充电且电量不高于 10%，都会立即停止本 cell。漂移使用开头和结尾最多五个且互不重叠的 wave；绝对值超过 10% 时，冷却后用新的 server 重跑，最多三次。传入 `--disable-drift-retry` 后仍记录漂移，但不拒绝、冷却或重跑该 cell。
 
 ```bash
 python3 apps/mnncli/test/server_throughput.py matrix \
@@ -129,7 +129,7 @@ python3 apps/mnncli/test/server_throughput.py load \
   --output /path/to/cell.json
 ```
 
-输出文本只写主机的 `cell.responses.jsonl`。其中保留旧 scorer 需要的 `id`、`response` 和 `status`：生成 token 达到请求上限时为 `max_tokens_finished`，否则为 `normal_finished`。HTTP、超时、空输出或零 usage 记录为 `error`。
+输出文本只写主机的 `cell.responses.jsonl`。每个 wave 完成后立即追加响应，并同步写入 `cell.waves.jsonl`；中断时已完成 wave 仍然保留。其中响应保留旧 scorer 需要的 `id`、`response` 和 `status`：生成 token 达到请求上限时为 `max_tokens_finished`，否则为 `normal_finished`。HTTP、超时、空输出或零 usage 记录为 `error`。
 
 ## 结果与判定
 
@@ -137,6 +137,7 @@ python3 apps/mnncli/test/server_throughput.py load \
 
 - `<cell>-attemptN.json`：metadata、aggregate 和 wave 统计；
 - `<cell>-attemptN.responses.jsonl`：逐请求响应与错误；
+- `<cell>-attemptN.waves.jsonl`：逐 wave checkpoint；
 - `<cell>-attemptN.server.log.gz`：压缩 server 日志；
 - `configs/<cell>-attemptN.json`：实际部署配置；
 - 可选 `.score.json` 和对应 scorer 输入子集。
@@ -146,7 +147,7 @@ python3 apps/mnncli/test/server_throughput.py load \
 - `aggregate_completion_tokens_per_s`：成功请求的实际 completion token / 整段测量 wall time；
 - requests/s、prompt/completion token 总数和 wall time；
 - 请求 latency p50/p90/p95/max；
-- wave token/s p50/p90、首五/末五均值与漂移；
+- wave token/s p50/p90、首尾不重叠窗口均值与漂移；
 - HTTP、timeout、transport、protocol、空输出和零 usage 数；
 - 开始/结束温度以及测量期间温度采样；
 - config、模型、二进制和 dataset SHA-256；
@@ -158,4 +159,4 @@ python3 apps/mnncli/test/server_throughput.py load \
 
 开始前脚本记录 `/data` 的 `df` 与三个现有目录的 `du`，并要求至少 10 GiB 可用。它只 push 一个 `mnncli-throughput`，每次只部署一个小配置。设备 staging 硬限制 64 MiB，主机结果硬限制 256 MiB。
 
-每个 cell 只 kill 自己记录的 PID，只移除本次 `adb forward`、PID 文件和临时配置，不调用 `pkill`，不终止其他推理进程。日志和响应始终留在主机；结束后设备 staging 仅保留一个二进制和小型 `throughput-summary.json`。现有 Host/QNN 模型、QNN runtime 和其他用户目录不会被删除或修改。
+每个 cell 启动前先删除同名旧 PID 文件，只 kill 本次新进程记录的 PID，并只移除本次 `adb forward`、PID 文件和临时配置；不调用 `pkill`，不终止其他推理进程。日志和响应始终留在主机；结束后设备 staging 仅保留一个二进制和小型 `throughput-summary.json`。现有 Host/QNN 模型、QNN runtime 和其他用户目录不会被删除或修改。

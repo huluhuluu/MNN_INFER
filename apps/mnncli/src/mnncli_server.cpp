@@ -210,13 +210,15 @@ public:
                                           [](const std::shared_ptr<Task>& activeTask) {
                                               return activeTask->is_cancelled();
                                           });
+                if (cancelModel) {
+                    // Keep the worker from starting another batch before the
+                    // cancellation is delivered to the current generation.
+                    mLlm->requestCancel();
+                }
             }
         }
         if (removedFromQueue) {
             complete(task, false);
-        }
-        if (cancelModel) {
-            mLlm->requestCancel();
         }
         MNN::Transformer::AcceptanceTrace::log("event=request_cancelled request_id=%llu request_scope=service state=%s",
                                                static_cast<unsigned long long>(task->request_id),
@@ -384,15 +386,23 @@ private:
         std::vector<std::vector<int>> input_ids;
         active_tasks.reserve(tasks.size());
         input_ids.reserve(tasks.size());
-        for (const auto& task : tasks) {
-            if (task->is_cancelled()) {
-                complete(task, false);
-                continue;
+        try {
+            for (const auto& task : tasks) {
+                if (task->is_cancelled()) {
+                    complete(task, false);
+                    continue;
+                }
+                const auto prompt = mLlm->apply_chat_template(task->prompts);
+                input_ids.push_back(mLlm->tokenizer_encode(prompt));
+                task->markStarted(input_ids.back().size());
+                active_tasks.push_back(task);
             }
-            const auto prompt = mLlm->apply_chat_template(task->prompts);
-            input_ids.push_back(mLlm->tokenizer_encode(prompt));
-            task->markStarted(input_ids.back().size());
-            active_tasks.push_back(task);
+        } catch (const std::exception& error) {
+            LOG_DEBUG("LLM batch preprocessing failed: " + std::string(error.what()));
+            for (const auto& task : tasks) {
+                complete(task, true);
+            }
+            return;
         }
         if (active_tasks.empty()) {
             return;
@@ -569,7 +579,7 @@ std::string trimLeadingWhitespace(const std::string& str) {
     return std::string(it, str.end()); // Create a substring from the first non-whitespace character
 }
 
-    const std::string getR1AssistantString(std::string assistant_content) {
+const std::string getR1AssistantString(std::string assistant_content) {
     std::size_t pos = assistant_content.find("</think>");
     if (pos != std::string::npos) {
         assistant_content.erase(0, pos + std::string("</think>").length());
@@ -577,13 +587,12 @@ std::string trimLeadingWhitespace(const std::string& str) {
     return trimLeadingWhitespace(assistant_content) + "<|end_of_sentence|>";
 }
 
-std::string GetR1UserString(std::string user_content, bool last) {
+std::string GetR1UserString(std::string user_content) {
     return "<|User|>" + std::string(user_content) + "<|Assistant|>";
 }
 
-    std::vector<PromptItem> ConvertToR1(std::vector<PromptItem> chat_prompts) {
+std::vector<PromptItem> ConvertToR1(std::vector<PromptItem> chat_prompts) {
     std::vector<PromptItem> result_prompts = {};
-    std::string prompt_result = "";
     result_prompts.emplace_back("system", "<|begin_of_sentence|>You are a helpful assistant.");
     auto iter = chat_prompts.begin();
     for (; iter != chat_prompts.end() - 1; ++iter) {
@@ -592,11 +601,11 @@ std::string GetR1UserString(std::string user_content, bool last) {
         } else if (iter->first == "assistant") {
             result_prompts.emplace_back("assistant", getR1AssistantString(iter->second));
         } else if (iter->first == "user") {
-            result_prompts.emplace_back("user", GetR1UserString(iter->second, false));
+            result_prompts.emplace_back("user", GetR1UserString(iter->second));
         }
     }
     if (iter->first == "user") {
-        result_prompts.emplace_back("user", GetR1UserString(iter->second, true));
+        result_prompts.emplace_back("user", GetR1UserString(iter->second));
     } else {
         result_prompts.emplace_back("assistant", getR1AssistantString(iter->second));
     }
@@ -748,6 +757,8 @@ bool MnncliServer::Start(MNN::Transformer::Llm* llm, bool is_r1, const std::stri
             }
             const auto answer = task->answer();
             const auto timing = task->timing();
+            const bool reachedTokenLimit = task->max_tokens > 0 &&
+                task->generated_tokens() >= static_cast<size_t>(task->max_tokens);
             json response_json = {
                 {"id", "chatcmpl" + GetCurrentTimeAsString()},
                 {"object", "chat.completion"},
@@ -755,7 +766,7 @@ bool MnncliServer::Start(MNN::Transformer::Llm* llm, bool is_r1, const std::stri
                 {"model", model},
                 {"choices", json::array({{{"index", 0},
                     {"message", {{"role", "assistant"}, {"content", answer}}},
-                    {"finish_reason", "stop"}}})},
+                      {"finish_reason", reachedTokenLimit ? "length" : "stop"}}})},
                 {"usage", {{"prompt_tokens", task->prompt_tokens()},
                             {"completion_tokens", task->generated_tokens()},
                             {"total_tokens", task->prompt_tokens() + task->generated_tokens()}}},
@@ -820,7 +831,10 @@ bool MnncliServer::Start(MNN::Transformer::Llm* llm, bool is_r1, const std::stri
                     {"object", "chat.completion.chunk"},
                     {"created", static_cast<int>(std::time(nullptr))},
                     {"model", model},
-                    {"choices", json::array({{{"delta", json::object()}, {"index", 0}, {"finish_reason", "stop"}}})}
+                    {"choices", json::array({{{"delta", json::object()}, {"index", 0},
+                        {"finish_reason", task->max_tokens > 0 &&
+                            task->generated_tokens() >= static_cast<size_t>(task->max_tokens)
+                                ? "length" : "stop"}}})}
                 };
                 if (!write_sse(finish) || !sink.write("data: [DONE]\n\n", 14)) {
                     coordinator->cancel(task);
