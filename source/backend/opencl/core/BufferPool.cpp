@@ -20,6 +20,16 @@ void clTrackTransientAlloc(size_t bytes) {
         gTransientPeak = gTransientLive;
     }
 }
+void clTrackTransientFree(size_t bytes) {
+    // Pool accounting follows the buffers that are currently owned by the pool. A
+    // release can race neither allocation nor recycle because pool mutation is
+    // serialized by the backend, so avoid an unnecessary lock on this hot path.
+    if (bytes >= gTransientLive) {
+        gTransientLive = 0;
+    } else {
+        gTransientLive -= bytes;
+    }
+}
 size_t clTransientPeakBytes() { return gTransientPeak; }
 size_t clTransientLiveBytes() { return gTransientLive; }
 void clResetTransientPeak() { gTransientPeak = gTransientLive; }
@@ -55,6 +65,10 @@ void BufferPool::recycle(cl::Buffer* buffer, bool release) {
         return;
     }
     if (release) {
+        if (mIsTransient) {
+            clTrackTransientFree(iter->second->size);
+        }
+        mTotalSize -= iter->second->size;
         mAllBuffer.erase(iter);
         return;
     }
@@ -62,19 +76,30 @@ void BufferPool::recycle(cl::Buffer* buffer, bool release) {
 }
 
 void BufferPool::clear() {
+    if (mIsTransient) {
+        clTrackTransientFree(mTotalSize);
+    }
     mFreeList.clear();
     mAllBuffer.clear();
     mTotalSize = 0;
 }
 
 void BufferPool::releaseFreeList() {
+    size_t released = 0;
     for(auto mf : mFreeList){
         auto iter = mAllBuffer.find(mf.second->buffer.get());
         if (iter != mAllBuffer.end()) {
+            released += iter->second->size;
             mAllBuffer.erase(iter);
         }
     }
     mFreeList.clear();
+    if (released != 0) {
+        mTotalSize -= released;
+        if (mIsTransient) {
+            clTrackTransientFree(released);
+        }
+    }
 }
 
 std::shared_ptr<OpenCLBufferNode> BufferExecutionPool::alloc(size_t size, bool separate) {
@@ -90,8 +115,16 @@ std::shared_ptr<OpenCLBufferNode> BufferExecutionPool::alloc(size_t size, bool s
             mCommand.finish();
             auto maxIter = mFreeList.rbegin();
             auto node = maxIter->second;
-            mTotalSize += size - node.get()->size;
-            clTrackTransientAlloc(size - node.get()->size);
+            const size_t oldSize = node.get()->size;
+            if (size > oldSize) {
+                const size_t delta = size - oldSize;
+                mTotalSize += delta;
+                clTrackTransientAlloc(delta);
+            } else if (size < oldSize) {
+                const size_t delta = oldSize - size;
+                mTotalSize -= delta;
+                clTrackTransientFree(delta);
+            }
             node.get()->size = size;
             node.get()->buffer.reset(new cl::Buffer(mContext, mFlag, size, NULL, &ret));
             if (nullptr == node.get()->buffer.get() || ret != CL_SUCCESS) {
@@ -123,6 +156,8 @@ void BufferExecutionPool::recycle(std::shared_ptr<OpenCLBufferNode> node, bool r
         return;
     }
     if (release) {
+        clTrackTransientFree(node->size);
+        mTotalSize -= node->size;
         mAllBuffer.erase(node);
         return;
     }
@@ -130,19 +165,26 @@ void BufferExecutionPool::recycle(std::shared_ptr<OpenCLBufferNode> node, bool r
 }
 
 void BufferExecutionPool::clear() {
+    clTrackTransientFree(mTotalSize);
     mFreeList.clear();
     mAllBuffer.clear();
     mTotalSize = 0;
 }
 
 void BufferExecutionPool::releaseFreeList() {
+    size_t released = 0;
     for(auto mf : mFreeList){
         auto iter = mAllBuffer.find(mf.second);
         if (iter != mAllBuffer.end()) {
+            released += mf.second->size;
             mAllBuffer.erase(iter);
         }
     }
     mFreeList.clear();
+    if (released != 0) {
+        mTotalSize -= released;
+        clTrackTransientFree(released);
+    }
 }
 } // namespace OpenCL
 } // namespace MNN

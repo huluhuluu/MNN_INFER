@@ -33,6 +33,7 @@ struct OpenCLBufferNode{
 // them. Weights live in the STATIC pool and are excluded, so the number reflects just the
 // per-forward scratch memory.
 void clTrackTransientAlloc(size_t bytes);
+void clTrackTransientFree(size_t bytes);
 size_t clTransientPeakBytes();
 size_t clTransientLiveBytes();
 void clResetTransientPeak();

@@ -1941,7 +1941,8 @@ ErrorCode AttentionBufExecution::onResize(const std::vector<Tensor *> &inputs, c
     return NO_ERROR;
 }
 
-// MNN_OPENCL_MEM_REPORT=1 prints the peak transient (per-forward scratch) OpenCL bytes.
+// MNN_OPENCL_MEM_REPORT=1 prints the high-water transient scratch allocation for this
+// process. poolLive is the current capacity retained by the transient pools.
 // VmRSS cannot see these buffers - they are kgsl device mappings - so this is the only
 // way to compare the attention paths' memory use.
 void AttentionBufExecution::reportTransientMemory(int seqlen, const char* path) {
