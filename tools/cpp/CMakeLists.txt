@@ -10,6 +10,8 @@ list(APPEND MNN_CPP_TOOLS MNNV2Basic.out)
 if (NOT MNN_SKIPBUILD_GEOMETRY)
 add_executable(GetMNNInfo ${CMAKE_CURRENT_LIST_DIR}/GetMNNInfo.cpp)
 list(APPEND MNN_CPP_TOOLS GetMNNInfo)
+add_executable(rewriteMNNExternalPath ${CMAKE_CURRENT_LIST_DIR}/rewriteMNNExternalPath.cpp)
+list(APPEND MNN_CPP_TOOLS rewriteMNNExternalPath)
 add_executable(ModuleBasic.out ${CMAKE_CURRENT_LIST_DIR}/ModuleBasic.cpp)
 list(APPEND MNN_CPP_TOOLS ModuleBasic.out)
 

@@ -25,7 +25,137 @@ static std::string gOfflieSrc;
 static std::string gOfflieDst;
 static std::string gGraphName = "graph";
 static std::string gCacheDir = "res";
+static std::set<std::string> gCPUOps;
+static bool gLogitsIndexRange = false;
+static bool gLogitsIndexGather = false;
 static MNNForwardType gNPUType = MNN_FORWARD_NN;
+
+static std::unique_ptr<OpT> _makeIntConst(const std::string& name, int outputIndex, int value) {
+    std::unique_ptr<OpT> op(new OpT);
+    op->type = OpType_Const;
+    op->name = name;
+    op->outputIndexes = {outputIndex};
+    op->main.type = OpParameter_Blob;
+    op->main.value = new BlobT;
+    auto blob = op->main.AsBlob();
+    blob->dataType = DataType_DT_INT32;
+    blob->dataFormat = MNN_DATA_FORMAT_NCHW;
+    blob->dims = {1};
+    blob->int32s = {value};
+    return op;
+}
+
+static std::unique_ptr<OpT> _makeGather(const std::string& name, int inputIndex, int indicesIndex, int axisIndex, int outputIndex) {
+    std::unique_ptr<OpT> op(new OpT);
+    op->type = OpType_GatherV2;
+    op->name = name;
+    op->inputIndexes = {inputIndex, indicesIndex, axisIndex};
+    op->outputIndexes = {outputIndex};
+    return op;
+}
+
+static bool _rewriteLogitsIndexAsRange(NetT* net) {
+    int logitsIndex = -1;
+    OpT* logitsInput = nullptr;
+    for (auto& op : net->oplists) {
+        if (op->type == OpType_Input && op->name == "logits_index" && !op->outputIndexes.empty()) {
+            logitsIndex = op->outputIndexes[0];
+            logitsInput = op.get();
+            break;
+        }
+    }
+    if (logitsInput == nullptr || logitsInput->main.AsInput() == nullptr) {
+        MNN_ERROR("Can't find logits_index input for range rewrite.\n");
+        return false;
+    }
+
+    int slicePosition = -1;
+    OpT* logitsSlice = nullptr;
+    for (int i = 0; i < net->oplists.size(); ++i) {
+        auto op = net->oplists[i].get();
+        if (op->type == OpType_StridedSlice && op->inputIndexes.size() >= 3 && op->inputIndexes[1] == logitsIndex) {
+            slicePosition = i;
+            logitsSlice = op;
+            break;
+        }
+    }
+    if (logitsSlice == nullptr) {
+        if (logitsInput->main.AsInput()->dims == std::vector<int>({2})) {
+            return true;
+        }
+        MNN_ERROR("Can't find the logits StridedSlice for range rewrite.\n");
+        return false;
+    }
+
+    logitsInput->main.AsInput()->dims = {2};
+    const int beginIndices = net->tensorName.size();
+    net->tensorName.emplace_back("__mnn_logits_range_begin_indices");
+    const int endIndices = net->tensorName.size();
+    net->tensorName.emplace_back("__mnn_logits_range_end_indices");
+    const int beginValue = net->tensorName.size();
+    net->tensorName.emplace_back("__mnn_logits_range_begin");
+    const int endValue = net->tensorName.size();
+    net->tensorName.emplace_back("__mnn_logits_range_end");
+    const int gatherAxis = net->tensorName.size();
+    net->tensorName.emplace_back("__mnn_logits_range_gather_axis");
+
+    logitsSlice->inputIndexes[1] = beginValue;
+    logitsSlice->inputIndexes[2] = endValue;
+
+    std::vector<std::unique_ptr<OpT>> rewritten;
+    rewritten.reserve(net->oplists.size() + 5);
+    for (int i = 0; i < net->oplists.size(); ++i) {
+        if (i == slicePosition) {
+            rewritten.emplace_back(_makeIntConst("__mnn_logits_range_begin_indices", beginIndices, 0));
+            rewritten.emplace_back(_makeIntConst("__mnn_logits_range_end_indices", endIndices, 1));
+            rewritten.emplace_back(_makeIntConst("__mnn_logits_range_gather_axis", gatherAxis, 0));
+            rewritten.emplace_back(_makeGather("__mnn_logits_range_begin", logitsIndex, beginIndices, gatherAxis, beginValue));
+            rewritten.emplace_back(_makeGather("__mnn_logits_range_end", logitsIndex, endIndices, gatherAxis, endValue));
+        }
+        rewritten.emplace_back(std::move(net->oplists[i]));
+    }
+    net->oplists = std::move(rewritten);
+    MNN_PRINT("Rewrite logits_index to explicit [begin, end] range.\n");
+    return true;
+}
+
+static bool _rewriteLogitsSliceAsGather(NetT* net) {
+    int logitsIndex = -1;
+    OpT* logitsInput = nullptr;
+    for (auto& op : net->oplists) {
+        if (op->type == OpType_Input && op->name == "logits_index" && !op->outputIndexes.empty()) {
+            logitsIndex = op->outputIndexes[0];
+            logitsInput = op.get();
+            break;
+        }
+    }
+    if (logitsInput == nullptr || logitsInput->main.AsInput() == nullptr) {
+        MNN_ERROR("Can't find logits_index input for gather rewrite.\n");
+        return false;
+    }
+    if (logitsInput->main.AsInput()->dims != std::vector<int>({1})) {
+        MNN_ERROR("Gather logits_index must have shape [1].\n");
+        return false;
+    }
+
+    for (int i = 0; i < net->oplists.size(); ++i) {
+        auto slice = net->oplists[i].get();
+        if (slice->type != OpType_StridedSlice || slice->inputIndexes.size() < 5 ||
+            slice->inputIndexes[1] != logitsIndex || slice->outputIndexes.size() != 1) {
+            continue;
+        }
+        // The source Slice already carries the sequence axis as its fourth
+        // input. Reuse that constant so QNN receives Gather(data, index, axis).
+        net->oplists[i] = _makeGather("__mnn_logits_token_gather", slice->inputIndexes[0], logitsIndex,
+                                      slice->inputIndexes[3], slice->outputIndexes[0]);
+        MNN_PRINT("Rewrite logits StridedSlice as runtime-index Gather.\n");
+        return true;
+    }
+
+    MNN_ERROR("Can't find the logits StridedSlice for gather rewrite.\n");
+    return false;
+}
+
 static bool initConstTensorsNoAlloc(std::vector<std::shared_ptr<Tensor>>& tensors, const Net* net) {
     bool valid    = true;
     tensors.resize(net->tensorName()->size());
@@ -101,6 +231,9 @@ static bool _npuSupportOp(const Op* op) {
 }
 
 static bool isBreakOp(const Op* op) {
+    if (op->name() != nullptr && gCPUOps.find(op->name()->str()) != gCPUOps.end()) {
+        return true;
+    }
     bool isWhileControlflow = false;
     if (op->type() == OpType_While && op->main_as_WhileParam() != nullptr) {
         isWhileControlflow = true;
@@ -897,6 +1030,22 @@ int main(int argc, const char* argv[]) {
                 skipOps.insert(iter->GetString());
             }
         }
+        if (document.HasMember("cpu_ops")) {
+            auto cpuOps = document["cpu_ops"].GetArray();
+            for (auto iter = cpuOps.Begin(); iter != cpuOps.End(); iter++) {
+                gCPUOps.insert(iter->GetString());
+            }
+        }
+        if (document.HasMember("logits_index_range")) {
+            gLogitsIndexRange = document["logits_index_range"].GetBool();
+        }
+        if (document.HasMember("logits_index_gather")) {
+            gLogitsIndexGather = document["logits_index_gather"].GetBool();
+        }
+        if (gLogitsIndexRange && gLogitsIndexGather) {
+            MNN_ERROR("logits_index_range and logits_index_gather are mutually exclusive.\n");
+            return 1;
+        }
         if (document.HasMember("KVCACHE_SIZE_LIMIT")) {
             gMaxKVSize = document["KVCACHE_SIZE_LIMIT"].GetInt();
         }
@@ -938,6 +1087,21 @@ int main(int argc, const char* argv[]) {
     // Get Net struct
     std::shared_ptr<MNN::Interpreter> netC(MNN::Interpreter::createFromFile(srcMNN), MNN::Interpreter::destroy);
     auto bufferPair = netC->getModelBuffer();
+    std::vector<uint8_t> rewrittenBuffer;
+    if (gLogitsIndexRange || gLogitsIndexGather) {
+        std::shared_ptr<NetT> rewrittenNet(GetNet(bufferPair.first)->UnPack());
+        const bool rewriteSuccess = gLogitsIndexRange
+            ? _rewriteLogitsIndexAsRange(rewrittenNet.get())
+            : _rewriteLogitsSliceAsGather(rewrittenNet.get());
+        if (!rewriteSuccess) {
+            return 1;
+        }
+        flatbuffers::FlatBufferBuilder builder;
+        builder.Finish(Net::Pack(builder, rewrittenNet.get()));
+        rewrittenBuffer.assign(builder.GetBufferPointer(), builder.GetBufferPointer() + builder.GetSize());
+        bufferPair.first = rewrittenBuffer.data();
+        bufferPair.second = rewrittenBuffer.size();
+    }
     std::shared_ptr<Schedule::ScheduleInfo> sharedConst;
     auto buffer = bufferPair.first;
     auto length = bufferPair.second;
