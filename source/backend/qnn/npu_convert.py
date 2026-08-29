@@ -69,8 +69,7 @@ for key in post_treat["merge"]:
     workdirs = []
     for i,src in enumerate(srcs):
         # tar
-        graphname = src.split('/')
-        graphname = graphname[len(graphname)-1]
+        graphname = os.path.basename(src)
         graphs.append(graphname)
         workdir = os.path.join(os.getcwd(), src)
         workdirs.append(workdir)
@@ -122,4 +121,3 @@ for key in post_treat["merge"]:
     if clean_tmp:
         for workdir in workdirs:
             shutil.rmtree(workdir)
-

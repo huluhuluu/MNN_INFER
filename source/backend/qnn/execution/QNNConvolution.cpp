@@ -26,8 +26,10 @@ static std::pair<int, int> closest_factors(int n) {
 
 void QNNConvolution::isWeightQuantSupported(const Tensor *input, const int ic, const int oc){
     Qnn_DataType_t dataType = mBackend->getNativeTensor(input)->v1.dataType;
+    mWeightQuantMode = WeightQuantMode::NONE;
+    mWeightQuant = false;
+    mAsymmetricGroupCount = 0;
     if(mOp->main_as_Convolution2D()->quanParameter() == nullptr){
-        mWeightQuant = false;
         return;
     }else{
         bool hasBias = false;
@@ -42,18 +44,27 @@ void QNNConvolution::isWeightQuantSupported(const Tensor *input, const int ic, c
         
         std::shared_ptr<ConvolutionCommon::Int8Common> quanCommon = ConvolutionCommon::load(mOp, this->backend(), false, true);
         int totalCount = quanCommon->alpha.size();
-        mBlockSize = totalCount / oc;
         if(quanCommon->asymmetric){
-            // not support asymmetric and mBlockSize > 1 results incorrect now
-            mWeightQuant = false;
+            if (totalCount % (2 * oc) != 0) {
+                MNN_ERROR("MNN_QNN: Invalid asymmetric weight metadata for %s.\n", mNodeName.c_str());
+                return;
+            }
+            mAsymmetricGroupCount = totalCount / (2 * oc);
+            if ((dataType == QNN_DATATYPE_FLOAT_16 || dataType == QNN_DATATYPE_FLOAT_32) &&
+                mIsMatMul && quanCommon->canUseInt4 && mAsymmetricGroupCount > 0 &&
+                ic % mAsymmetricGroupCount == 0 && ic / mAsymmetricGroupCount == 64) {
+                mBlockSize = mAsymmetricGroupCount;
+                mWeightQuantMode = WeightQuantMode::ASYMMETRIC_W4_G64;
+                mWeightQuant = true;
+            }
             return;
         }
+        mBlockSize = totalCount / oc;
         
         if(dataType == QNN_DATATYPE_FLOAT_16 || dataType == QNN_DATATYPE_FLOAT_32){
             if(mIsMatMul && mBlockSize == 1){
+                mWeightQuantMode = WeightQuantMode::SYMMETRIC;
                 mWeightQuant = true;
-            }else{
-                mWeightQuant = false;
             }
             
             return;
@@ -61,11 +72,11 @@ void QNNConvolution::isWeightQuantSupported(const Tensor *input, const int ic, c
         
         if(mBlockSize > 1){
             if(mIs1x1Conv && hasBias == false && (ic / mBlockSize) >= 16){
+                mWeightQuantMode = WeightQuantMode::SYMMETRIC;
                 mWeightQuant = true;
-            }else{
-                mWeightQuant = false;
             }
         }else{
+            mWeightQuantMode = WeightQuantMode::SYMMETRIC;
             mWeightQuant = true;
         }
     }
@@ -101,6 +112,10 @@ ErrorCode QNNConvolution::onEncode(const std::vector<Tensor *> &inputs, const st
                  padTop==0 && padBottom==0 && padLeft==0 && padRight==0;
     mIsMatMul = mIs1x1Conv;
     isWeightQuantSupported(inputs[0], ic, oc);
+
+    if (mWeightQuantMode == WeightQuantMode::ASYMMETRIC_W4_G64) {
+        return onEncodeFpAAsymmetricW4G64MatMul(inputs[0], outputs[0], n, ih, iw, ic, oc);
+    }
     
     if(mIsMatMul && mWeightQuant && (dataType == QNN_DATATYPE_FLOAT_16 || dataType == QNN_DATATYPE_FLOAT_32)){
         return onEncodeFpAIntBMatMul(inputs[0], outputs[0], n, ih, iw, ic, oc);
@@ -555,6 +570,172 @@ ErrorCode QNNConvolution::onEncodeFpAIntBMatMul(Tensor * input, Tensor * output,
         mOutputs.push_back(*(mBackend->getNativeTensor(output))); // output
         mBackend->addNodeToGraph(mOpConfigVersion, name.c_str(), mPackageName.c_str(), mNodeType.c_str(), mParams, mInputs, mOutputs);
     }
+    return NO_ERROR;
+}
+
+ErrorCode QNNConvolution::onEncodeFpAAsymmetricW4G64MatMul(Tensor *input, Tensor *output, int n, int h, int w, int ic, int oc) {
+    constexpr int groupSize = 64;
+    auto conv2D = mOp->main_as_Convolution2D();
+    auto common = conv2D->common();
+    auto quanCommon = ConvolutionCommon::load(mOp, this->backend(), false, true);
+    Qnn_DataType_t dataType = mBackend->getNativeTensor(input)->v1.dataType;
+    const int rows = n * h * w;
+    const int groupCount = mAsymmetricGroupCount;
+
+    if (!quanCommon || !quanCommon->asymmetric || !quanCommon->canUseInt4 ||
+        groupCount <= 0 || ic != groupCount * groupSize ||
+        quanCommon->alpha.size() != 2 * oc * groupCount) {
+        MNN_ERROR("MNN_QNN: Invalid asymmetric W4/G64 lowering request for %s.\n", mNodeName.c_str());
+        return NOT_SUPPORT;
+    }
+
+    MNN_PRINT("MNN_QNN_ASYM_W4_G64_BLOCK_S8: lower %s, K=%d, N=%d, groups=%d.\n",
+              mNodeName.c_str(), ic, oc, groupCount);
+
+    auto tensorAt = [this](size_t index) -> Qnn_Tensor_t {
+        return *(mTempTensorWrappers[index]->getNativeTensor());
+    };
+    auto addNode = [this](const std::string& name, const std::string& type,
+                          const std::vector<Qnn_Tensor_t>& inputs,
+                          const std::vector<Qnn_Tensor_t>& outputs,
+                          const std::vector<Qnn_Param_t>& params = std::vector<Qnn_Param_t>()) {
+        mNodeType = type;
+        mInputs = inputs;
+        mOutputs = outputs;
+        mParams = params;
+        mBackend->addNodeToGraph(mOpConfigVersion, name.c_str(), mPackageName.c_str(),
+                                 mNodeType.c_str(), mParams, mInputs, mOutputs);
+        CLEAR_BEFORE_ADDING_NODE;
+    };
+
+    const std::vector<uint32_t> input4DShape = {1, 1, (uint32_t)rows, (uint32_t)ic};
+    const std::vector<uint32_t> mainOutput4DShape = {1, 1, (uint32_t)rows, (uint32_t)oc};
+    const std::vector<uint32_t> output2DShape = {(uint32_t)rows, (uint32_t)oc};
+
+    this->createStageTensor("asym_input_4d", dataType, input4DShape);
+    const Qnn_Tensor_t input4D = tensorAt(mTempTensorWrappers.size() - 1);
+    this->createStageTensor("asym_main_output_4d", dataType, mainOutput4DShape);
+    const Qnn_Tensor_t mainOutput4D = tensorAt(mTempTensorWrappers.size() - 1);
+    this->createStageTensor("asym_main_output_2d", dataType, output2DShape);
+    const Qnn_Tensor_t mainOutput2D = tensorAt(mTempTensorWrappers.size() - 1);
+
+    const int8_t* packedWeights = quanCommon->weight.get();
+    const float* alpha = quanCommon->alpha.get();
+    std::vector<int8_t> quantWeightData(ic * oc);
+    mAsymBlockSizes = {1, 1, groupSize, 1};
+    mAsymBlockScaleOffsets.resize(groupCount * oc);
+
+    bool hasOffset = false;
+    std::vector<float> correctionWeight(groupCount * oc);
+    for (int g = 0; g < groupCount; ++g) {
+        for (int o = 0; o < oc; ++o) {
+            const int alphaIndex = o * groupCount + g;
+            const float offset = alpha[2 * alphaIndex];
+            const float scale = alpha[2 * alphaIndex + 1];
+            if (!(scale > 0.0f) || !std::isfinite(scale) || !std::isfinite(offset)) {
+                MNN_ERROR("MNN_QNN: Invalid scale/offset in %s at output=%d group=%d.\n",
+                          mNodeName.c_str(), o, g);
+                return NOT_SUPPORT;
+            }
+            // HTP 2.40 consumes BLOCK scales output-channel first for MatMul
+            // weights, as verified on V79 with a non-uniform two-block graph.
+            Qnn_ScaleOffset_t& blockScaleOffset = mAsymBlockScaleOffsets[o * groupCount + g];
+            blockScaleOffset.scale = scale;
+            blockScaleOffset.offset = 0;
+            correctionWeight[g * oc + o] = offset;
+            hasOffset = hasOffset || offset != 0.0f;
+
+            for (int k = 0; k < groupSize; ++k) {
+                const int sourceIndex = o * ic + g * groupSize + k;
+                const uint8_t packed = static_cast<uint8_t>(packedWeights[sourceIndex / 2]);
+                const int value = (sourceIndex % 2 == 0) ? ((packed >> 4) & 0x0f) : (packed & 0x0f);
+                quantWeightData[(g * groupSize + k) * oc + o] = static_cast<int8_t>(value - 8);
+            }
+        }
+    }
+
+    Qnn_QuantizeParams_t weightQuantize = DEFAULT_QUANTIZE_PARAMS;
+    weightQuantize.encodingDefinition = QNN_DEFINITION_DEFINED;
+    weightQuantize.quantizationEncoding = QNN_QUANTIZATION_ENCODING_BLOCK;
+    weightQuantize.blockEncoding.blockSize = mAsymBlockSizes.data();
+    weightQuantize.blockEncoding.scaleOffset = mAsymBlockScaleOffsets.data();
+    this->createStaticTensor("asym_block_s8_weight", QNN_DATATYPE_SFIXED_POINT_8,
+                             {(uint32_t)1, (uint32_t)1, (uint32_t)ic, (uint32_t)oc},
+                             quantWeightData.data(), weightQuantize);
+    const Qnn_Tensor_t blockWeight = tensorAt(mTempTensorWrappers.size() - 1);
+    mBackend->pushReleaseFunc([this]() {
+        std::vector<uint32_t>().swap(mAsymBlockSizes);
+        std::vector<Qnn_ScaleOffset_t>().swap(mAsymBlockScaleOffsets);
+    });
+
+    std::vector<float> biasData(oc, 0.0f);
+    auto bias = conv2D->bias();
+    if (bias != nullptr) {
+        ::memcpy(biasData.data(), bias->data(), oc * sizeof(float));
+    }
+    bool hasBias = false;
+    for (float value : biasData) {
+        hasBias = hasBias || value != 0.0f;
+    }
+    this->createStaticFloatTensor("asym_bias", dataType, {(uint32_t)oc}, biasData.data());
+    const Qnn_Tensor_t biasTensor = tensorAt(mTempTensorWrappers.size() - 1);
+
+    addNode(mNodeName + "_asym_reshape_input", "Reshape",
+            {*(mBackend->getNativeTensor(input))}, {input4D});
+    std::vector<Qnn_Tensor_t> mainMatMulInputs = {input4D, blockWeight};
+    if (!hasOffset && hasBias) {
+        mainMatMulInputs.emplace_back(biasTensor);
+    }
+    addNode(mNodeName + "_asym_block_s8_matmul", "MatMul",
+            mainMatMulInputs, {mainOutput4D});
+    addNode(mNodeName + "_asym_main_reshape", "Reshape",
+            {mainOutput4D}, {mainOutput2D});
+    Qnn_Tensor_t final2D = mainOutput2D;
+
+    if (hasOffset) {
+        this->createStageTensor("asym_grouped_input", dataType,
+                                std::vector<uint32_t>{(uint32_t)rows, (uint32_t)groupCount, (uint32_t)groupSize});
+        Qnn_Tensor_t groupedInput = tensorAt(mTempTensorWrappers.size() - 1);
+        this->createStageTensor("asym_group_sums", dataType,
+                                std::vector<uint32_t>{(uint32_t)rows, (uint32_t)groupCount});
+        Qnn_Tensor_t groupSums = tensorAt(mTempTensorWrappers.size() - 1);
+        this->createStaticFloatTensor("asym_correction_weight", dataType,
+                                      {(uint32_t)groupCount, (uint32_t)oc}, correctionWeight.data());
+        Qnn_Tensor_t correctionWeights = tensorAt(mTempTensorWrappers.size() - 1);
+        this->createStageTensor("asym_correction", dataType, output2DShape);
+        Qnn_Tensor_t correction = tensorAt(mTempTensorWrappers.size() - 1);
+        this->createStageTensor("asym_corrected_output", dataType, output2DShape);
+        Qnn_Tensor_t correctedOutput = tensorAt(mTempTensorWrappers.size() - 1);
+
+        const uint32_t reduceAxis = 2;
+        const size_t reduceAxesIndex = mParamTensorWrappers.size();
+        this->createParamTensor("axes", QNN_DATATYPE_UINT_32, {1}, (void*)&reduceAxis, "AsymG64");
+        const size_t keepDimsIndex = mParamScalarWrappers.size();
+        this->createParamScalar("keep_dims", false);
+
+        addNode(mNodeName + "_asym_group_reshape", "Reshape",
+                {input4D}, {groupedInput});
+        addNode(mNodeName + "_asym_group_reduce", "ReduceSum", {groupedInput}, {groupSums},
+                {*(mParamTensorWrappers[reduceAxesIndex]->getNativeParam()),
+                 *(mParamScalarWrappers[keepDimsIndex]->getNativeParam())});
+        addNode(mNodeName + "_asym_correction_matmul", "MatMul",
+                {groupSums, correctionWeights, biasTensor}, {correction});
+        addNode(mNodeName + "_asym_apply_correction", "ElementWiseAdd",
+                {final2D, correction}, {correctedOutput});
+        final2D = correctedOutput;
+    }
+
+    if (common->relu() || common->relu6()) {
+        this->createStageTensor("asym_pre_activation", dataType, getNHWCShape(output));
+        Qnn_Tensor_t preActivation = tensorAt(mTempTensorWrappers.size() - 1);
+        addNode(mNodeName + "_asym_reshape_output", "Reshape", {final2D}, {preActivation});
+        addNode(mNodeName + "_asym_activation", common->relu6() ? "Relu6" : "Relu",
+                {preActivation}, {*(mBackend->getNativeTensor(output))});
+    } else {
+        addNode(mNodeName + "_asym_reshape_output", "Reshape",
+                {final2D}, {*(mBackend->getNativeTensor(output))});
+    }
+
     return NO_ERROR;
 }
 

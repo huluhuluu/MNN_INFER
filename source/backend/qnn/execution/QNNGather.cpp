@@ -131,8 +131,8 @@ public:
             return nullptr;
         }
 
-        if (inputs.size() < 2) {
-            MNN_ERROR("QNN Gather inputs size:%d error fallback\n", inputs.size());
+        if (inputs.size() < 3) {
+            MNN_ERROR("QNN Gather inputs size:%zu error fallback\n", inputs.size());
             return nullptr;
         }
 

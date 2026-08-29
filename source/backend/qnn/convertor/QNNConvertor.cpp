@@ -1,6 +1,11 @@
 #include "QNNConvertor.hpp"
 #include "core/MNNFileUtils.h"
+#include <algorithm>
 #include <cctype>
+#include <cmath>
+#include <iomanip>
+#include <limits>
+#include <sstream>
 
 #define APPEND_VECTOR(vec1, vec2) (vec1.insert(vec1.end(), std::make_move_iterator(vec2.begin()), std::make_move_iterator(vec2.end())))
 #define TENSOR_NAME_SYMBOL(cName) ("tensor_" + std::string(cName))
@@ -9,6 +14,16 @@
 namespace MNN {
 namespace QNN {
 #ifdef ENABLE_QNN_ONLINE_FINALIZE
+
+static std::string serializeFloat(float value) {
+    std::ostringstream stream;
+    stream << std::setprecision(std::numeric_limits<float>::max_digits10) << value;
+    std::string result = stream.str();
+    if (result.find_first_of(".eE") == std::string::npos) {
+        result += ".0";
+    }
+    return result + "f";
+}
 
 std::string QNNConvertor::OutputDir = "";
 std::string QNNTranslator::GraphNameSymbol = "";
@@ -508,6 +523,64 @@ std::vector<std::string> QNNTranslator::TranslateQuantizeScaleOffsetDataArray(co
             result.push_back("  };");
         }
     }
+
+    if (quantizeParams.encodingDefinition == QNN_DEFINITION_DEFINED &&
+        quantizeParams.quantizationEncoding == QNN_QUANTIZATION_ENCODING_BLOCK) {
+        const auto& blockEncoding = quantizeParams.blockEncoding;
+        if (rank == 0 || dimensions == nullptr || blockEncoding.blockSize == nullptr ||
+            blockEncoding.scaleOffset == nullptr) {
+            MNN_ERROR("MNN_QNN: Invalid block quantization metadata for %s.\n", tensorNameSymbol.c_str());
+            return result;
+        }
+
+        uint64_t numBlocks = 1;
+        for (uint32_t i = 0; i < rank; ++i) {
+            const uint32_t blockSize = blockEncoding.blockSize[i];
+            if (blockSize == 0) {
+                MNN_ERROR("MNN_QNN: Zero block size for %s at axis %u.\n", tensorNameSymbol.c_str(), i);
+                return result;
+            }
+            const uint64_t blocksOnAxis =
+                (static_cast<uint64_t>(dimensions[i]) + blockSize - 1) / blockSize;
+            if (blocksOnAxis != 0 && numBlocks > std::numeric_limits<uint64_t>::max() / blocksOnAxis) {
+                MNN_ERROR("MNN_QNN: Block count overflow for %s.\n", tensorNameSymbol.c_str());
+                return result;
+            }
+            numBlocks *= blocksOnAxis;
+        }
+
+        result.push_back("  static uint32_t " + tensorNameSymbol + "_block_size[] = {");
+        std::string blockSizeLine = "    ";
+        for (uint32_t i = 0; i < rank; ++i) {
+            if (i > 0) {
+                blockSizeLine += ", ";
+            }
+            blockSizeLine += std::to_string(blockEncoding.blockSize[i]);
+        }
+        result.push_back(blockSizeLine);
+        result.push_back("  };");
+
+        result.push_back("  static Qnn_ScaleOffset_t " + tensorNameSymbol + "_block_scale_offset[] = {");
+        for (uint64_t i = 0; i < numBlocks; i += 4) {
+            std::string line = "    ";
+            const uint64_t lineEnd = std::min<uint64_t>(i + 4, numBlocks);
+            for (uint64_t index = i; index < lineEnd; ++index) {
+                const Qnn_ScaleOffset_t& scaleOffset = blockEncoding.scaleOffset[index];
+                if (!(scaleOffset.scale > 0.0f) || !std::isfinite(scaleOffset.scale)) {
+                    MNN_ERROR("MNN_QNN: Invalid block scale for %s at block %llu.\n",
+                              tensorNameSymbol.c_str(), static_cast<unsigned long long>(index));
+                    return std::vector<std::string>();
+                }
+                line += "{.scale= " + serializeFloat(scaleOffset.scale) +
+                        ", .offset= " + std::to_string(scaleOffset.offset) + "}, ";
+            }
+            result.push_back(line);
+        }
+        result.push_back("  };");
+        result.push_back("  static Qnn_BlockEncoding_t " + tensorNameSymbol + "_block_encoding = QNN_BLOCK_ENCODING_INIT;");
+        result.push_back("  " + tensorNameSymbol + "_block_encoding.blockSize = " + tensorNameSymbol + "_block_size;");
+        result.push_back("  " + tensorNameSymbol + "_block_encoding.scaleOffset = " + tensorNameSymbol + "_block_scale_offset;");
+    }
     
     if(quantizeParams.encodingDefinition == QNN_DEFINITION_DEFINED && quantizeParams.quantizationEncoding == QNN_QUANTIZATION_ENCODING_BLOCKWISE_EXPANSION){
         int axis = quantizeParams.blockwiseExpansion->axis;
@@ -610,6 +683,14 @@ std::vector<std::string> QNNTranslator::TranslateTensorQuantizeParams(const std:
         result.push_back("  " + tensorNameSymbol + ".v1.quantizeParams.bwAxisScaleOffsetEncoding.scales = " + tensorNameSymbol + "_bwaxis_scale;");
         if(quantizeParams.bwAxisScaleOffsetEncoding.offsets != nullptr)
             result.push_back("  " + tensorNameSymbol + ".v1.quantizeParams.bwAxisScaleOffsetEncoding.offset = " + tensorNameSymbol + "_bwaxis_offset;");
+        return result;
+    }
+
+    if (quantizeParams.encodingDefinition == QNN_DEFINITION_DEFINED &&
+        quantizeParams.quantizationEncoding == QNN_QUANTIZATION_ENCODING_BLOCK) {
+        result.push_back("  " + tensorNameSymbol + ".v1.quantizeParams.encodingDefinition = QNN_DEFINITION_DEFINED;");
+        result.push_back("  " + tensorNameSymbol + ".v1.quantizeParams.quantizationEncoding = QNN_QUANTIZATION_ENCODING_BLOCK;");
+        result.push_back("  " + tensorNameSymbol + ".v1.quantizeParams.blockEncoding = " + tensorNameSymbol + "_block_encoding;");
         return result;
     }
     

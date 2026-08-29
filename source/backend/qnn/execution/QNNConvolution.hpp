@@ -21,9 +21,16 @@ public:
     QNNConvolution(Backend *backend, const Op *op) : QNNCommonExecution(backend, op) {}
     virtual ErrorCode onEncode(const std::vector<Tensor *> &inputs, const std::vector<Tensor *> &outputs) override;
     ErrorCode onEncodeFpAIntBMatMul(Tensor * input, Tensor * output, int n, int h, int w, int ic, int oc);
+    ErrorCode onEncodeFpAAsymmetricW4G64MatMul(Tensor * input, Tensor * output, int n, int h, int w, int ic, int oc);
     ErrorCode onEncodeQuantDequantConv(Tensor *input, Tensor *output, const int n, const int ic, const int oc);
 
 private:
+    enum class WeightQuantMode {
+        NONE,
+        SYMMETRIC,
+        ASYMMETRIC_W4_G64,
+    };
+
     template <typename T>
     void convertWeight(const T * src, T * dst, int oc, int ic, int kernelH, int kernelW) {
         for (int o = 0; o < oc; o++) {
@@ -44,10 +51,14 @@ private:
     std::vector<float> mScale;
     std::vector<Qnn_ScaleOffset_t> mScaleOffsetData;
     std::vector<Qnn_ScaleOffset_t> mBiasScaleOffsetData;
+    std::vector<uint32_t> mAsymBlockSizes;
+    std::vector<Qnn_ScaleOffset_t> mAsymBlockScaleOffsets;
     std::vector<uint8_t> mBlockScale;
     Qnn_BlockwiseExpansion_t weightBlockwiseExpansionEncoding = QNN_BLOCKWISE_EXPANSION_INIT;
     float *mDequantAlpha = nullptr;
     int mBlockSize = 1;
+    int mAsymmetricGroupCount = 0;
+    WeightQuantMode mWeightQuantMode = WeightQuantMode::NONE;
     bool mWeightQuant = false;
     bool mIsMatMul = false;
     bool mIs1x1Conv = false;
