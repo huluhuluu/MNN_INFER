@@ -407,6 +407,13 @@ public:
         return static_cast<size_t>(config_.value("dual_pipeline_kv_cache_bytes", int64_t(0)));
     }
 
+    int logits_tokens() const {
+        return config_.value("logits_tokens", 1);
+    }
+
+    bool logits_index_gather() const {
+        return config_.value("logits_index_gather", false);
+    }
     // generate config end >
 
     // < backend config start

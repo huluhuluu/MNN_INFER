@@ -1,4 +1,5 @@
 #include <fstream>
+#include <algorithm>
 #include <string>
 #include <vector>
 #include <memory>
@@ -38,7 +39,11 @@ static void saveInputOutputs(const MNN::Express::Module::Info* info, std::vector
     MNN_PRINT("Successfully generate %s and %s.\n", inputPath.c_str(), outputPath.c_str());
 }
 
-static void createInputsForLLM(int seqLen, int hiddenSize, const std::string& attentionMaskType, bool lastLogit, std::vector<MNN::Express::VARP>& inputs) {
+// logitsTokens is the number of trailing sequence positions for which logits
+// are required.  Zero keeps the historical all-logits behavior.  The model
+// interprets logits_index as the start position of the slice, so the value is
+// baked into each shape-specific QNN graph during offline conversion.
+static void createInputsForLLM(int seqLen, int hiddenSize, const std::string& attentionMaskType, int logitsTokens, std::vector<MNN::Express::VARP>& inputs) {
     if (attentionMaskType != "float") {
         MNN_ERROR("Don't support Attention Mask Type other than 'float', currently.\n");
         return;
@@ -67,7 +72,14 @@ static void createInputsForLLM(int seqLen, int hiddenSize, const std::string& at
     }
     inputs.push_back(positionIds);
 
-    int logitsIndexValue = lastLogit ? -1 : 0;
+    if (logitsTokens < 0) {
+        MNN_ERROR("logits_tokens must be >= 0.\n");
+        return;
+    }
+    int logitsIndexValue = 0;
+    if (logitsTokens > 0) {
+        logitsIndexValue = std::max(0, seqLen - logitsTokens);
+    }
     MNN::Express::VARP logitsIndex = MNN::Express::_Const((const void *) &logitsIndexValue, {1}, MNN::Express::NHWC, halide_type_of<int>());
     inputs.push_back(logitsIndex);
 

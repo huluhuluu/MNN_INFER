@@ -256,6 +256,8 @@ private:
     int mDraftLength = 4;
     std::shared_ptr<GenerationParams> mGenerateParam;
     bool mAsync = true;
+    bool mLogitsIndexRange = false;
+    bool mLogitsIndexGather = false;
     int mBlockSize = 0;
     std::vector<int> mValidBlockSize;
     bool mPrefixCacheMode = false;

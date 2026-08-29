@@ -710,6 +710,19 @@ bool Llm::load() {
         }
         return false;
     }
+    auto moduleInfo = mModule->getInfo();
+    for (int i = 0; i < moduleInfo->inputNames.size(); ++i) {
+        if (moduleInfo->inputNames[i] == "logits_index") {
+            const auto& dim = moduleInfo->inputs[i].dim;
+            mLogitsIndexRange = dim.size() == 1 && dim[0] == 2;
+            break;
+        }
+    }
+    mLogitsIndexGather = mConfig->logits_index_gather();
+    if (mLogitsIndexGather && (mLogitsIndexRange || mConfig->all_logits() || mConfig->logits_tokens() != 1)) {
+        MNN_ERROR("logits_index_gather requires a scalar index ABI, logits_tokens=1, and all_logits=false.\n");
+        return false;
+    }
     // set speculative decoding params
     setSpeculativeConfig();
     // create generation strategy
@@ -731,8 +744,16 @@ bool Llm::load() {
     mModulePool[std::make_pair(mPrefillKey, mConfig->all_logits())] = mModule;
 
     // module input varp setting
-    logitsLastIdx = _var<int>({-1}, {1});
-    logitsAllIdx = _var<int>({0}, {1});
+    if (mLogitsIndexRange) {
+        logitsLastIdx = _var<int>({-std::max(1, mConfig->logits_tokens()), std::numeric_limits<int>::max()}, {2});
+        logitsAllIdx = _var<int>({0, std::numeric_limits<int>::max()}, {2});
+    } else if (mLogitsIndexGather) {
+        logitsLastIdx = _var<int>({0}, {1});
+        logitsAllIdx = _var<int>({0}, {1});
+    } else {
+        logitsLastIdx = _var<int>({-std::max(1, mConfig->logits_tokens())}, {1});
+        logitsAllIdx = _var<int>({0}, {1});
+    }
     // index match with seq_len
     mAttentionMaskVarVec.resize(decode_type_num);
     mPositionIdsVarVec.resize(decode_type_num);
@@ -899,9 +920,20 @@ std::vector<Express::VARP> Llm::forwardRaw(Express::VARP hiddenState, Express::V
             }
         }
     }
-    if (kvAdd != seqLen) {
-        // Has Pad, need all logits
-        logitsIndex = logitsAllIdx;
+    if (mLogitsIndexGather && !isAllLogists) {
+        const int validEnd = std::min(std::max(1, (int)mMeta->add), seqLen);
+        logitsIndex = _var<int>({validEnd - 1}, {1});
+    } else if (kvAdd != seqLen) {
+        // Has Pad, need all logits unless the range ABI can preserve the
+        // valid trailing positions explicitly.
+        if (mLogitsIndexRange && !isAllLogists) {
+            const int validEnd = std::min((int)kvAdd, seqLen);
+            const int validCount = std::min(std::max(1, mConfig->logits_tokens()), validEnd);
+            logitsIndex = _var<int>({validEnd - validCount, validEnd}, {2});
+        } else {
+            // Legacy start-only indices need all logits for a padded remainder.
+            logitsIndex = logitsAllIdx;
+        }
     }
 
     mGenerateParam->input_embeds = nullptr;
@@ -921,6 +953,15 @@ std::vector<Express::VARP> Llm::forwardRaw(Express::VARP hiddenState, Express::V
     }
     mGenerateParam->input_embeds = hiddenState;
     mGenerateParam->outputs = outputs;
+    const auto logitsInfo = outputs[0]->getInfo();
+    if (!isAllLogists && logitsInfo != nullptr && !logitsInfo->dim.empty() && logitsInfo->dim.back() > 0) {
+        const int vocabSize = logitsInfo->dim.back();
+        const int logitsRows = logitsInfo->size / vocabSize;
+        if (logitsRows > 1) {
+            mGenerateParam->validLogitStart = (logitsRows - 1) * vocabSize;
+            mGenerateParam->validLogitSize = vocabSize;
+        }
+    }
 
 #if DEBUG_MODE == 3
     VARP logits = outputs[0];
@@ -1082,7 +1123,7 @@ std::vector<VARP> Llm::forwardVec(MNN::Express::VARP input_embeds) {
         }
     }
     updateContext(-blockSize * blockNumber, 0);
-    if (hasPad) {
+    if (hasPad && ((!mLogitsIndexRange && !mLogitsIndexGather) || mConfig->all_logits())) {
         auto logitSize = logits[0]->getInfo()->dim[2];
         // encode
         mGenerateParam->validLogitStart = ((int)addSize - 1) * logitSize;
