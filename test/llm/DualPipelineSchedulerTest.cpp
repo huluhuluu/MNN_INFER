@@ -106,6 +106,12 @@ DualPipelineScheduler::GraphRequest makeLoadRequest(const std::string& graphId) 
     return request;
 }
 
+DualPipelineScheduler::GraphRequest makeSizedLoadRequest(const std::string& graphId, uint64_t bytes) {
+    DualPipelineScheduler::GraphRequest request = makeLoadRequest(graphId);
+    request.residentBytes = bytes;
+    return request;
+}
+
 DualPipelineScheduler::PipelineGraphWave makeWave(int pipelineId,
                                                   int ownerRequestId,
                                                   const std::vector<std::string>& graphIds) {
@@ -442,6 +448,85 @@ public:
     }
 };
 
+class DualPipelineSchedulerMemoryBudgetLruTest : public MNNTestCase {
+public:
+    virtual bool run(int precision) {
+        GraphRecorder recorder;
+        DualPipelineScheduler scheduler;
+        DualPipelineScheduler::Config config;
+        config.maxResidentGraphs = 8;
+        config.graphPrefetchLookahead = 0;
+        config.memoryBudgetBytes = 100;
+        config.kvCacheBytes = 20;
+        config.workspaceBytes = 10;
+        config.callbacks = recorder.callbacks();
+        MNNTEST_ASSERT(scheduler.configure(config));
+        MNNTEST_ASSERT(scheduler.start());
+
+        DualPipelineScheduler::PipelineGraphWave first = makeWave(0, 61, {"budget_a"});
+        first.graphs[0] = makeSizedLoadRequest("budget_a", 60);
+        MNNTEST_ASSERT(scheduler.beginGraphPrefetchWave({first}));
+        MNNTEST_ASSERT(scheduler.beginStageWave({0}));
+        MNNTEST_ASSERT(scheduler.enterGraphStage(0, 0));
+        MNNTEST_ASSERT(scheduler.leaveGraphStage(0, 0));
+        MNNTEST_ASSERT(scheduler.finishStageWave());
+        MNNTEST_ASSERT(scheduler.finishGraphPrefetchWave());
+
+        DualPipelineScheduler::PipelineGraphWave second = makeWave(0, 62, {"budget_b"});
+        second.graphs[0] = makeSizedLoadRequest("budget_b", 70);
+        MNNTEST_ASSERT(scheduler.beginGraphPrefetchWave({second}));
+        MNNTEST_ASSERT(scheduler.beginStageWave({0}));
+        MNNTEST_ASSERT(scheduler.enterGraphStage(0, 0));
+        MNNTEST_ASSERT(scheduler.leaveGraphStage(0, 0));
+        MNNTEST_ASSERT(scheduler.finishStageWave());
+        MNNTEST_ASSERT(scheduler.finishGraphPrefetchWave());
+
+        const DualPipelineScheduler::MemorySnapshot snapshot = scheduler.memorySnapshot();
+        MNNTEST_ASSERT(snapshot.budgetBytes == 100);
+        MNNTEST_ASSERT(snapshot.kvCacheBytes == 20);
+        MNNTEST_ASSERT(snapshot.workspaceBytes == 10);
+        MNNTEST_ASSERT(snapshot.residentGraphBytes == 70);
+        MNNTEST_ASSERT(snapshot.accountedBytes == 100);
+        scheduler.stop();
+        const std::vector<GraphEvent> events = recorder.snapshot();
+        MNNTEST_ASSERT(events.size() == 4);
+        MNNTEST_ASSERT(events[0].type == "load" && events[0].graphId == "budget_a");
+        MNNTEST_ASSERT(events[1].type == "release" && events[1].graphId == "budget_a");
+        MNNTEST_ASSERT(events[2].type == "load" && events[2].graphId == "budget_b");
+        MNNTEST_ASSERT(events[3].type == "release" && events[3].graphId == "budget_b");
+        return true;
+    }
+};
+
+class DualPipelineSchedulerMemoryBudgetProtectionTest : public MNNTestCase {
+public:
+    virtual bool run(int precision) {
+        GraphRecorder recorder;
+        DualPipelineScheduler scheduler;
+        DualPipelineScheduler::Config config;
+        config.maxResidentGraphs = 8;
+        config.graphPrefetchLookahead = 0;
+        config.memoryBudgetBytes = 100;
+        config.pinnedMemoryBytes = 80;
+        config.callbacks = recorder.callbacks();
+        MNNTEST_ASSERT(scheduler.configure(config));
+        MNNTEST_ASSERT(scheduler.start());
+        DualPipelineScheduler::PipelineGraphWave wave = makeWave(0, 71, {"over_budget"});
+        wave.graphs[0] = makeSizedLoadRequest("over_budget", 30);
+        MNNTEST_ASSERT(scheduler.beginGraphPrefetchWave({wave}));
+        MNNTEST_ASSERT(scheduler.beginStageWave({0}));
+        MNNTEST_ASSERT(!scheduler.enterGraphStage(0, 0));
+        scheduler.cancelStageWave();
+        scheduler.cancelGraphPrefetchWave();
+        MNNTEST_ASSERT(!scheduler.finishStageWave());
+        MNNTEST_ASSERT(!scheduler.finishGraphPrefetchWave());
+        MNNTEST_ASSERT(scheduler.memorySnapshot().residentGraphBytes == 0);
+        scheduler.stop();
+        MNNTEST_ASSERT(recorder.snapshot().empty());
+        return true;
+    }
+};
+
 MNNTestSuiteRegister(DualPipelineSchedulerExecutionOrderGapTest, "llm/dual_pipeline_scheduler_execution_order_gap");
 MNNTestSuiteRegister(DualPipelineSchedulerDynamicLoadPriorityTest, "llm/dual_pipeline_scheduler_dynamic_load_priority");
 MNNTestSuiteRegister(DualPipelineSchedulerSharedGraphTest, "llm/dual_pipeline_scheduler_shared_graph");
@@ -452,3 +537,5 @@ MNNTestSuiteRegister(DualPipelineSchedulerDraftGraphLruTest, "llm/dual_pipeline_
 MNNTestSuiteRegister(DualPipelineSchedulerActiveGraphProtectionTest, "llm/dual_pipeline_scheduler_active_graph_protection");
 MNNTestSuiteRegister(DualPipelineSchedulerExecutionBeforeLookaheadTest, "llm/dual_pipeline_scheduler_execution_before_lookahead");
 MNNTestSuiteRegister(DualPipelineSchedulerCancelledActiveGraphTest, "llm/dual_pipeline_scheduler_cancelled_active_graph");
+MNNTestSuiteRegister(DualPipelineSchedulerMemoryBudgetLruTest, "llm/dual_pipeline_scheduler_memory_budget_lru");
+MNNTestSuiteRegister(DualPipelineSchedulerMemoryBudgetProtectionTest, "llm/dual_pipeline_scheduler_memory_budget_protection");

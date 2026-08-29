@@ -16,6 +16,8 @@
 #include <rapidjson/writer.h>
 #include <rapidjson/stringbuffer.h>
 #include <MNN/MNNDefine.h>
+#include <stdint.h>
+#include <limits>
 
 
 namespace MNN {
@@ -141,6 +143,16 @@ public:
         if (document.HasMember(key)) {
             const auto& value = document[key];
             if (value.IsInt()) return value.GetInt();
+        }
+        return default_value;
+    }
+    int64_t value(const char* key, const int64_t& default_value) const {
+        if (document.HasMember(key)) {
+            const auto& value = document[key];
+            if (value.IsInt64()) return value.GetInt64();
+            if (value.IsUint64() && value.GetUint64() <= static_cast<uint64_t>(std::numeric_limits<int64_t>::max())) {
+                return static_cast<int64_t>(value.GetUint64());
+            }
         }
         return default_value;
     }
@@ -377,6 +389,22 @@ public:
 
     int dual_pipeline_prefetch_window() const {
         return config_.value("dual_pipeline_prefetch_window", 2);
+    }
+
+    size_t dual_pipeline_memory_budget_bytes() const {
+        return static_cast<size_t>(config_.value("dual_pipeline_memory_budget_bytes", int64_t(0)));
+    }
+
+    size_t dual_pipeline_pinned_memory_bytes() const {
+        return static_cast<size_t>(config_.value("dual_pipeline_pinned_memory_bytes", int64_t(0)));
+    }
+
+    size_t dual_pipeline_workspace_bytes() const {
+        return static_cast<size_t>(config_.value("dual_pipeline_workspace_bytes", int64_t(0)));
+    }
+
+    size_t dual_pipeline_kv_cache_bytes() const {
+        return static_cast<size_t>(config_.value("dual_pipeline_kv_cache_bytes", int64_t(0)));
     }
 
     // generate config end >

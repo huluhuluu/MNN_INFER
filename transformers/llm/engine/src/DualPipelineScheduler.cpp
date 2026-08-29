@@ -35,6 +35,7 @@ DualPipelineScheduler::GraphRequest::GraphRequest()
       bucketSize(-1),
       offset(0),
       size(0),
+      residentBytes(0),
       draftGraph(false),
       pinResident(false),
       forceRelease(false),
@@ -45,7 +46,8 @@ DualPipelineScheduler::GraphRecord::GraphRecord()
     : resident(false),
       pinned(false),
       activeUseCount(0),
-      lastUseSequence(0) {
+      lastUseSequence(0),
+      residentBytes(0) {
 }
 
 DualPipelineScheduler::PipelineGraphWave::PipelineGraphWave()
@@ -66,9 +68,23 @@ DualPipelineScheduler::GraphWindowSnapshot::GraphWindowSnapshot()
       pendingLoadTasks(0) {
 }
 
+DualPipelineScheduler::MemorySnapshot::MemorySnapshot()
+    : budgetBytes(0),
+      pinnedBytes(0),
+      kvCacheBytes(0),
+      workspaceBytes(0),
+      residentGraphBytes(0),
+      residentGraphCount(0),
+      accountedBytes(0) {
+}
+
 DualPipelineScheduler::Config::Config()
     : maxResidentGraphs(5),
-      graphPrefetchLookahead(2) {
+      graphPrefetchLookahead(2),
+      memoryBudgetBytes(0),
+      pinnedMemoryBytes(0),
+      kvCacheBytes(0),
+      workspaceBytes(0) {
 }
 
 DualPipelineScheduler::Task::Task()
@@ -101,6 +117,8 @@ DualPipelineScheduler::DualPipelineScheduler()
       mGraphPrefetchWaveActive(false),
       mGraphPrefetchCancelled(false),
       mQnnExecutionActive(false),
+      mKvCacheBytes(0),
+      mWorkspaceBytes(0),
       mActiveHostStages(0),
       mActiveQnnStages(0),
       mMaxConcurrentHostStages(0),
@@ -123,6 +141,8 @@ bool DualPipelineScheduler::configure(const Config& config) {
     if (mConfig.maxResidentGraphs <= 0) {
         mConfig.maxResidentGraphs = 5;
     }
+    mKvCacheBytes = mConfig.kvCacheBytes;
+    mWorkspaceBytes = mConfig.workspaceBytes;
     return true;
 }
 
@@ -402,6 +422,30 @@ DualPipelineScheduler::GraphWindowSnapshot DualPipelineScheduler::graphWindowSna
         result.pipelines.push_back(progress);
     }
     return result;
+}
+
+DualPipelineScheduler::MemorySnapshot DualPipelineScheduler::memorySnapshot() const {
+    std::lock_guard<std::mutex> lock(mMutex);
+    MemorySnapshot result;
+    result.budgetBytes = mConfig.memoryBudgetBytes;
+    result.pinnedBytes = mConfig.pinnedMemoryBytes;
+    result.kvCacheBytes = mKvCacheBytes;
+    result.workspaceBytes = mWorkspaceBytes;
+    result.residentGraphBytes = _residentGraphBytesLocked();
+    result.residentGraphCount = _residentGraphCountLocked();
+    result.accountedBytes = _accountedBytesLocked();
+    return result;
+}
+
+bool DualPipelineScheduler::setMemoryUsage(size_t kvCacheBytes, size_t workspaceBytes) {
+    std::lock_guard<std::mutex> lock(mMutex);
+    if (mConfig.memoryBudgetBytes > 0 &&
+        mConfig.pinnedMemoryBytes > mConfig.memoryBudgetBytes) {
+        return false;
+    }
+    mKvCacheBytes = kvCacheBytes;
+    mWorkspaceBytes = workspaceBytes;
+    return mConfig.memoryBudgetBytes == 0 || _accountedBytesLocked() <= mConfig.memoryBudgetBytes;
 }
 
 bool DualPipelineScheduler::releaseResidentGraph(const std::string& graphId) {
@@ -744,11 +788,15 @@ void DualPipelineScheduler::_processGraphRequest(const GraphRequest& request) {
         callbacks = mConfig.callbacks;
         GraphState& state = mGraphs[request.graphId];
         bool wasResident = state.record.resident;
+        const uint64_t requestBytes = request.residentBytes != 0 ? request.residentBytes : request.size;
         if (!wasResident) {
-            hasCapacity = _planEvictionsLocked(request.graphId, &evictReleaseRequests);
+            hasCapacity = _planEvictionsLocked(request.graphId, requestBytes, &evictReleaseRequests);
         }
         state.lastRequest = request;
         state.record.graphId = request.graphId;
+        if (!wasResident || state.record.residentBytes == 0) {
+            state.record.residentBytes = requestBytes;
+        }
         state.record.pinned = state.record.pinned || request.draftGraph || request.pinResident;
         if (request.pipelineId >= 0 && request.graphIndex >= 0) {
             std::map<int, PipelineGraphState>::iterator pipeline = mPipelineGraphs.find(request.pipelineId);
@@ -814,9 +862,17 @@ void DualPipelineScheduler::_processGraphComplete(const std::string& graphId) {
 }
 
 bool DualPipelineScheduler::_planEvictionsLocked(const std::string& incomingGraphId,
+                                                 uint64_t incomingGraphBytes,
                                                  std::vector<GraphRequest>* releaseRequests) {
     size_t residentCount = _residentGraphCountLocked();
-    while (residentCount >= mConfig.maxResidentGraphs) {
+    size_t residentBytes = _residentGraphBytesLocked();
+    const auto overCount = [&]() { return residentCount >= mConfig.maxResidentGraphs; };
+    const auto overBudget = [&]() {
+        return mConfig.memoryBudgetBytes > 0 &&
+               mConfig.pinnedMemoryBytes + mKvCacheBytes + mWorkspaceBytes + residentBytes + incomingGraphBytes >
+                   mConfig.memoryBudgetBytes;
+    };
+    while (overCount() || overBudget()) {
         std::map<std::string, GraphState>::iterator candidate = mGraphs.end();
         uint64_t oldest = std::numeric_limits<uint64_t>::max();
         for (std::map<std::string, GraphState>::iterator iter = mGraphs.begin(); iter != mGraphs.end(); ++iter) {
@@ -835,17 +891,22 @@ bool DualPipelineScheduler::_planEvictionsLocked(const std::string& incomingGrap
 
         GraphRequest releaseRequest = candidate->second.lastRequest;
         releaseRequest.action = GRAPH_RELEASE;
-        releaseRequest.reason = "maxResidentGraphs";
+        releaseRequest.reason = overCount() ? "maxResidentGraphs" : "memoryBudget";
         releaseRequest.forceRelease = true;
         releaseRequest.unpinAfterRelease = true;
 
         candidate->second.record.resident = false;
         candidate->second.loadFinished = false;
         candidate->second.record.activeUseCount = 0;
+        if (candidate->second.record.residentBytes <= residentBytes) {
+            residentBytes -= candidate->second.record.residentBytes;
+        } else {
+            residentBytes = 0;
+        }
         releaseRequests->push_back(releaseRequest);
         --residentCount;
     }
-    return residentCount < mConfig.maxResidentGraphs;
+    return !overCount() && !overBudget();
 }
 
 size_t DualPipelineScheduler::_residentGraphCountLocked() const {
@@ -856,6 +917,20 @@ size_t DualPipelineScheduler::_residentGraphCountLocked() const {
         }
     }
     return count;
+}
+
+size_t DualPipelineScheduler::_residentGraphBytesLocked() const {
+    size_t bytes = 0;
+    for (std::map<std::string, GraphState>::const_iterator iter = mGraphs.begin(); iter != mGraphs.end(); ++iter) {
+        if (iter->second.record.resident) {
+            bytes += iter->second.record.residentBytes;
+        }
+    }
+    return bytes;
+}
+
+size_t DualPipelineScheduler::_accountedBytesLocked() const {
+    return mConfig.pinnedMemoryBytes + mKvCacheBytes + mWorkspaceBytes + _residentGraphBytesLocked();
 }
 
 } // namespace Transformer

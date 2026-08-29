@@ -1,0 +1,1434 @@
+%%
+%% This is file `sample-sigplan.tex',
+%% generated with the docstrip utility.
+%%
+%% The original source files were:
+%%
+%% samples.dtx  (with options: `all,proceedings,bibtex,sigplan')
+%% 
+%% IMPORTANT NOTICE:
+%% 
+%% For the copyright see the source file.
+%% 
+%% Any modified versions of this file must be renamed
+%% with new filenames distinct from sample-sigplan.tex.
+%% 
+%% For distribution of the original source see the terms
+%% for copying and modification in the file samples.dtx.
+%% 
+%% This generated file may be distributed as long as the
+%% original source files, as listed above, are part of the
+%% same distribution. (The sources need not necessarily be
+%% in the same archive or directory.)
+%%
+%%
+%% Commands for TeXCount
+%TC:macro \cite [option:text,text]
+%TC:macro \citep [option:text,text]
+%TC:macro \citet [option:text,text]
+%TC:envir table 0 1
+%TC:envir table* 0 1
+%TC:envir tabular [ignore] word
+%TC:envir displaymath 0 word
+%TC:envir math 0 word
+%TC:envir comment 0 0
+%%
+%% The first command in your LaTeX source must be the \documentclass
+%% command.
+%%
+%% For submission and review of your manuscript please change the
+%% command to \documentclass[manuscript, screen, review]{acmart}.
+%%
+%% When submitting camera ready or to TAPS, please change the command
+%% to \documentclass[sigconf]{acmart} or whichever template is required
+%% for your publication.
+%%
+%%
+\documentclass[sigconf,nonacm,10pt]{acmart}
+\renewcommand\footnotetextcopyrightpermission[1]{}
+\pagestyle{plain}
+\settopmatter{printfolios=true}
+\usepackage[]{hyperref}
+
+\usepackage{multirow}
+\usepackage{array}
+\usepackage{tabularray}
+\usepackage{comment}
+\usepackage{subcaption}
+\usepackage{pifont}
+% \usepackage{algorithm}
+\usepackage{bm}
+\usepackage{bbm}
+% \usepackage{subfig}
+\usepackage{colortbl}
+\definecolor{mygray}{gray}{.9}
+\usepackage{makecell}
+\usepackage{tikz}
+\usepackage[normalem]{ulem} 
+\usepackage{hyperref}
+\usepackage{balance}
+\usepackage{pifont}
+\usepackage{amsmath}
+\usepackage{graphicx}
+\usepackage{booktabs}
+\usepackage{xspace}
+\newcommand{\name}{NPUzzle\xspace}
+\usepackage{enumitem}
+%\usepackage{ulem}
+
+% \usepackage{tikz}
+% \usetikzlibrary{patterns}
+% \usepackage{xcolor}
+
+% % 定义与子图一致的颜色
+% \definecolor{baro}{HTML}{163A5F}
+% \definecolor{torai}{HTML}{2D5B84}
+% \definecolor{ifcolor}{HTML}{4B7DB3}
+% \definecolor{kmeans}{HTML}{6F9FD8}
+% \definecolor{lstm}{HTML}{9EC3E6}
+% \definecolor{infersight}{HTML}{CD8D04}
+
+% Do not load algorithm or algorithm2e.
+\usepackage[noend]{algorithmic}
+\usepackage{xcolor}
+
+\renewcommand{\algorithmicrequire}{\textbf{Input:}}
+\renewcommand{\algorithmicensure}{\textbf{Output:}}
+
+\definecolor{algblue}{RGB}{0,150,210}
+
+\newcounter{breakalgorithm}
+\renewcommand{\thebreakalgorithm}{\arabic{breakalgorithm}}
+
+\newenvironment{breakalgorithm}[1]{%
+  \par\smallskip
+  \refstepcounter{breakalgorithm}%
+  \noindent\rule{\linewidth}{0.8pt}\par
+  \nointerlineskip
+  \noindent\makebox[\linewidth][l]{%
+    \strut{\normalsize\bfseries Algorithm~\thebreakalgorithm:} {\normalsize\normalfont #1}%
+  }\par
+  \nointerlineskip
+  \noindent\rule{\linewidth}{0.8pt}\par
+  \nointerlineskip
+  \begingroup\footnotesize
+}{%
+  \par\endgroup
+  \nointerlineskip
+  \noindent\rule{\linewidth}{0.8pt}\par
+  \smallskip
+}
+
+\newcommand{\AlgComment}[1]{%
+  \STATE {\color{algblue}$\triangleright$ \textit{#1}}%
+}
+%%
+%% \BibTeX command to typeset BibTeX logo in the docs
+\AtBeginDocument{%
+  \providecommand\BibTeX{{%
+    Bib\TeX}}}
+
+
+
+%%
+%% Submission ID.
+%% Use this when submitting an article to a sponsored event. You'll
+%% receive a unique submission ID from the organizers
+%% of the event, and this ID should be used as the parameter to this command.
+%%\acmSubmissionID{123-A56-BU3}
+
+%%
+%% For managing citations, it is recommended to use bibliography
+%% files in BibTeX format.
+%%
+%% You can then either use BibTeX with the ACM-Reference-Format style,
+%% or BibLaTeX with the acmnumeric or acmauthoryear sytles, that include
+%% support for advanced citation of software artefact from the
+%% biblatex-software package, also separately available on CTAN.
+%%
+%% Look at the sample-*-biblatex.tex files for templates showcasing
+%% the biblatex styles.
+%%
+
+%%
+%% The majority of ACM publications use numbered citations and
+%% references.  The command \citestyle{authoryear} switches to the
+%% "author year" style.
+%%
+%% If you are preparing content for an event
+%% sponsored by ACM SIGGRAPH, you must use the "author year" style of
+%% citations and references.
+%% Uncommenting
+%% the next command will enable that style.
+%%\citestyle{acmauthoryear}
+
+
+%%
+%% end of the preamble, start of the body of the document source.
+\begin{document}
+
+%%
+%% The "title" command has an optional parameter,
+%% allowing the author to define a "short title" to be used in page headers.
+\title{NPUzzle: SoC-Saturating Speculative Decoding for On-Device LLMs}
+%Stalled, Silent, and Costly: Uncovering Gray Faults in Distributed LLM Inference
+%Stalled, Silent, and Costly: Uncovering Gray Faults in Distributed LLM Inference
+%%
+%% The "author" command and its associated commands are used to define
+%% the authors and their affiliations.
+%% Of note is the shared affiliation of the first two authors, and the
+%% "authornote" and "authornotemark" commands
+%% used to denote shared contribution to the research.
+
+
+%%
+%% The abstract is a short summary of the work to be presented in the
+%% article.
+\begin{abstract}
+
+\end{abstract}
+
+\begin{CCSXML}
+<ccs2012>
+   <concept>
+       <concept_id>10003120.10003138</concept_id>
+       <concept_desc>Human-centered computing~Ubiquitous and mobile computing</concept_desc>
+       <concept_significance>500</concept_significance>
+       </concept>
+   <concept>
+       <concept_id>10010147.10010178.10010179</concept_id>
+       <concept_desc>Computing methodologies~Natural language processing</concept_desc>
+       <concept_significance>500</concept_significance>
+       </concept>
+   <concept>
+       <concept_id>10010520.10010521.10010542.10010546</concept_id>
+       <concept_desc>Computer systems organization~Heterogeneous (hybrid) systems</concept_desc>
+       <concept_significance>500</concept_significance>
+       </concept>
+ </ccs2012>
+\end{CCSXML}
+
+{\color{red}
+\ccsdesc[500]{Human-centered computing~Ubiquitous and mobile computing}
+\ccsdesc[500]{Computing methodologies~Natural language processing}
+\ccsdesc[500]{Computer systems organization~Heterogeneous (hybrid) systems}
+}
+%%
+%% The code below is generated by the tool at http://dl.acm.org/ccs.cfm.
+%% Please copy and paste the code instead of the example below.
+%%
+
+
+
+%%
+%% This command processes the author and affiliation and title
+%% information and builds the first part of the formatted document.
+\maketitle
+\pagestyle{plain}
+
+\section{Introduction}
+Large language models (LLMs) have become general-purpose computational substrates powering conversational assistants, content creation, code generation, and multimodal applications~\cite{brown2020language,grattafiori2024llama3,yang2025qwen3}. As these capabilities permeate personal workflows, the data they touch grows increasingly sensitive and the interactions they mediate demand low latency and constant availability---requirements that cloud serving, with its network round-trips and connectivity dependence, cannot fully meet. Executing LLMs on end-user devices resolves these tensions, keeping data within the user's trust boundary while enabling always-available services. This shift is already underway: compact models fit capable language and agent functionality within a commodity handset's resource envelope~\cite{abdin2024phi3,yi2024phonelm,chen2024octopusv2}, and flagship deployments have followed, from Apple Intelligence's on-device foundation model~\cite{gunter2024apple} to Huawei's smartphone ecosystem~\cite{yuan2024mobilefoundation}. As deployment matures, the workload is also changing shape. Unlike a chat assistant serving a single foreground stream, emerging agentic applications fan one instruction into \emph{concurrent} tool invocations, retrieval steps, and self-critique passes, with background agents contending for the same SoC~\cite{claudecode}.  Therefore, on-device inference systems must optimize for sustained \emph{throughput under service-level objectives (SLOs)}, namely time-to-first-token (TTFT) for incoming requests and time-per-output-token (TPOT) for those in generation.
+%Large language models (LLMs) have evolved into general-purpose computational substrates powering conversational assistants, content creation, code generation, and multimodal applications~\cite{brown2020language, grattafiori2024llama3,yang2025qwen3}. As these capabilities permeate personal workflows, the data they consume grows increasingly sensitive, while the interactions they mediate demand low latency and constant availability. Cloud serving ships private data across the network, incurs round-trip delay, and stalls without connectivity; executing LLMs on end-user devices resolves these tensions, keeping data within the user's trust boundary while enabling always-available services. This shift is no longer speculative. Compact models fit capable language and agent functionality within a commodity handset's memory and power envelope~\cite{abdin2024phi3,yi2024phonelm,chen2024octopusv2}, and flagship deployments have followed---Apple Intelligence anchors its user experience on an on-device foundation model, escalating to the cloud only when local capacity is exceeded~\cite{gunter2024apple}, while Huawei embeds foundation models into its smartphone ecosystem~\cite{yuan2024mobilefoundation}. As deployment matures, however, the workload is changing shape. Whereas a chat assistant serves a single foreground stream, emerging agentic applications fan one instruction into \emph{concurrent} tool invocations, retrieval steps, and self-critique passes, with background agents contending for the same SoC~\cite{claudecode}. The design objective thus shifts from minimal single-stream latency to sustained \emph{throughput under service-level objectives (SLOs)}, namely time-to-first-token (TTFT) for incoming requests and time-per-output-token (TPOT) for those in generation.
+
+
+Meeting SLOs on a handset, however, is constrained not only by raw resource capacity but by the SoC's execution model itself. Mobile SoCs couple CPUs, GPUs, and NPUs over unified memory, with NPUs delivering the highest low-precision tensor throughput---but only through graph compilers such as Qualcomm's QNN~\cite{qnnsdk} that mandate \emph{statically compiled, fixed-shape} graphs~\cite{chen2025heteroinfer,xu2025fastondevice,yin2025shadowattn}. Recent systems exploit this heterogeneity via operator placement, memory management, and cross-backend pipelining~\cite{xu2025fastondevice,chen2025heteroinfer}, substantially improving utilization and TPOT. These gains, however, only lower the cost of \emph{each model invocation}. Autoregressive decoding (AR) emits one token per forward pass, each re-streaming the model weights and the growing key--value (KV) cache and stalling arithmetic units on memory bandwidth~\cite{Efficient2023Woosuk}; the per-token invocation of the target model remains the irreducible cost of on-device generation.
+%On-device inference is constrained not only by raw resource capacity but by the SoC's execution model itself. Mobile SoCs couple CPUs, GPUs, and NPUs over a unified memory subsystem, yet these backends differ sharply---CPUs handle control flow and irregular operators, GPUs offer programmable parallelism, and NPUs deliver the highest low-precision tensor throughput, though only through graph compilers such as Qualcomm's QNN~\cite{qnnsdk} that mandate \emph{statically compiled, fixed-shape} graphs~\cite{chen2025heteroinfer,xu2025fastondevice,yin2025shadowattn}. Recent systems exploit this heterogeneity through operator placement, memory management, and cross-backend pipelining~\cite{xu2025fastondevice,chen2025heteroinfer}, substantially improving utilization and TPOT. These gains, however, accrue to the cost of \emph{each model invocation}; the number of invocations remains untouched. Autoregressive decoding emits one token per forward pass, and every pass re-streams the model weights and the growing key--value (KV) cache, stalling arithmetic units on memory bandwidth~\cite{Efficient2023Woosuk}. Heterogeneous acceleration can therefore shorten individual decoding steps, but it cannot break the token-level dependency chain, leaving the per-token invocation of the target model as the irreducible cost of on-device generation.
+
+Speculative decoding(SD) attacks this bottleneck at its source. A lightweight drafter proposes candidate continuations, and the target model verifies them jointly in a single forward pass while provably preserving its output distribution~\cite{leviathan2023fast,miao2024specinfer}. Successive designs, including Medusa's auxiliary prediction heads~\cite{cai2024medusa}, EAGLE's feature-level drafting~\cite{li2024eagle,li2024eagle2,li2025eagle3}, and DFlash's diffusion-based block drafting~\cite{chen2026dflash}, report substantial speedups on server GPUs, but their economics presuppose elastic compute. On a GPU, pruning half of a draft tree removes half the latency. On a fixed-shape NPU, a graph compiled for fixed-size verification slots runs in the same time whether its slots hold nodes or padding, so branch pruning and per-request depth adaptation~\cite{zhang2025svip} reduce node count without reducing latency. Nor does recompiling for other shapes offer an escape, since differently shaped graphs cannot share weights and each resident graph contends with the KV cache for scarce memory. EdgeLLM validates on-device speculation with adaptive token trees~\cite{xu2025edgellm}, yet its drafting and backend coordination consume the resources the target model needs. Acceptance length alone thus does not determine on-device speedup, which instead hinges on \emph{effective progress per verification round}, net of drafting, memory, and scheduling overhead. Efficient on-device speculation is a systems co-design problem rather than a better-drafter problem, and it poses three tightly coupled challenges.
+%Speculative decoding attacks this bottleneck at its source. A lightweight drafter proposes candidate continuations, and the target model verifies them jointly in a single forward pass, accepting a valid prefix while provably preserving the target distribution~\cite{leviathan2023fast,miao2024specinfer}. Successive designs---Medusa's auxiliary prediction heads~\cite{cai2024medusa}, EAGLE's feature-level drafter with dynamic-tree and multi-layer refinements~\cite{li2024eagle,li2024eagle2,li2025eagle3}, and DFlash's diffusion-based block drafting~\cite{chen2026dflash}---report substantial speedups on server GPUs. Their economics, however, presuppose elastic compute. On a GPU, a draft tree costs what it computes, so pruning half the nodes removes roughly half the latency. On a fixed-shape NPU, a graph compiled for $K$ verification slots runs in the same time whether its slots hold nodes or padding, and the levers behind server-side speculation---branch pruning and per-request depth adaptation~\cite{zhang2025svip}---reduce node count without reducing latency. Recompiling for other shapes offers no escape, since differently shaped graphs cannot share weights, and each shape bucket adds a resident graph contending with the KV cache for scarce memory. EdgeLLM validates on-device speculation with adaptive token trees~\cite{xu2025edgellm}, yet its drafting, tree construction, and backend coordination consume the very resources the target model needs. Acceptance length alone thus does not determine on-device speedup, which instead hinges on \emph{effective progress per verification round}, net of drafting, memory, and scheduling overhead. Efficient on-device speculation is a systems co-design problem rather than a better-drafter problem, posing three tightly coupled challenges.
+
+
+\emph{First, speculative state erodes an already tight memory ceiling.} An autoregressive drafter maintains its own KV cache over the full context. Together with uncommitted tree nodes, dynamic attention masks, and compiled NPU graphs, this state competes with the target model's weights and committed KV, and at long contexts speculation alone can erase the feasibility margin~\cite{xue2024powerinfer2,xu2025edgellm}. \emph{Second, draft-tree size must be chosen by end-to-end value under fixed shapes.} Larger trees raise acceptance but inflate drafting, candidate KV, and control overhead, whereas smaller trees shed these costs but strand NPU slots as padding. Under a single resident graph and fixed slot budget, the system must decide which speculative work, spanning depth, width, and competing requests, fills those slots each iteration, a choice no server-side system faces. \emph{Third, drafting and verification stress the SoC asymmetrically yet execute serially.} Attention binds to the CPU, GPU via operator precision, growing KV, and per-iteration tree masks, while feed-forward layers run as fixed-shape NPU subgraphs~\cite{xu2025fastondevice,chen2025heterollm}. Each request traverses these backends in strict order, completing drafting before verification begins, so the heterogeneous pipeline carries one item in flight and leaves most of the SoC idle at any instant.
+%\emph{First, speculative state erodes an already-hard memory ceiling.} An autoregressive drafter maintains its own KV cache over the full context; together with uncommitted tree nodes, dynamic attention masks, and compiled NPU graphs, this state competes with the target model's weights and committed KV---at long contexts, the speculation apparatus alone can erase the feasibility margin~\cite{xue2024powerinfer2,xu2025edgellm}. \emph{Second, draft-tree size must be chosen by end-to-end value under fixed shapes.} Larger trees raise acceptance but inflate drafting, candidate KV, and control overhead; smaller trees shed these costs but strand NPU slots as padding. With a single resident graph and a fixed slot budget, a question arises that no server-side system faces: \emph{which} speculative work---across depth, width, and competing requests---should occupy those slots each iteration? \emph{Third, drafting and verification stress the SoC asymmetrically yet execute serially.} Attention binds to the CPU/GPU via operator precision, growing KV, and per-iteration tree masks, while feed-forward layers run as fixed-shape NPU subgraphs~\cite{xu2025fastondevice,chen2025heterollm}. Each request thus traverses these backends in strict order, with drafting complete before verification begins---a heterogeneous pipeline with one item in flight, leaving most of the SoC idle at any instant.
+
+
+
+In this paper, we propose \name, a shape-aware speculative serving framework for heterogeneous mobile SoCs. Its key insight is that the padding slots of a fixed-shape graph and the idle backends of a serial pipeline are the \emph{same} unused capacity viewed along two axes, and concurrent requests supply exactly the independent work to fill both. Therefore, \name inverts the usual relationship between tree and graph, by treating the single compiled NPU graph as a fixed \emph{budget} and packing the most valuable speculative work into it like puzzle pieces. On the drafting side, a sliding window sized by a closed-form acceptance-versus-speed analysis bounds the drafter's context, and each tree grows layer by layer while marginal progress covers its \emph{exposed} cost, which is often zero when drafting hides behind verification. Furthermore,  a dynamic program packs ancestor-closed, high-value subtrees from multiple ready trees into one batch under joint node, memory, and TPOT constraints, displacing padding with real nodes rather than switching shapes. To keep backends busy, \name splits dynamic-shape attention (GPU) from fixed-shape feed-forward (NPU) and time-multiplexes drafting and verification lanes over them, balancing their ratio via an inventory model and yielding to prefill on arrival. A unified memory manager partitions the allocation ceiling among graphs, KV state, and workspace, admitting requests only when peak state fits and reclaiming drafter context first under pressure. Together, these mechanisms turn speculative decoding from two serial model executions into a resource-aware serving pipeline.
+%In this paper, we present \name, a shape-aware speculative serving framework for heterogeneous mobile SoCs. Its key insight is that the padding slots of a fixed-shape graph and the idle backends of a serial pipeline are the \emph{same} unused capacity viewed along two axes---and concurrent requests supply exactly the independent work to fill both. \name accordingly inverts the usual relationship between tree and graph: it treats the single compiled graph as a fixed \emph{budget} and packs the most valuable speculative work into it. On the drafting side, \name bounds the drafter's context with a sliding window sized by a closed-form acceptance-versus-speed analysis, and grows each tree layer by layer while marginal progress covers its \emph{exposed} cost---often zero when drafting hides behind verification. On the verification side, a dynamic program packs ancestor-closed, high-value subtrees from multiple ready trees into one batch under joint node, memory, and TPOT constraints, displacing padding with real nodes rather than shape switching. To keep backends busy, \name splits attention (dynamic-shape, GPU) from feed-forward (fixed-shape, NPU) and time-multiplexes two lanes over them; a scheduler specializes lanes into drafting and verification, balances their ratio via an inventory model with derived thresholds, and yields to prefill on arrival. A unified memory manager carves the allocation ceiling into budgets for graphs, committed KV, candidate KV, and workspace, admitting requests only when peak state fits and reclaiming drafter context first under pressure---the one truncation that costs acceptance but never correctness. Together, these mechanisms turn speculative decoding from two serial model executions into a resource-aware serving pipeline.
+
+
+In summary, this paper makes the following contributions:
+\begin{itemize}[leftmargin=*]
+\item We present the first systematic study of multi-request speculative serving under fixed-shape accelerator constraints, exposing that the premise underlying server-side designs---fewer nodes means less time---fails outright on mobile NPUs. We recast on-device speculation as a joint optimization over accepted progress, drafting latency, utilization, and memory residency, and derive closed-form criteria for drafter-context sizing and tree expansion.
+
+\item We design \name, which treats the fixed compiled graph as a budget to be filled rather than a constraint to be recompiled away: a dynamic program packs subtrees from multiple requests into one verification batch, a dual-lane scheduler overlaps drafting and verification across GPU and NPU, and admission-controlled memory management precludes out-of-memory failures by construction.
+
+\item We implement \name on commodity mobile SoCs and evaluate it against seven inference engines across three model scales. \name improves throughput by up to XX\% and reduces TPOT by up to XX\% over the best baseline, and ablations validate every mechanism and analytical assumption.
+\end{itemize}
+%\item \textbf{Measurement and analysis.} We present the first systematic study of multi-request speculative serving under fixed-shape accelerator constraints, showing that the server-side premise---fewer nodes means less time---fails on mobile NPUs. We formulate on-device speculation as a joint optimization over accepted progress, drafting latency, utilization, and memory residency, deriving closed-form criteria for drafter-context sizing and tree expansion.
+
+%\item \textbf{System design.} We design \name, which recasts speculative serving as filling a fixed graph with the most valuable work, via a dynamic program that packs subtrees from multiple requests into one verification batch, a dual-lane scheduler that overlaps drafting and verification across GPU and NPU, and a memory manager whose admission control precludes out-of-memory failures.
+
+%\item \textbf{Implementation and evaluation.} We implement \name on commodity mobile SoCs and evaluate it against seven inference engines across three model scales, improving throughput by up to XX\% and reducing TPOT by up to XX\% over the best baselines, with ablations validating each mechanism and the design's analytical assumptions.
+\begin{comment}
+Large language models are migrating from the cloud onto the phone. Agentic assistants such as Claude Code~\cite{claudecode} and GitHub Copilot~\cite{githubcopilot} have made the model a background service rather than a foreground chat window, and vendor platforms now ship billion-scale models directly on the handset~\cite{gunter2024appleintelligence}. This shift changes the workload in a way that on-device engines were not designed for. A chat assistant serves \textit{one} request at a time, so an engine that saturates the accelerator for a single sequence is adequate. An agent, by contrast, fans a user instruction into tool calls, retrieval steps, and self-critique passes that arrive \textit{concurrently}, and multiple agents may share the same SoC. The relevant objective therefore moves from single-stream latency to \textit{throughput under a service-level target}, expressed as time-to-first-token (TTFT) for newly admitted requests and time-per-output-token (TPOT) for those already generating.
+
+Existing on-device engines leave most of the SoC idle under this regime. Decode is memory-bandwidth bound: each step reloads the model weights and the growing key--value (KV) cache to emit a single token, so arithmetic units stall waiting on memory~\cite{Efficient2023Woosuk}. Speculative decoding is the canonical answer~\cite{leviathan2023fast,chen2023accelerating}: a small drafter proposes several tokens, and the target model verifies them in one forward pass, converting a bandwidth-bound step into a compute-bound one. Tree-structured drafting extends the idea by verifying many candidate continuations at once~\cite{miao2024specinfer,cai2024medusa}, and the EAGLE family raises acceptance further by drafting on target features and by growing the tree context-adaptively~\cite{li2024eagle,li2024eagle2,li2025eagle3}.
+
+\noindent\textbf{Speculation does not transfer to the end side.} On a server GPU, a draft tree costs what it computes: prune half the nodes and roughly half the time disappears. On a mobile SoC the dominant accelerator is an NPU programmed through a graph compiler such as Qualcomm's QNN~\cite{qnnsdk}, which executes only \textit{fixed-shape} graphs. A graph compiled for $K$ verification slots takes the same time whether $K$ or $K/4$ of those slots hold real nodes; the remainder is padding. Consequently the two levers that make server-side speculation profitable--pruning low-confidence branches and adapting tree depth per request~\cite{zhang2025svip,deagle2025,brown2024dynamicdepth}--reduce the \textit{node count} without reducing the \textit{latency}. Worse, supporting several shapes is not free: distinct shapes cannot share weights, so each additional bucket means an additional resident graph competing with the KV cache for the same constrained device memory. The design space therefore collapses into a question no server-side system has to answer: given one compiled graph and a fixed slot budget, \textit{which} speculative work should occupy those slots this round?
+
+\noindent\textbf{Serial execution wastes the heterogeneity that is already there.} A second, orthogonal loss comes from the request model. Because attention is constrained by operator precision, a dynamic KV cache, and a dynamic tree mask, it is typically kept on the CPU or GPU, while the feed-forward network runs as a fixed-shape subgraph on the NPU~\cite{xu2024llmnpu,chen2025heterollm}. A single request must traverse these stages in order--CPU prepare, GPU attention, NPU feed-forward, CPU postprocess--so each backend idles while the others work. Draft generation and target verification are likewise serialized: the drafter must finish a tree before the target can consume it. With one request in flight, the SoC is a pipeline with a single item in it.
+
+These two observations point in the same direction. The padding slots of a fixed-shape graph and the idle backends of a serial pipeline are the \textit{same} unused capacity viewed along two axes, and concurrent agentic requests supply exactly the independent work needed to fill both. Realizing this, however, raises three challenges. \textit{First}, fixed shapes must be reconciled with dynamic draft trees: too few coarse buckets waste slots on padding, too many buckets exhaust graph memory, and splitting into small chunks multiplies invocation and synchronization cost. \textit{Second}, device memory is a hard ceiling shared by resident graphs, committed KV, candidate KV for unverified trees, and attention workspace, so tree depth, width, tree count, and graph capacity cannot be chosen independently. \textit{Third}, verification itself becomes a bottleneck: a tree too small fails to amortize the target forward pass, while a tree too large inflates the CPU and GPU stages and unbalances the pipeline.
+
+\noindent\textbf{Our approach.} We present \name, a shape-aware speculative serving framework for end-side SoCs. \name inverts the usual relationship between the tree and the graph. Instead of shaping the graph to fit the tree, it treats the compiled graph as a fixed \textit{budget} and packs the most valuable speculative work into it. Three mechanisms follow. (i) A \textit{verification-batch selector} chooses, across all trees that have finished generating, how many nodes each request contributes, solving a two-dimensional bounded knapsack over the node budget of the graph and a shared context budget, so that padding is squeezed out by real nodes from other requests rather than by shape switching. (ii) A \textit{drafting policy} shortens the drafter context to a sliding window and derives a closed-form throughput-ratio test that says exactly when the resulting acceptance loss is repaid by the speed gain--and, applying the same test to dynamic stopping, shows when stopping is \textit{not} worth doing on fixed shapes. (iii) A \textit{dual-lane scheduler} runs two logical pipelines that alternate on the same GPU and NPU, specializing them into draft generation and target verification so the two backends overlap, and regulating the generation/verification ratio through a ready-tree inventory rather than a predictive model.
+
+In summary, this paper makes the following contributions.
+
+\begin{itemize}[leftmargin=*]
+\item We characterize speculative decoding on fixed-shape mobile NPUs and show that the server-side premise ``fewer nodes means less time'' fails there, so node-count-based pruning and early stopping do not by themselves yield speedups. To our knowledge, this is the \textit{first} systematic study of multi-request speculative serving under fixed-shape accelerator constraints.
+
+\item We design \name, which reformulates draft-tree selection as \textit{filling} a fixed graph: a two-dimensional dynamic program packs multiple ready trees into one verification batch under joint node and context budgets, a sliding-window drafter with an analytic break-even condition accelerates generation, and a two-lane scheduler overlaps GPU attention with NPU feed-forward under a simple inventory law.
+
+\item We implement \name on commodity mobile SoCs and evaluate it against seven on-device engines across three model scales and a range of request rates, reporting throughput, TTFT/TPOT, padding ratio, peak memory, and an ablation of each mechanism.
+\end{itemize}
+\end{comment}
+
+\section{Background and Motivation}
+%In this section, we present the background and motivation for \name.
+We first introduce speculative decoding and the execution model of mobile accelerators, and then present the motivation and key challenges of \name.
+
+\subsection{Background} \label{sec:background}
+% todo
+% \begin{figure}[t]
+%   \centering
+%   \includegraphics[width=\columnwidth]{img/background/}
+%   \caption{Decoding workflow.}
+%   \vspace{-10pt}
+%   \label{fig:background_overview}
+% \end{figure}
+
+\subsubsection{Speculative Decoding} \label{sec:spec}
+{\color{blue}
+As shown in {\color{red}Fig.~\ref{fig}(a)}, vanilla inference consists of two phases: chunked \emph{prefill}, which processes the prompt in chunks to avoid long-sequence blocking while building the KV cache and generating the first output token, followed by autoregressive decoding, which generates subsequent tokens conditioned on the latest output token and \emph{accumulated context} stored in KV cache.
+}
+% As shown in {\color{red}Fig.~\ref{fig:background_overview}(a)}, vanilla inference for request $i$ proceeds in two phases: chunked prefill and autoregressive decoding. 
+% During \emph{prefill}, the $n_i^p$-token prompt is processed into several chunks to avoid long sequence blocking, initializing the KV cache $\mathcal{KV}_{0:n_i^p-1}^i$ and producing the first output token. The decoding phase then extends the output autoregressively: at each step $s$, the target LLM consumes latest output token and history KV cache $\mathcal{KV}_{0:n_i^p+s-1}^i$ to emit the next token and update $\mathcal{KV}_{0:n_i^p+s}^i$.
+
+% Since autoregressive decoding yields one token per target pass, speculative decoding~\cite{li2025eagle3} amortizes this cost by verifying multiple drafted tokens in a single pass. Drafting starts from the fused target features and token embeddings and expands the frontier of a draft tree $\mathcal{T}_i$ autoregressively for up to $D$ depths. At each depth, every frontier node $u$ produces child logits $\mathbf{z}_{u}$ and scores each candidate child $v$ with $\operatorname{pa}(v)=u$ by $p(v)=\operatorname{softmax}(\mathbf z_u)_v$; the top-$K$ children per node are retained, subject to a total budget of $B$ tree nodes. We parameterize the tree's search space by the triple $(K, D, B)$. 
+% Verification then evaluates all $B$ nodes in one target forward pass under a tree attention mask and commits the longest accepted root-to-leaf prefix  via rejection sampling, which provably preserves the target distribution~\cite{leviathan2023fast,chen2023accelerating}.
+
+% Speculative decoding reduces bottlenecked target invocations by verifying multiple drafter-proposed tokens in a single forward pass~\cite{leviathan2023fast,chen2023accelerating}. The leading approach, Eagle-3, employs a small \emph{draft model} to construct a draft tree $\mathcal{T}$ from token embeddings and the \emph{target model}'s hidden features, as illustrated in {\color{red}Fig.~\ref{fig}(b)}. During drafting, the tree expands up to depth $D$, retaining a fixed number of candidate children at each frontier node under a total node budget $B$. The target model then evaluates the draft tree in a single forward pass using a tree attention mask and commits the longest accepted prefix via rejection sampling, thereby preserving the target distribution~\cite{leviathan2023fast,chen2023accelerating}.
+Speculative decoding reduces target-model invocations by verifying multiple drafter-proposed tokens in one forward pass~\cite{leviathan2023fast,chen2023accelerating}. The leading approach Eagle-3 employs a small \emph{draft model} to construct a draft tree $\mathcal{T}$ from token embeddings and the \emph{target model}'s hidden features, as illustrated in {\color{red}Fig.~\ref{fig:background_overview}(b)}.
+During drafting, the tree is expanded up to depth $D$: at each depth, every frontier node $u$ produces child distribution $\mathbf{z}_u$ and retains the top-$K$ children by \emph{cumulative draft path probability} $\mathcal{P}(v)=\mathcal{P}\!\left(\operatorname{pa}(v)\right)p(v)$, where $p(v)$ and $\operatorname{pa}(v)=u$ denote the probability and parent of $v$, subject to a total node budget $B$.
+Target model then evaluates all $B$ nodes in one forward under a tree attention mask and commits the longest accepted root-to-leaf prefix via rejection sampling, which provably preserves the target distribution~\cite{leviathan2023fast,chen2023accelerating}.
+
+Although a larger draft space $(K/D/B)$ can increase the average accepted length $\tau$, it also introduces low-confidence branches that consume computation and KV cache capacity yet contribute little accepted progress~\cite{miao2024specinfer}. Existing methods reduce this redundancy by pruning or terminating the draft tree. {\color{blue} Both Eagle-3 and Eagle-2~\cite{li2024eagle2} prune low-probability branches by cumulative path probability $\mathcal{P}(u)$, SVIP~\cite{zhang2025svip} stops expansion when frontier-node entropy grows high $Ent(u)$, and DEAGLE~\cite{deagle2025} monitors three signals---the top-$K$ leaves' probability sum $\operatorname{LPS}_{d}$, survival momentum $\operatorname{SM}_{d}$, and expected accepted length $\Psi(\mathcal T^d)$ at $d$-th depth tree $\mathcal T^d$.}
+
+{\color{blue}
+% Existing methods reduce this redundancy by pruning or terminating the draft process with various signals. EAGLE-2~\cite{li2024eagle2} prunes branches by cumulative path probability $\mathcal P(u)$ under budget $B$, SVIP~\cite{zhang2025svip} stops expansion when leaf node entropy $ Ent(u)$ grows high. Moreover, DEAGLE~\cite{deagle2025} monitors three signals---top-$K$ leaves' probability sum ($\operatorname{PSL}_{d}$), survival momentum ($\operatorname{SM}_{d}$), and expected accepted length $\Psi(\mathcal T(d))$ at depth $d$ of the draft tree $\mathcal T(d)$ (Here, $\mathcal T(D)=\mathcal T$ denotes the final draft tree.) These signals are defined as
+
+% where $\mathcal P(v)$ is the cumulative draft path probability of node $v$, $p(a\mid u)$ is the draft model's probability of token $a$ given node $u$, $\mathcal V$ is the vocabulary, $K$ is the number of top-probability leaf nodes considered, $d$ is the current tree depth, $D$ is the maximum draft depth, and $B$ is the draft-tree node budget.
+}
+
+%DEAGLE~\cite{deagle2025} decides whether to stop expansion from three signals: sum of the top-$K$ leaves $ \operatorname{PSL}(d) = \sum_{v\in \mathcal {L}_d}{\mathcal{P}(v)} \label{equ:deagle_psl} $, survival momentum $\operatorname{SM}(d) = \frac{\operatorname{PSL}(d)}{\operatorname{PSL}(d-1)} \label{equ:deagle_sm} $ and {\color{red}expected accepted length $\operatorname{EAL}(d) = 1+\sum_{v\in\mathcal{L}_d}\mathcal{P}(v) \label{equ:deagle_eal}$.}
+
+
+%\subsubsection{NPU Execution Characteristics} \label{sec:background}
+%Modern mobile systems integrate CPU, GPU, and NPU on a single system-on-chip (SoC) connected to DRAM via a unified memory architecture (UMA), each tailored to distinct workloads: CPU for control and irregular operators, GPU for programmable parallelism and flexible shapes, and the NPU for high low-precision tensor throughput. On-device acceleration is primarily offloaded to the NPU, whose programming interface is exposed through a graph compiler rather than a kernel API. For example, Qualcomm's QNN SDK compiles an operator graph together with its tensor shapes into a device binary for the Hexagon backend~\cite{qnnsdk}. Consequently, each compiled graph is bound to fixed tensor dimensions; supporting an alternative capacity requires a separately compiled graph with its own resident parameters({\color{red} xx GB for xx B model}), competing with KV caches and other shapes' weights for limited DRAM.
+
+\subsubsection{Fixed-Shape NPU Execution} \label{sec:npu}
+Mobile SoCs integrate CPU, GPU, and NPU behind a unified memory architecture (UMA) over shared DRAM, each suited to distinct workloads: CPU to control flow and irregular operators, GPU to programmable parallelism over flexible shapes, and NPU to high-throughput low-precision tensor computation. On-device acceleration centers on the NPU, whose programming interface is a graph compiler rather than a kernel API. Qualcomm's QNN SDK, for instance, compiles an operator graph \emph{together with its tensor shapes} into a device binary for the Hexagon backend~\cite{qnnsdk}. Each compiled graph is thus bound to fixed tensor dimensions; supporting an alternative capacity requires a separately compiled graph with its own resident weights ($3.2$ GB for a $1.7$ B model), which competes with KV caches and other graphs for limited DRAM.
+
+This rigidity affects operators unevenly, as depicted in {\color{red}Fig.~\ref{fig:background_overview}(a)}. At decode step $s$ of Transformer layer $l$, attention $A_l$ attends the current tokens over the growing KV cache before the feed-forward network (\emph{FFN}) $F_l$. Since the \emph{accumulated context length} (i.e., KV-cache size) $n_i$ grows every step and varies across requests, and softmax remains accuracy-sensitive under aggressive quantization, $A_l$ better suits the GPU or CPU~\cite{xu2025fastondevice,yin2025shadowattn}. In contrast, compute-dominant $F_l$'s shape depends only on the current token count, so it maps efficiently onto a fixed-shape NPU graph~\cite{chen2025heterollm,chen2025heteroinfer}.
+% This rigidity affects operators unevenly. At decode step $s$ of Transformer layer $l$,  attention $A_l(\mathcal{KV}_{0:n_i+s}^i, \mathcal M_s^i)$ attends the $m_i = |\mathcal M_s^i|$ current tokens ($m_i{=}1$ for AR; $m_i{=}B$ for SD) over the growing history before feeding the feed-forward operator $F_l$. Because the history length $n_i{+}s$ grows every step and differs across requests, and softmax remains accuracy-sensitive under aggressive quantization, $A_l$ should reside on the GPU or CPU~\cite{xu2025fastondevice,yin2025shadowattn}. In contrast, the compute-dominant $F_l$ has a shape that depends only on $m_i$, mapping efficiently onto a fixed-shape NPU graph~\cite{chen2025heterollm,chen2025heteroinfer} ({\color{red}Fig.~\ref{fig:background_overview}(a)}).
+%This rigidity affects different operators differently. At decode step $s$ of Transformer layer $l$, attention $A_l(\mathcal{KV}_{0:n_i+s}^i, \mathcal M_s^i)$ processes the history KV cache and current tokens $\mathcal M_s^i$ before passing its output to the feed-forward operator $F_l(\mathcal M_s^i)$, here $m_i=|M_s^i|$ is the current-token width ($m_i{=}1$ for AR and $m_i{=}B$ for SD).  Hence, $A_l$ commonly resides on the GPU or CPU, as $s$ and $h$ vary across requests and rounds, while softmax computations remains accuracy-sensitive under aggressive quantization~\cite{xu2025fastondevice,yin2025shadowattn}.In contrast, the compute-intensive $F_l$ maps efficiently to a fixed-shape QNN graph on the NPU~\cite{chen2025heterollm,chen2025heteroinfer} as illustrated in {\color{red}Fig.~\ref{fig:background_overview}(a)}.
+
+% Mobile SoCs expose their AI accelerator through a graph compiler rather than a kernel API. Qualcomm's QNN~\cite{qnnsdk} compiles a subgraph together with its tensor shapes into a device binary that is loaded onto the Hexagon cores; the underlying DSP is programmable, but the deployment interface is not. Three consequences shape every design decision in this paper.
+
+% \noindent\textbf{Shapes are frozen at compile time.} A graph accepts exactly the tensor dimensions it was compiled for. Serving a shorter input means padding to the compiled length, and the execution time $T_Q(b)$ of shape $b$ is a constant that does not decrease with the number of \textit{useful} rows. Padding is therefore not a memory overhead but a \textit{time} overhead paid every invocation.
+
+% \noindent\textbf{Shapes do not share weights.} Supporting an additional shape means compiling and residing an additional complete graph. Graph memory competes directly with the KV cache in the same device budget, so the number of buckets is bounded by memory rather than by convenience.
+
+% \noindent\textbf{Not every operator belongs on the NPU.} Attention depends on a dynamic KV cache, a dynamic mask, and precision-sensitive softmax accumulation, and is commonly retained on the CPU or GPU where IO-aware kernels apply~\cite{dao2022flashattention,xu2024llmnpu}, whereas the feed-forward network maps cleanly onto a fixed-shape NPU subgraph~\cite{chen2025heterollm,xu2026shadownpu}. This split is usually described as a limitation. We treat it as a resource: the two halves of a decoder layer occupy \textit{different} backends and therefore admit overlap across independent requests.
+
+% {\color{red}Fig.~\ref{fig:backend_shape}} quantifies the first and third points. Across context lengths, the NPU sustains substantially higher feed-forward throughput than the CPU or GPU, which is why it must remain the primary compute unit; yet its prefill time is a \textit{staircase} in the compiled chunk size rather than a smooth function of the true prompt length, so a request that falls just above a bucket boundary pays for the whole next bucket.
+
+
+
+\subsection{Motivation} \label{sec:motivation}
+%\subsubsection{Untapped Potential of Speculation.}  
+% \subsubsection{Wide Verification Is Nearly Free---but Unexploited}
+% todo: 还没想好
+% 应该叙述当前草稿树策略难以协调到更优的接受长度和更少的节点数量
+% 还有些类似方法在background没提到
+%  SpecDec++ — Boosting Speculative Decoding via Adaptive Candidate Lengths (https://arxiv.org/abs/2405.19715)：训一个 acceptance prediction head
+% OPT-Tree — Speculative Decoding with Adaptive Draft Tree Structure (https://arxiv.org/abs/2406.17276),每步搜索最大化接受长度期望的树结构
+\subsubsection{Untapped Potential of Speculation}
+\label{sec:motivation_speculation}
+The decoding-latency curves in Fig.~\ref{fig:round_time}(b) and (d) reveal a transition from memory-bound to compute-bound execution on both CPU and GPU backends. Decoding and narrow-width verification are memory-bound: widening verification initially adds little latency because each streamed weight block is reused across all candidate tokens, so the extra arithmetic lands on otherwise idle compute units. Only at larger widths, once weight transfer is amortized, does the added feed-forward and attention computation dominate and push verification into a compute-bound regime. Thus, below the transition point, verifying $B$ candidates costs little more than verifying one.
+
+%---the ``fewer nodes, less time'' premise does not hold.
+%The decode curves reveal a transition from memory-bound to compute-bound execution on both CPU and OpenCL (Fig.~\ref{fig:round_time}(b) and (d)). AR decoding and narrow verification widths remain memory bound: widening verification initially adds little latency because each streamed weight block is reused across candidate tokens, allowing the additional arithmetic work to utilize otherwise idle compute capacity. At larger widths, the curves diverge sharply as weight-transfer costs are progressively amortized and the additional feed-forward and attention computation becomes dominant, shifting verification into a compute-bound regime.
+
+This does not make larger trees universally preferable. Table~\ref{tab:accept_config} exposes a non-monotonic trade-off: small trees keep {\color{red}draft generation time $T_{\mathsf G}$ and targe verification time $T_{\mathsf V}$} low but accept too few tokens to amortize the target invocation, while larger trees gain diminishing acceptance benefits that is eventually outweighed by growing drafting, verification, CPU control, and KV-management costs. Existing frameworks resolve this tension by defaulting to a conservative tree size that bounds worst-case cost---but in doing so, they forfeit precisely the near-free verification width identified above. 
+
+\noindent\textbf{Implication:} the flat region of the latency curve is capacity waiting to be filled; when one request's tree cannot profitably fill it, candidates from \emph{other} requests can.
+%This transition does not make larger trees universally preferable. Table~\ref{tab:accept_config} exposes a non-monotonic trade-off. Small trees keep $T_G$ and $T_V$ low but yield a short accepted length, providing insufficient progress to amortize the target-model invocation. Larger trees improve candidate coverage, but their diminishing acceptance gains are eventually outweighed by increasing drafting, verification, CPU control, and KV-processing costs. The evaluated framework therefore defaults to a conservative tree size to bound these costs. This choice, however, limits both verification parallelism and accepted length, leaving much of the acceleration potential of speculative decoding unrealized.
+
+\begin{table}[t]
+\caption{\color{red}Speculation performance on sampled GSM8K.}
+\vspace{-10pt}
+\label{tab:accept_config}
+\centering
+\setlength{\tabcolsep}{2.5pt}
+\setlength{\arrayrulewidth}{0.8pt}
+\resizebox{\linewidth}{!}{%
+\begin{tabular}{lcccc|cccc}
+\toprule
+\multirow{2}{*}{\makecell{\textbf{$K/D/B$}}}
+& \multicolumn{4}{c|}{\textbf{CPU}} & \multicolumn{4}{c}{\textbf{OpenCL}} \\
+\cmidrule(lr){2-5}\cmidrule(lr){6-9}
+& $\tau$ & $T_\mathsf G$ & $T_\mathsf V$ & $S$ ($\times$)
+& $\tau$ & $T_\mathsf G$ & $T_\mathsf V$ & $S$ ($\times$) \\
+\midrule
+AR       & $1.00$ & -- & [X.X] & $1.00$ & $1.00$ & -- & [X.X] & $1.00$ \\
+1/3/3    & [X.XX] & [X.X] & [X.X] & [X.XX] & [X.XX] & [X.X] & [X.X] & [X.XX] \\
+1/7/7    & [X.XX] & [X.X] & [X.X] & [X.XX] & [X.XX] & [X.X] & [X.X] & [X.XX] \\
+3/3/16   & [X.XX] & [X.X] & [X.X] & [X.XX] & [X.XX] & [X.X] & [X.X] & [X.XX] \\
+3/7/16   & [X.XX] & [X.X] & [X.X] & [X.XX] & [X.XX] & [X.X] & [X.X] & [X.XX] \\
+10/3/32  & [X.XX] & [X.X] & [X.X] & [X.XX] & [X.XX] & [X.X] & [X.X] & [X.XX] \\
+10/10/32 & [X.XX] & [X.X] & [X.X] & [X.XX] & [X.XX] & [X.X] & [X.X] & [X.XX] \\
+\bottomrule
+\end{tabular}
+}
+\end{table}
+
+
+\subsubsection{Serial Dependencies Idle Heterogeneous SoC} \label{sec:motivation_utilization}
+% Single-request execution is serialized at two granularities. Within each layer $l$, GPU attention and NPU feed-forward obey the chain $A_l \rightarrow F_l \rightarrow A_{l+1} \rightarrow \cdots$; across speculative rounds $r$, drafting and verification obey $\mathsf{G}_r \rightarrow \mathsf{V}_r \rightarrow \mathsf{G}_{r+1} \rightarrow \cdots$. Both chains confine all work to a single critical path on which exactly one backend is busy at any instant: measured over a full iteration, neither GPU nor NPU exceeds {\color{red}\textbf{XX}\%} occupancy. Continuous batching~\cite{Orca2022Gyeong,Efficient2023Woosuk} raises occupancy \emph{within} an invocation by aggregating compatible requests, but it cannot remove the temporal bubbles \emph{between} backends, which stem from the dependency structure rather than batch size. 
+Single-request execution is serialized at two granularities. Within each layer $l$, GPU attention and NPU feed-forward obey the chain $A_l \!\rightarrow\! F_l \!\rightarrow\! A_{l+1} \!\rightarrow\! \cdots$; across speculative rounds $r$, depth-$D$ draft generation $\mathsf G_r\!=\!(\mathsf G_{r,d})_{d=1}^{D}$ and verification $\mathsf V_r$ obey
+$\mathsf G_{r}\!\rightarrow\!\mathsf V_r\!\rightarrow\!\mathsf G_{r+1}\!\rightarrow\!\cdots$.
+The inter-round dependency prevents a request from overlapping drafting and verification, while inter-operator dependency leaves at most one backend active at any instant. As a result, measured over a full iteration, neither GPU nor NPU exceeds {\color{red}\textbf{XX}\%} occupancy.
+Continuous batching~\cite{Orca2022Gyeong,Efficient2023Woosuk} raises occupancy \emph{within} an invocation by aggregating compatible requests, but cannot remove the temporal bubbles \emph{between} backends, which stem from the dependency structure rather than batch size.
+
+\noindent\textbf{Implication:} filling one backend's bubble requires independent work from a different request and a different phase---one request's drafting overlapped with another's verification.
+%\subsubsection{Sequential Execution Underutilizes SoC} \label{sec:motivation_utilization}
+%Request execution is serialized at two granularities: within each decoder layer $l$, GPU attention $A_l$ and NPU feed-forward $F_l$ obey the dependency chain $A_l \rightarrow F_l \rightarrow A_{l+1} \rightarrow \cdots$, while across speculative rounds $r$, draft generation $G_r$ and target verification $V_r$ follow{\color{red} $G_r \rightarrow V_r \rightarrow G_{r+1} \rightarrow \cdots$ }dependency. Together, these dependencies confine GPU and NPU workloads to a single critical path, where only one backend holds executable work at any given instant. Continuous batching{\color{red}~\cite{?}} can improve intra-invocation NPU occupancy by aggregating compatible requests, yet it does not eliminate the temporal bubbles arising from cross-backend serialization, leaving the aggregate utilization of heterogeneous SoC resources fundamentally underutilize.
+
+%\subsubsection{Mismatches of Static QNN Graphs.} \label{sec:motivation_qnn}
+\subsubsection{Static Graphs Meet Shape-Variant Workloads} \label{sec:motivation_qnn}
+As \S~\ref{sec:npu} established, NPU graphs are compiled for fixed tensor shapes, whereas serving workloads vary continuously in prompt length, tree size, and batch composition. The two standard workarounds both pay for the mismatch. \emph{Chunking} decomposes long inputs into fixed-size segments at the cost of repeated graph launches, synchronization barriers, and loop overhead: processing a 1024-token prompt in 32-token chunks incurs {\color{red}\textbf{XX}$\times$} the latency of a single 1024-token invocation (Fig.~\ref{fig:backend_shape}). \emph{Padding} runs a larger graph than the work requires, as a 1024-slot graph serving a 513-token input can spend {\color{red}\textbf{XX}\%} of its compute on positions that carry no work. 
+
+\noindent\textbf{Implication:} since a graph's cost is fixed regardless of how many slots hold real tokens, the padding slots of one request are free capacity for another.
+% \noindent\textbf{Implication:} since a graph's cost is fixed regardless of how many slots hold real tokens, the padding slots of one request are free capacity for another---the same observation as \S~\ref{sec:motivation_speculation}, now viewed from the graph's perspective.
+%As discussed in \S\ref{sec:background}, QNN graphs are compiled and optimized for fixed tensor shapes, whereas on-device workloads are inherently shape-variant due to varying lengths of requests' context. In principle, this mismatch can be mitigated by chunking long inputs into fixed-size segments and padding incomplete final chunks, yet neither strategy is free. Chunking introduces repeated graph launches, synchronization barriers, and loop overhead: as shown in {\color{red}Fig.~\ref{fig:backend_shape}}, processing a 1024-token prompt with a 32-token chunk incurs {\color{red}\textbf{XX}$\times$} the latency of a single 1024-token invocation. Padding, conversely, wastes computation on idle positions: a 1024-token bucket serving a 513-token input squanders approximately {\color{red}\textbf{XX}\%} of its compute budget on padding tokens.
+
+
+\subsection{Opportunities}
+%\subsubsection{Drafter Attention Locality} \label{sec:oppo_draft}
+\subsubsection{Drafter Attention Locality Permits Truncation} \label{sec:oppo_draft}
+% todo 放图
+Serving throughput is bounded by the critical path of generation and verification, yet the target model must remain unmodified to preserve distributional equivalence---so latency needs to be cut on the drafter side, where approximation risks only acceptance rate, never correctness. Fortunately, the drafter's attention is highly localized to recent tokens: as Fig.~\ref{fig:drafter_attention} shows, a {\color{red}\textbf{[W]}}-token window retains {\color{red}\textbf{[XX\%]}} of the attention mass, while extending to {\color{red}\textbf{[W$_2$]}} yields only marginal gains. Truncating drafter context to such a window thus trades negligible acceptance for reduced attention latency and KV-cache traffic, accelerating the supply of ready draft trees.
+%Serving throughput is fundamentally constrained by the latency along the draft $\rightarrow$ verify $\rightarrow$ draft critical path, yet the target model must remain unmodified to preserve distributional equivalence. Fortunately, the drafter's attention is highly localized to recent tokens: as shown in {\color{red}Fig.~\ref{fig:drafter_attention}}, a {\color{red}\textbf{[W]}}-token window retains {\color{red}\textbf{[XX\%]}} of the total attention mass, while extending to {\color{red}\textbf{[W$_2$]}} yields only marginal gains. This locality enables context truncation with tolerable acceptance loss, reducing attention latency and KV-cache traffic, thereby accelerating the supply of ready draft trees.
+
+%\subsubsection{Pipeline Overlap}
+% todo: pick L_cap...
+\subsubsection{Complementary Backend Loads Enable Overlap} \label{sec:oppo_pipeline}
+As Fig.~\ref{fig:backend_breakdown} shows, GPU attention and NPU FFN load along orthogonal dimensions: attention time scales with accumulated context length, FFN time with compiled token capacity. The GPU contributes {\color{red}\textbf{[XX\%]}} of iteration time at {\color{red}\textbf{[configuration A]}}, while NPU {\color{red}\textbf{[XX\%]}} at {\color{red}\textbf{[configuration B]}}.This orthogonality yields two independent scheduling knobs---a \emph{total-sequence-length} budget $H$ (KV-cached plus \emph{current input} tokens) capping GPU attention load, and a token capacity $C$ capping NPU load. It thus motivates a \emph{dual-pipeline} design. Two phase-shifted batches run concurrently under $(H,C)$, one performing GPU attention while the other performs NPU feed-forward, exchanging roles at each scheduling boundary and filling each backend's bubbles with the other's work.
+%As Fig.~\ref{fig:backend_breakdown} shows, GPU attention and NPU feed-forward load along orthogonal dimensions: attention time scales with accumulated context length, while feed-forward time scales with compiled token capacity. The GPU contributes {\color{red}\textbf{[XX\%]}} of iteration time at {\color{red}\textbf{[configuration A]}}, whereas the NPU contributes {\color{red}\textbf{[XX\%]}} at {\color{red}\textbf{[configuration B]}}. {\color{blue}This orthogonality yields two independent scheduling knobs---a budget $H$ on \emph{total sequence length} (which comprises both KV-cached tokens and \emph{current input tokens}) capping GPU attention load and a token capacity $C$ capping NPU load---so two phase-shifted pipelines respecting $(H, C)$ can fill each backend's bubbles with the other group's work. Concretely, this motivates a \emph{dual-pipeline} design that executes two phase-shifted batches concurrently: one batch performs GPU attention while the other performs NPU feed-forward, after which they exchange roles at the next scheduling boundary.}
+
+%As shown in Fig.~\ref{fig:backend_breakdown}, OpenCL attention and QNN feed-forward exhibit complementary load patterns across two workload dimensions: historical context length and current invocation token count. OpenCL dominates under long contexts, while QNN accounts for a larger fraction under short contexts and larger compiled token capacities. For instance, OpenCL contributes {\color{red}\textbf{[XX\%]} of execution time at \textbf{[configuration A]}, whereas QNN contributes \textbf{[XX\%]} at \textbf{[configuration B]}}.
+
+%This complementarity provides two scheduling bounds: an aggregate context budget $H$ constrains OpenCL workload, while a token capacity $C$ bounds QNN workload. The resulting execution bubbles can be filled by dual pipelines that alternate between OpenCL and QNN, maximizing cross-backend overlap.
+
+\subsubsection{Padding Slots as a Cross-Request Budget} \label{sec:oppo_padding}
+Dynamic draft tree methods enable collective pruning across all concurrent requests, turning the fixed graph's $C$ slots into a shared node budget with two complementary benefits. First, nodes compete globally on expected acceptance value, granting more slots to requests with higher expected accepted length. Second, slots a lone request would pad (\S\ref{sec:motivation_qnn}) are instead populated with high-value nodes from other ready trees---every invocation runs at full width, yet no request pays for width it cannot use.
+%\subsubsection{Dynamic Draft Tree Padding} 
+%Dynamic-tree methods enable collective pruning of draft trees across all concurrent requests, yielding two complementary benefits. First, pruning prioritizes requests with higher expected acceptance lengths, thereby improving overall speculative throughput. Second, positions that would otherwise be padded to align with the fixed-shape QNN graph can instead be populated with high-value nodes from other ready trees.
+
+\subsection{Challenges}
+%\subsubsection{Generating High-Acceptance Drafts Efficiently}
+%Sustaining high throughput requires efficiently generating high-acceptance draft nodes. However, reducing the drafter context, limiting tree expansion, and pruning low-confidence branches lower generation cost but simultaneously risk diminishing the accepted progress per verification round. A principled strategy is therefore needed to jointly balance drafting efficiency against acceptance quality.
+\subsubsection{Balancing Drafting Cost Against Acceptance} \label{sec:challenge_draft}
+Sustaining throughput requires a steady supply of high-acceptance draft nodes, yet every lever that cheapens drafting---truncating drafter context (\S\ref{sec:oppo_draft}), limiting tree expansion, pruning low-confidence branches---also risks shrinking the accepted progress per verification round. Because the optimal operating point shifts with context length and generation difficulty, a principled, workload-adaptive strategy is needed to jointly balance drafting efficiency against acceptance quality.
+
+\subsubsection{Orchestrating Dual Pipelines on Shared Backends} \label{sec:challenge_pipeline}
+The two lanes (\S~\ref{sec:oppo_pipeline}) share a single GPU and a single NPU, so the runtime must interleave prefill, drafting, and verification across lanes to maximize cross-backend overlap without inducing contention or excessive graph switching. It needs to further balance the production and consumption of ready trees: undersupply starves verification, while oversupply accumulates candidate KV state and inflates memory pressure. Maintaining this equilibrium under dynamic arrivals, while meeting per-request TTFT and TPOT targets, demands an SLO-aware orchestration policy.
+%\subsubsection{Orchestrating the Dual Pipeline}
+%The two pipeline lanes share a single OpenCL GPU and a single QNN backend, so the runtime must schedule prefill, draft generation, and target verification across lanes to maximize cross-backend overlap without inducing contention or excessive graph switching. This scheduling must also balance the production and consumption of ready trees: insufficient generation starves verification, while excessive generation accumulates candidate KV state and intensifies memory pressure. Maintaining this balance under dynamic arrivals while meeting per-request TTFT and TPOT targets demands an SLO-aware orchestration policy.
+
+\subsubsection{Packing Verification Slots Across Requests} \label{sec:challenge_packing}
+A fixed-capacity NPU graph fixes \emph{how many} nodes each invocation verifies, but not \emph{which} nodes from the ready trees occupy those slots (\S\ref{sec:oppo_padding}). Since low-confidence nodes contribute little expected progress yet still incur attention, mask-construction, and candidate-KV costs, the runtime must select ancestor-closed subtrees across requests---subject to the graph-capacity ($C$) and aggregate-context ($H$) budgets---so as to maximize expected accepted progress per invocation while guaranteeing minimum service to requests nearing their TPOT deadlines. This is a constrained combinatorial selection that must be solved anew each iteration within microsecond-scale scheduling headroom.
+%\subsubsection{Schedule Requests.}
+%A fixed-capacity QNN graph fixes how many nodes are verified per invocation but not which nodes from draft-ready trees occupy those slots. Since low-confidence nodes contribute little expected progress while still incurring attention, mask-construction, and candidate-KV overhead, the runtime must jointly select ancestor-closed subtrees from multiple ready requests subject to graph-capacity and aggregate-context constraints, maximizing expected accepted progress at fixed QNN latency while guaranteeing minimum service for requests nearing their TPOT deadlines.
+
+\section{\name Design}
+\subsection{System Overview} \label{sec:sys_overview}
+We now detail the design of \name, with the main notation summarized in Table~\ref{tab:notation} for ease of presentation.
+
+\begin{table}[t]
+\caption{Notation table.}
+\vspace{-10pt}
+\label{tab:notation}
+\centering
+\footnotesize
+\resizebox{0.98\linewidth}{!}{%
+\begin{tabular}{@{}>{\centering\arraybackslash}p{0.2\columnwidth}|p{0.8\columnwidth}@{}}
+\toprule
+\textbf{Notation} & \textbf{Description} \\
+\midrule
+$\mathsf{P},\mathsf{G},\mathsf{V}, \mathsf{I}$ & Prefill, draft generation, target verify, idle phases. \\
+$\mathcal Q_{\mathsf{P}},\mathcal Q_{\mathsf{G}},\mathcal Q_{\mathsf{V}}$ & Requests Queues for $\mathsf{P}$, $\mathsf{G}$, and $\mathsf{V}$ phases. \\
+$D,K,B$ & Depth, branch width, tree-node budget for draft tree. \\
+$T_{\mathsf{G}},T_{\mathsf{V}}$; $\tau$ & Draft/verify latency and accepted length. \\
+% $r_A(w),r_G(w),\rho_0,\Gamma(w;w_0)$ & acceptance ratio, drafter speedup, draft/verify ratio、window throughput gain. \\
+$x_k^{(\ell)}, \mathcal{R}_k^{(\ell)}$ & Scheduled stages and request batching for lane $\ell$ \\
+$T_{\mathsf{C}}, T_{\mathsf{A}},T_{\mathsf{F}}$ & CPU slack, GPU-attention, QNN-FFN latency. \\
+$(c_j,h_j)$ & j-th paired QNN graph and OpenCL context budget. \\
+$(C,H)$ & selected QNN graph and OpenCL context budget. \\
+$S_i^{\mathrm{TTFT}},S_i^{\mathrm{TPOT}}$ & TTFT and TPOT SLO targets of request $i$. \\
+$Z_k,Z^-,Z^+$ & Ready-tree inventory and its lower, and upper levels. \\
+\bottomrule
+\end{tabular}
+}
+\end{table}
+
+\noindent\textbf{System Overview.} 
+{\color{blue} Fig.~\ref{fig:system_overview} illustrates the end-to-end workflow of \name under selected budget pair $(C,H)$ from the profiled configuration set $\{(c_j, h_j)\}_{j=0}^{M-1}$(\S~\ref{sec:execution_lane}), where $c_j$ and $h_j$ denote the NPU capacity and attention context budget. Each request traverses three coordinated stages, each assembling a multi-request batch of ready work to maximize utilization of the shared GPU and NPU (\S~\ref{sec:batching}).
+% Each request traverses three coordinated stages, each assembling a multi-request batch of ready work to maximize utilization of the shared GPU and NPU (\S~\ref{sec:batching}), {\color{blue}under the selected budget ${(H,C)}$ form the profiled configuration set , where $h_j$ and $c_j$ denote the NPU capacity and attention context budget.}
+% todo cite edf Scheduling Algorithms for Multiprogramming in a HardReal-Time Environment
+Specifically, these stages consist of:}
+\textbf{(1) Chunked prefill} ($\mathsf P$): An arriving prompt is split into chunks and enqueued in the prefill queue $\mathcal Q_{\mathsf P}$, from which the scheduler forms prefill batches by dispatching chunks with pruned draft trees onto the prefill pipeline under an earliest-deadline-first (EDF) policy that protects TTFT SLOs (\S~\ref{sec:schedule_prefill}). Once its final chunk completes, the request holds a fully initialized target-model KV cache and advances to the draft-generation queue $\mathcal Q_{\mathsf G}$.
+\textbf{(2) Draft generation} ($\mathsf G$): The throughput-oriented sliding-window drafter (\S~\ref{sec:execution_draft}) expands  a batch of draft trees from $\mathcal Q_{\mathsf G}$ under TPOT-aware EDF batching, using acceptance-preserving dynamic branch stopping to prune unpromising branches early. Completed trees then enter the verification queue $\mathcal Q_{\mathsf V}$.
+\textbf{(3) Batched verification} ($\mathsf V$): At each verification opportunity, {\color{red}the knapsack-based packer (\S~\ref{sec:draft_verify})} jointly selects the most valuable subtrees from $\mathcal Q_{\mathsf V}$, prioritizing requests with the least remaining time to TPOT deadline, subject to the QNN verification-slot capacity and attention-context limit. The packed subtrees are verified in a single target-model invocation. Each request commits its accepted path, after which finished requests depart and unfinished ones return to $\mathcal Q_{\mathsf G}$ with updated target state for the next speculative round.
+%\noindent\textbf{System Overview.} Fig.~\ref{fig:system_overview} illustrates the end-to-end workflow of \name, through which each request traverses three coordinated stages, with each stage assembling a multi-request batch of ready work to maximize utilization of the shared GPU and NPU.
+% todo batch...
+%\textbf{(1) Chunked prefill} ($\mathsf P$). An arriving prompt is split into chunks and enqueued in the prefill queue $\mathcal Q_{\mathsf P}$, from which the scheduler forms prefill batches by dispatching chunks with pruned draft trees onto the prefill pipeline under a least-slack-time-first (LSTF) policy that protects TTFT SLOs (\S~\ref{sec:schedule_prefill}). Once its final chunk completes, the request holds a fully initialized target-model KV cache and advances to the draft-generation queue $\mathcal Q_{\mathsf G}$. \textbf{(2) Draft generation} ($\mathsf G$).  The throughput-oriented sliding-window drafter (\S~\ref{sec:draft_analysis}) expands draft trees for $\mathsf Q_G$ requests, with acceptance-preserving dynamic branch stopping pruning unpromising branches early (\S~\ref{sec:draft_generate}); the completed trees then enters the verification queue $\mathcal Q_{\mathsf V}$. \textbf{(3) Batched verification} ($\mathsf V$). At each verification opportunity, the knapsack-based packer (\S~\ref{sec:draft_verify}) jointly selects the most valuable subtrees from $\mathcal Q_{\mathsf V}$---prioritizing requests with the least remaining TPOT slack---subject to the QNN verification-slot capacity and the attention-context limit. The packed subtrees are verified in a single target-model invocation; each request commits its accepted path, after which finished requests depart and unfinished ones return to $\mathcal Q_{\mathsf G}$ with updated target state for the next speculative round.
+
+Across all three stages, the pipeline scheduler (\S~\ref{sec:pipeline_schedule}) dispatches execution batches onto two execution lanes sharing the GPU and NPU, staggered in time so that one lane's attention computation overlaps the other's FFN. Before a batch enters its NPU stage, the memory manager binds it to the precompiled graph of its capacity bucket and governs residency, reuse, and switching across the two lanes within the device memory budget for graphs and KV cache (\S~\ref{sec:memory_manager}).
+%Across all three stages, execution batches are dispatched by the pipeline scheduler (\S~\ref{sec:schedule_overview}) onto two execution lanes sharing the same GPU and NPU, staggered in time so that attention computation of one lane overlaps FFN computation of the other. Before a batch enters its NPU stage, the memory manager binds it to the precompiled graph of its capacity bucket and {\color{blue} governs residency, reuse, and switching across the two lanes within the device memory budget for graphs and KV cache (\S~\ref{sec:memory_manager}).}
+
+% todo qnn+opencl op
+
+\begin{comment}
+\noindent \textbf{System Overview.}
+{\color{red}Fig.~\ref{fig:system_overview}} illustrates the end-to-end workflow of \name, which proceeds through the following coordinated stages. 
+\noindent\textbf{(1) Prefill:}
+An arriving prompt is divided into chunks and inserted into the prefill queue $\mathcal Q_P$, while will be scheduled by dual-pipeline scheduler to prefill pipeline with {\color{red} LSTF} rules(\S\ref{sec:schedule_prefill}).  Once all
+chunks complete, the request has its initialized target KV cache and moves to the
+draft-generation queue $\mathcal Q_G$.
+\noindent\textbf{(2) Draft generation.}
+Upon entering the generation stage, the request produces a draft tree via the throughput-optimized sliding-window drafter(\S\ref{sec:draft_analysis}) with acceptance-preserving dynamic branch stopping (\S~\ref{sec:draft_generate}), after which it enters the verification queue $\mathcal{Q}_V$.
+\noindent\textbf{(3) Target verification.}
+At each verification opportunity, a dynamic program (\S~\ref{sec:draft_verify}) jointly packs high-value subtrees with less remaining TPOT budget requests from $\mathcal Q_V$ under the QNN capacity and attention-context limit. After verification, finished requests depart while unfinished ones return to $\mathcal{Q}_G$ with their updated target state for the next speculative round.
+
+Among these stages, each execution batch is dispatched by the pipeline scheduler (\S\ref{sec:pipeline_schedule}) to dual-pipeline execution lanes that share the same GPU and NPU, with the two pipelines staggered in time to overlap the attention computation of one lane with the FFN computation of the other.
+{\color{red}Before a batch enters its QNN processing, the runtime manager binds it to the matching
+capacity-specific graph and coordinates graph residency, reuse, and switching across the two
+lanes under the device memory budget (\S\ref{sec:runtime_manager}).}
+\end{comment}
+
+% todo
+\noindent\textbf{\name Objective.}
+%\name organizes execution as two logical lanes multiplexed over one physical GPU and one NPU backend (Fig.~\ref{fig:operator_timeline}); each lane executes a \emph{batch} of requests rather than a single request, keeping both backends utilized. 
+% \name schedules draft and target executions at iteration boundaries. At iteration $t$, lane $\ell\in\{0,1\}$ is assigned a stage $x_t^{(\ell)}\in\{\mathsf P,\mathsf G,\mathsf V,\mathsf I\}$, where $\mathsf I$ denotes idling, together with a batch $\mathcal R_t^{(\ell)}$ drawn from the corresponding stage queue,
+\name schedules draft and target executions at iteration boundaries and upon lane completion. At each lane's scheduling iteration $k$, lane $\ell\in\{0,1\}$ receives a stage $x_k^{(\ell)}\in\{\mathsf P,\mathsf G,\mathsf V,\mathsf I\}$, where $\mathsf I$ denotes idling, and a batch $\mathcal R_k^{(\ell)}$ drawn from the corresponding stage queue,
+\begin{equation}
+\mathcal R_k^{(\ell)}\subseteq\mathcal Q_{x_k^{(\ell)}},
+\qquad
+\mathcal R_k^{(0)}\cap\mathcal R_k^{(1)}=\varnothing,
+\label{equ:lane_request_sets}
+\end{equation}
+with $\mathcal R_k^{(\ell)}=\varnothing$ whenever $x_k^{(\ell)}=\mathsf I$. The scheduler jointly chooses both lanes' stage assignments and batch compositions to maximize the \emph{steady-state token goodput}~\cite{Zhang2026JITServe}, i.e., SLO-compliant tokens produced per unit wall-clock time:
+\begin{equation}
+\max_{\{x_k^{(\ell)},\,\mathcal R_k^{(\ell)}\}}\;
+\liminf_{\mathcal K\rightarrow\infty}
+\frac{\displaystyle\sum_{k=1}^{\mathcal K}\sum_{\ell=0}^{1} Y_k^{(\ell)}}
+{\displaystyle\sum_{k=1}^{\mathcal K}\;\max_{\ell\in\{0,1\}} T_k^{(\ell)}\bigl(x_k^{(\ell)},\mathcal R_k^{(\ell)}\bigr)},
+\label{equ:global_goodput}
+\end{equation}
+where $Y_k^{(\ell)}$ counts the tokens committed by lane $\ell$ at iteration $t$ that meet their TTFT/TPOT SLOs (nonzero only for verification batches), and $T(x,\mathcal R)$ is the execution time of stage $x$ on batch $\mathcal R$, with each iteration costs the slower operator time of staggered lanes.
+% Since the staggered lanes synchronize at iteration boundaries, each iteration costs the slower lane's time---hence the inner maximum.
+
+Directly optimizing Eq.~\eqref{equ:global_goodput} is impractical, as request arrivals, realized accepted lengths, and batch execution times are revealed online. \name decomposes it into two coupled problems: {\color{red}(1) raising request goodput by assigning pipeline stages $x_k^{(\ell)}$ and forming request batches $\mathcal R_k^{(\ell)}$ under SLO and capacity constraints; (2) reducing iteration duration $\max_{\ell} T_k^{(\ell)}$---chiefly generation time $T_{\mathsf G}$ and attention and FFN times $T_A$, $T_F$}.
+
+% {\color{red}\name divides the global objective into a scheduling problem---assigning stages and batches to lanes---and an execution problem---running each batch efficiently on the GPU--NPU backends.}
+%The mechanisms of \S~\ref{sec:schedule_prefill}--\S~\ref{sec:draft_verify} instantiate this objective per stage; \S~\ref{sec:pipeline_schedule} presents the lane-assignment policy coupling them.
+\begin{comment}
+\noindent \textbf{Design Goals.} 
+\name organizes execution as two logical lanes over one physical GPU and one QNN backend (Fig.~\ref{fig:operator_timeline}), with each lane executing a \emph{batch} of requests instead of a single request to enhance resource utilization.
+At each scheduling iteration $t$, lane $\ell\in\{0,1\}$ is assigned a stage $x_t^{(\ell)}\in\{\mathsf{P},\mathsf{G},\mathsf{V},\mathsf{I}\}$, where $\mathsf{I}$ means the lane is idle, and a set of requests $\mathcal R_t^{(\ell)}$. For a non-idle lane,
+\begin{equation}
+\mathcal R_t^{(\ell)}\subseteq\mathcal Q_{x_t^{(\ell)}},
+\qquad
+\mathcal R_t^{(0)}\cap\mathcal R_t^{(1)}=\varnothing,
+\label{equ:lane_request_sets}
+\end{equation}
+and $\mathcal R_t^{(\ell)}=\varnothing$ when $x_t^{(\ell)}=\mathsf{I}$. 
+We seek the scheduling policy and optimization for $\{\mathsf{P},\mathsf{G},\mathsf{V}\}$ stages that maximizes the system \emph{steady-state token goodput}~\cite{Zhang2026JITServe}, defined as the number of tokens satisfying TTFT/TPOT SLOs per unit wall-clock time, or mathematically:
+\begin{equation}
+\begin{aligned}
+\underset{\boldsymbol{\mathcal R},\mathsf P, \mathsf G, \mathsf V}{\operatorname{argmax}}\quad
+& \liminf_{N\rightarrow\infty}\frac{\displaystyle\sum_{t=1}^{N}\sum_{\ell=0}^{1}|Y(\mathcal R_t^{(\ell)}) |}{\displaystyle\sum_{t=1}^{N}\max_{\ell\in\{0,1\}}{ \widehat T^{(\ell)}(\boldsymbol{\mathcal R}_t^{(\ell)})}} 
+\end{aligned}
+\label{equ:global_goodput}
+\end{equation}
+where $Y\!\bigl(\boldsymbol{\mathcal{R}}_t^{(\ell)}\bigr)$ is the number of SLO-compliant output tokens of pipeline~$\ell$ under $\boldsymbol{\mathcal{R}}_t^{(\ell)}$, and $\widehat{T}^{(\ell)} \!\bigl(\boldsymbol{\mathcal{R}}_t^{(\ell)}\bigr)$ is the corresponding per-iteration execution time of pipeline~$\ell$.
+% Directly optimizing Eq.~\eqref{equ:global_goodput} is impractical because request arrivals, accepted lengths, and execution time are only revealed online. \name therefore decomposes the global objective into two part, schedule and execution
+\end{comment}
+
+% todo check ref
+
+\subsection{Dual-Lane Pipeline Scheduling}  \label{sec:pipeline_schedule}
+The scheduler maximizes goodput by batching the most urgent requests and assigning them to the two pipeline lanes without excessively blocking others.
+%Scheduling maximizes goodput by jointly accommodating more urgent requests in batches and assigning them to the two pipeline lanes without excessively blocking other requests.
+
+%\subsubsection{Request Batching} \label{sec:batching}
+\subsubsection{Deadline-Aware Request Batching} \label{sec:batching}
+We first describe how \name batches SLO-constrained requests while efficiently utilizing available capacity.
+%We first describe how \name batching prioritized requests with limited SLO while efficiently utilizing the available capacity.
+
+\noindent\textbf{Prefill batching with TTFT-aware EDF.} \label{sec:batching_prefill}
+%Requests waiting in the prefill queue differ in arrival time, prompt length, and TTFT target, serving them in arrival order can risks TTFT SLO violations. {\color{blue} \name thereby orders them by TTFT-aware EDF policy, with requests having the minimum remaining time to the TTFT deadline served first. A prompt is partitioned into chunks of at most $c_{M-1}$ token rows, matching the largest steady-state graph. Only each request's next unfinished chunk is eligible, later chunks becoming ready once the current one updates the target KV cache.  Let $a_i^P$ be the arrival time of request $i$ and $S_i^{\mathrm{TTFT}}$ its TTFT SLO, then the remaining time to TTFT deadline at batching time $t$ is given by
+Requests waiting in the prefill queue differ in arrival time, prompt length, and TTFT requirement, so serving them in arrival order risks TTFT SLO violations. \name instead applies a TTFT-aware EDF policy, serving requests with the least remaining time to their TTFT deadline first. A prompt is partitioned into chunks of at most $c_{M-1}$ token rows, matching the largest steady-state QNN graph capacity. Only each request's next unfinished chunk is eligible, and later chunks become ready once the current one updates the target KV cache.
+Let $a_{\mathsf P, i}$ be the arrival time of request $i$ and $S_i^{\mathrm{TTFT}}$ its TTFT SLO. The remaining time to the TTFT deadline at batching time $t$ is
+\begin{equation}\sigma_{\mathsf P,i}(t)=s_i^{\mathrm{TTFT}}-(t-a_{\mathsf P,i}).
+\label{equ:prefill_slack}
+\end{equation}
+
+Ready chunks are ordered by increasing $\sigma_{\mathsf P,i}(t)$, ties broken by arrival, and packed until the next chunk would exceed $C}$ or its paired {\color{blue}context bound $H$.}
+Rather than leaving residual capacity of the fixed-shape QNN graph as padding, \name exposes it to the value-maximal subtree packer (\S~\ref{sec:draft_verify}), which fills it with verification nodes from $\mathcal Q_{\mathsf V}$ under the remaining token-row and context budgets.
+Once all chunks of request $i$ complete, the final pass initializes its target KV cache and commits its first token, anchoring TTFT wholly to prefill, and the request moves to $\mathcal Q_{\mathsf G}$ for draft generation.
+By serving nearest-deadline requests first, \name favors those closest to infeasibility, reducing avoidable TTFT violations when prefill demand exceeds capacity.
+%are ordered by {\color{blue} decreasing} $\sigma_{\mathsf P,i}(t)$, ties broken by arrival, and packed until the next chunk would exceed $c_{M-1}$ or its paired context bound $h_{M-1}$. After packing these chunks, rather than leaving residual capacity of the fixed-shape QNN graph as padding, \name exposes it to the value-maximal subtree packer (\S~\ref{sec:draft_verify}), which fills it with verification nodes from $\mathcal Q_{\mathsf V}$ under the remaining token-row and context budgets. Subsequently, at the request level, once all chunks of request $i$ complete, the final pass initializes its target KV cache and commits its first token---anchoring TTFT wholly to prefill---and the request moves to $\mathcal Q_{\mathsf G}$ for draft generation. By serving smallest timdeadline requests first, \name favors those nearest infeasibility while weighting residual work, reducing avoidable TTFT violations when prefill demand exceeds capacity.
+
+\noindent\textbf{Generation batching with TPOT-aware EDF.}\label{sec:schedule_generate}
+% The sliding-window drafter selected in \S~\ref{sec:draft_analysis} reduces each request's KV-cache and attention footprint, allowing a fixed aggregate attention budget $H$ to admit more requests per drafting batch. 
+Since drafting time directly consumes a request's TPOT budget, \name schedules generation by next-token deadline rather than a speculative deadline shared by several accepted tokens.
+This choice reflects that expected acceptance length is hard to estimate reliably during $\mathsf G$, whereas the drafter's high throughput (\S~\ref{sec:draft_analysis}) rarely makes drafting the bottleneck of the speculative process.
+After prefill or verification of its previous tree, an unfinished request joins $\mathcal Q_{\mathsf G}$ at time $a_{\mathsf G, i}$, while a request already drafting or awaiting verification is not re-enqueued. Analogous to \S~\ref{sec:batching_prefill}, the remaining time to the TPOT deadline is
+\begin{equation}
+\sigma_{\mathsf G,i}(t)=S_i^{\mathrm{TPOT}}-\Bigl(t - a_{\mathsf G, i} \Bigr),
+\quad
+\label{equ:g_slack}
+\end{equation}
+where $S_i^{\mathrm{TPOT}}$ is its TPOT SLO. Requests with the smallest $\sigma_{\mathsf G,i}(t)$ are served first, and each completed draft tree proceeds to the verification queue $\mathcal Q_{\mathsf V}$.
+%where $s_i^{\mathrm{TPOT}}$ is TPOT SLO. Requests with the lowest scores are served first, and upon completing the generation phase, the draft tree proceeds to the verification queue $Q_\mathsf V$ for subsequent execution.
+
+\noindent\textbf{Verification batching via value-maximal subtree packing.} \label{sec:batching_verify}
+Each request $i\in\mathcal Q_{\mathsf V}$ holds a ready draft tree $\mathcal T_i$ with $B_i$ nodes. Rather than verifying all of $\mathcal T_i$, the scheduler may submit any rooted subtree, i.e., a node subset of size $e\in\mathcal E_i=\{0,1,\ldots,B_i\}$ closed under the parent relation, where $e=0$ defers request $i$ to a later iteration and $e=B_i$ verifies the full tree.
+Among $e$-node subtrees, we submit the optimal $\widehat {\mathcal T}_{i,e}$ maximizing the expected acceptance length $\Psi(\cdot)$,
+\begin{equation}
+\Psi (\widehat {\mathcal T}_{i,e})=
+\begin{cases}
+1+\sum_{u\in \widehat {\mathcal T}_{i,e}}\mathcal P(u), & e>0,\\[2pt]
+0, & e=0,
+\end{cases}
+\label{equ:verify_value}
+\end{equation}
+where $\mathcal P(u)$ denotes the cumulative draft path probability of node $u$ and the additive $1$ accounts for the bonus token that every verification emits regardless of acceptance. Crucially, $\Psi(\cdot)$ is cheap to evaluate {\color{red}(during verification)}. Since a node can be accepted only if its parent is, $\mathcal P(u)$ is non-increasing along every root-to-leaf path, so the maximum is attained by the $e$ nodes of largest $\mathcal P(u)$ (ties broken parent-first), which automatically form a rooted subtree.
+% todo cite OPT-Tree
+A single descending sort thus yields $\Psi (\widehat {\mathcal T}_{i,e})$ for all $e$, and the non-increasing marginal gains make $\Psi (\widehat {\mathcal T}_{i,e})$ concave in $e$. Given a capacity pair $(C,H)$, the packer maximizes the committed tokens  per iteration
+\begin{equation}
+\begin{aligned}
+\operatorname{OPT}_j=\max_{\{e_i\}}\quad
+&\sum_{i\in\mathcal Q_V} \Psi (\widehat {\mathcal T}_{i,e}) \\
+\mathrm{s.t.}\quad
+&\sum_{i\in \mathcal Q_V} e_i\leq C,
+\ 
+\sum_{i\in\mathcal Q_V} \mathbbm 1_{e_i>0}\,(n_i+e_i)\leq H,\\
+&e_i\in\mathcal E_i,\quad i\in\mathcal Q_V.
+\end{aligned}
+\label{equ:verify_opt}
+\end{equation}
+where $n_i$ is the context length of request $i$ and $\mathbbm 1$ the indicator function; the first constraint bounds the QNN's verification capacity and the second the attention context.
+%where $n_i^c$ is the context length of request $i$ and $\mathbbm 1$ is indicator function, with the first constraint bounds the QNN's verification capacity and the second bounds the attention context.
+
+% todo with nonindent textbf
+\noindent\textbf{Solving all buckets with one table.}
+Eq.~\eqref{equ:verify_opt} is a multiple-choice two-dimensional knapsack, NP-hard in general yet exactly solvable here in pseudo-polynomial time:  the token-row capacity $C$ is small, while the context dimension $H$ is coarsened into blocks to bound the state space. With $N_{\mathsf V}=|\mathcal Q_{\mathsf V}|$ ready requests, let $\mathrm{DP}_i(c,h)$ denote the maximum value attainable by the first $i$ requests under residual capacities $(c,h)$. From $\mathrm{DP}_0(c,h)=0$,
+\begin{equation}
+\resizebox{0.91\linewidth}{!}{$\displaystyle
+\mathrm{DP}_i(c,h)=\!
+\max_{\substack{e\in\mathcal E_i,\ e\leq c\\
+\mathbbm{1}_{e>0}(n_i+e)\leq h}}\!
+\left\{
+\mathrm{DP}_{i-1}\!\left(c\!-\!e,\,
+h\!-\!\mathbbm{1}_{e>0}(n_i\!+\!e)\right)
++\Psi\!\left(\widehat{\mathcal T}_{i,e}\right)
+\right\}.
+$}
+\label{equ:verify_dp}
+\end{equation}
+
+A single table filled to the largest capacity bucket $(c_{M-1},h_{M-1})$ costs $O\bigl(c_{M-1}\,h_{M-1}\sum_i B_i\bigr)$ time and yields $\operatorname{OPT}_j=\mathrm{DP}_{N_{\mathsf V}}(c_j,h_j)$ for every bucket $j$. It remains to choose which bucket to launch. Since attention and QNN execution overlap, an iteration's latency is the maximum of the two, and \name selects the bucket with the highest expected token rate,
+\begin{equation}
+j^*=\arg\max_{0\leq j<M}
+\frac{\mathrm{DP}_{N_{\mathsf V}}(c_j,h_j)}
+{\max\bigl\{T_{\mathsf A}(h_j),\,T_{\mathsf Q}(c_j)\bigr\}},
+\label{equ:verify_bucket}
+\end{equation}
+where $T_{\mathsf A}(\cdot)$ and $T_{\mathsf Q}(\cdot)$ are profiled latency of attention and FNN stages. The subtrees selected under bucket $(C,H)=(c_{j^*},h_{j^*})$ are verified jointly with batched tree attention; each request commits its accepted path, releases its remaining draft state, and re-enters $\mathcal Q_{\mathsf G}$ unless decoding has terminated.
+
+% todo: section title 
+\subsubsection{Two-Lane Pipeline} \label{sec:pipeline_schedule}
+The scheduler multiplexes prefill, generation, and verification across two logical lanes sharing one GPU--NPU pair; its lane-assignment rules, summarized in Table~\ref{tab:lane_schedule}, balance request flow across stages to protect SLOs.
+%The pipeline scheduler multiplexes prefill, generation, and verification across two logical lanes sharing one GPU--NPU pair, making lane-local scheduling decisions to balance the request flow across stages,  thereby improving SLO attainment. The specific scheduling decisions are summarized in Table~\ref{tab:lane_schedule}.
+
+\newcommand{\zlo}{\ensuremath{Z^{-}}}
+\newcommand{\zhi}{\ensuremath{Z^{+}}}
+% Normal-sized interval
+\newcommand{\zcell}[1]{%
+\makebox[0.80cm][c]{\ensuremath{#1}}%
+}
+% Smaller middle interval with explicit spacing around the comma
+\newcommand{\zmid}{%
+\makebox[0.80cm][c]{%
+  \ensuremath{\scriptstyle[Z^{-}\mkern-1mu,\mkern2mu Z^{+}]}%
+}%
+}
+
+\begin{table}[t]
+\caption{Lane scheduling policy.}
+\vspace{-10pt}
+\label{tab:lane_schedule}
+\centering
+\resizebox{0.98\linewidth}{!}{%
+\setlength{\tabcolsep}{0.6pt}
+\renewcommand{\arraystretch}{1.06}
+\footnotesize
+\begin{tabular}{@{}ccccc@{\hspace{2pt}}|@{\hspace{2pt}}ccccc@{}}
+\toprule
+$\boldsymbol{\mathcal Q_{\mathsf P}}$ & $\boldsymbol{\mathcal Q_{\mathsf G}}$ & $\boldsymbol{\mathcal
+Q_{\mathsf V}}$ & $\boldsymbol{Z_k}$ & \textbf{Lanes} & $\boldsymbol{\mathcal Q_{\mathsf P}}$ & $
+\boldsymbol{\mathcal Q_{\mathsf G}}$ & $\boldsymbol{\mathcal Q_{\mathsf V}}$ & $\boldsymbol{Z_k}$ &
+\textbf{Lanes} \\
+\midrule
+\ding{51} & \ding{51} & $\varnothing$ & -- & $\mathsf P\mid\mathsf G$ & $\varnothing$ & \ding{51} &
+\ding{51} & \zcell{[0,\zlo)} & $\mathsf G\mid\mathsf G$ \\
+\ding{51} & $\varnothing$ & \ding{51} & -- & $\mathsf P\mid\mathsf V$ & $\varnothing$ & \ding{51} &
+\ding{51} & \zmid & $\mathsf G\mid\mathsf V$ \\
+\ding{51} & \ding{51} & \ding{51} & \zcell{[0,\zlo)} & $\mathsf P\mid\mathsf G$ & $\varnothing$ & \ding{51}
+& \ding{51} & \zcell{(\zhi,\infty)} & $\mathsf V\mid\mathsf V$ \\
+\ding{51} & \ding{51} & \ding{51} & \zmid & $\mathsf P\mid\mathsf V$ & $\varnothing$ & \ding{51} & $
+\varnothing$ & -- & $\mathsf G\mid\mathsf G$ \\
+\ding{51} & \ding{51} & \ding{51} & \zcell{(\zhi,\infty)} & $\mathsf P\mid\mathsf V$ & $\varnothing$ & $
+\varnothing$ & \ding{51} & -- & $\mathsf V\mid\mathsf V$ \\
+\ding{51} & $\varnothing$ & $\varnothing$ & -- & $\mathsf P\mid\mathsf P$ & $\varnothing$ & $\varnothing$ &
+$\varnothing$ & -- & $\mathsf I\mid\mathsf I$ \\
+\bottomrule
+\end{tabular}%
+}
+\end{table}
+
+\noindent\textbf{Prefill-first scheduling.} \label{sec:schedule_prefill}
+Prefill lies directly on the TTFT critical path, as an admitted request cannot emit its first token or enter speculative decoding until all of its prompt chunks complete, so delaying prefill inflates TTFT without contributing any output progress. \name  reserves at least one lane for $\mathsf P$ whenever $\mathcal Q_{\mathsf P}\neq\varnothing$. The peer lane meanwhile serves decode work so that protecting TTFT never stalls ongoing requests. We run an executable $\mathsf G$ or $\mathsf V$ phase whenever either queue is nonempty, and fall back to a disjoint prefill batch ($\mathsf P\mid\mathsf P$) when both decode queues are empty.
+%Prefill lies directly on the TTFT critical path: an admitted request cannot produce its first token or enter speculative decoding until all of its prompt chunks have completed. Delaying prefill increases TTFT without contributing any output progress, and hence \name reserves at least one lane for $\mathsf P$ whenever $\mathcal Q_{\mathsf P}\neq\varnothing$ to protect the TTFT SLO, as summarized in Table~\ref{tab:lane_schedule}. Meanwhile, the peer lane continues serving decode work to ensure that protecting TTFT does not stall ongoing requests: the scheduler assigns it to an executable $\mathsf G$ or $\mathsf V$ phase whenever either queue is nonempty, or falls back to a disjoint prefill batch, yielding the $\mathsf P\mid\mathsf P$ configuration, when both decode queues are empty. 
+
+\noindent\textbf{Inventory-regulated decoding.} \label{sec:schedule_decode}
+Decoding requests continuously iterate between the generation and verification stages until completion, forming the request transition $Q_\mathsf G\rightarrow Q_\mathsf V \rightarrow Q_\mathsf G\rightarrow\cdots$, which allows us to model the two stages as a producer--consumer system over the draft ready-tree inventory $Z_k=\mid \!Q_V\!\mid$.
+% After its final prefill chunk completes, an unfinished request cycles through the dependency chain $\mathsf G\rightarrow\mathsf V\rightarrow\mathsf G\cdots$, where generation publishes complete draft trees to $\mathcal Q_{\mathsf V}$, while verification consumes ready trees and returns the request to $\mathcal Q_{\mathsf G}$. We can model the two stages as a producer--consumer system over the ready-tree inventory $Z_t$.
+If iteration $k$ produces $m_{\mathsf G,k}$ trees and consumes $m_{\mathsf V,k}$, then the inventory will update to
+\begin{equation}
+Z_{k+1}=Z_k+m_{\mathsf G,k}-m_{\mathsf V,k}.
+\label{equ:inventory_dynamics}
+\end{equation}
+Thus, we should stabilize the inventory within an optimal regime $[Z^-, Z^+]$ to avoid the pitfalls of both extremes: low $Z_k$ leaves the verification lane unable to fill its QNN bucket, while excess inventory makes trees wait before verification, inflating TPOT and delaying each request's return to $\mathsf G$.
+% Both extremes of the inventory hurt goodput. Low $Z_k$ leaves the verification lane unable to fill its QNN bucket, while excess inventory makes trees wait before verification, inflating TPOT and delaying each request's return to $\mathsf G$. \name regulates $Z_k$ with a hysteresis band $[Z_{\mathrm{low}},Z_{\mathrm{high}})$. 
+As Table~\ref{tab:lane_schedule} summarizes, both lanes replenish trees ($\mathsf G\mid\mathsf G$) when $Z_k<Z^-$, both drain ($\mathsf V\mid\mathsf V$) when $Z_k> Z^+$, and otherwise produce and consume concurrently ($\mathsf G\mid\mathsf V$). 
+{\color{red}
+% The band, unlike a single setpoint, avoids thrashing near a threshold. Specifically, we set $Z^-$ to one verification batch and $Z^+$ to the queueing delay the TPOT SLO permits.
+A band,} unlike a single setpoint, avoids thrashing near a threshold. Specifically, we set $Z^-$ to the consumed trees per verification batch with proportional safety margin, which is $Z^-=(1+\delta)m_{\mathsf V,k}$, where $m_{\mathsf V,k}$ is tracked as empirical average over an interval. Meanwhile, $Z^+$ is set to $(2+\delta)m_{\mathsf V,k}$, since the interleaved pipeline execution enables timely inventory turnover. 
+
+
+% todo: warm up
+\subsection{Dual Pipeline Execution}  \label{sec:pipeline_execution}
+\name decomposes the drafter and target LLM into operators mapped to their preferred backends: attention, which requires high-precision {\color{red}(fp16)} arithmetic over the KV cache, runs on the GPU via the OpenCL runtime, while the compute-intensive yet quantization-tolerant FFN runs on the NPU as precompiled QNN graphs. {\color{red}This heterogeneous mapping lets the two lanes overlap, directly reducing the per-iteration time $\max_\ell\widehat T_k^{(\ell)}$ in Eq.~\eqref{equ:global_goodput}.}
+
+\subsubsection{Execution-Time Model and Capacity Buckets} \label{sec:execution_lane}
+Within each Transformer layer $l$, a batch alternates between the GPU attention operator $A_l$ and the QNN FFN operator $F_l$, while the CPU asynchronously prefetches KV caches and QNN graphs. Since the two lanes run in antiphase---one lane's attention overlapping the other's FFN---the wall-clock time of a lane pair, instantiating $\max_\ell\widehat T_k^{(\ell)}$ in Eq.~\eqref{equ:global_goodput}, is
+\begin{equation}
+\begin{aligned}
+\widehat T_k =
+T_{\mathsf C} +
+\sum_{l} & \max_{\ell}\!\left\{T_{A_l}\!\left(\mathcal R^{(\ell)}_k\right), T_{F_l}\!\left(\mathcal R^{(1-\ell)}_k\right)\right\} \\ +
+\sum_{l} & \max_{\ell}\!\left\{T_{F_l}\!\left(\mathcal R^{(\ell)}_k\right), T_{A_l}\!\left(\mathcal R^{(1-\ell)}_k\right)\right\},
+\end{aligned}
+\label{equ:duallane_round}
+\end{equation}
+where $T_{\mathsf C}$ is CPU orchestration cost and uncovered offload, prefetch latency, while the two sums cover the layer phases with swapped attention/FFN roles. Whenever the arguments of a $\max\{\cdot\}$ differ, the slack surfaces as a \emph{pipeline bubble}.
+
+Maximizing goodput requires shrinking both stage times and bubbles. Operator timelines in {\color{red}Fig.~\ref{fig:operator_timeline}} show QNN-side operators account for {\color{red}XX\%--XX\%}  % todo: check
+of critical-path time across evaluated context lengths. We can bound the QNN cost first, then size the paired attention workload.
+As Fig.~\ref{fig:qnn_chunk_scaling} exhibits, QNN throughput of the Qwen3-1.7B FFN graph reaches a knee at {\color{red}xx} token rows; beyond it, larger compiled capacities gain under {\color{red}xx\%} throughput while inflating latency and resident-graph memory. 
+{\color{blue}
+Therefore, we anchor the compiled capacity $c_{M-1}$ at saturation point, enabling \name to maximize execution efficiency.
+}
+{\color{red}
+Specifically, let $\{c_j\}_{j=0}^{M-1}$ (e.g., ${1, \!32, \!128, \!\cdots}$) (place in previous subsection)} be the fixed token-row capacities of the precompiled QNN graphs in ascending order, including typical smaller budgets reserved for warm-up and drain phases. We pair each $c_j$ with the largest attention budget $h_j$ whose time hides behind the peer's QNN stage, subject to the OpenCL buffer limit(less than 1GB/buffer):
+\begin{equation}
+h_j=\max\left\{h \,\middle|\, T_{\mathsf A}(h)\le T_{\mathsf Q}(c_j),\operatorname{Buf}_{\mathsf A}(h)\le1GB \right\},
+\label{equ:lane_capacity}
+\end{equation}
+where $\operatorname{Buf}_{\mathsf A}(h)$ denotes the largest OpenCL buffer required by attention at budget $h$.
+The constraint collapses each $\max\{\cdot\}$ in Eq.~\eqref{equ:duallane_round} to its QNN term, eliminating the attention bubbles. %by construction. 
+
+
+\subsubsection{Efficient Draft Generation} \label{sec:execution_draft}
+The pipeline time $\widehat T_k$ decomposes into prefill, generation $T_{\mathsf G}$, and verification $T_{\mathsf V}$ delays. This section targets $T_{\mathsf G}$: a compact drafter and an early-stopping policy that together shorten drafting without sacrificing accepted length.
+%The overall execution time of the pipeline $\widehat T_k^{(\ell)}$ can be attributed of the delay of prefill, generation $T_\mathsf G$, and verification $T_\mathsf V$. This section addresses what the drafter generation produces: describe the compact on-device drafter and how it generates the draft trees consumed by verification.
+
+
+%{\color{blue}\noindent\textbf{Locality-driven sliding-window drafter} We find that compact model on mobile device models exhibit distinct attention capturing from the colossal LLMs in \S~\ref{sec:oppo_draft}, as it exhibits strong attention locality. We can harness this property to re-design the drafter by using a sliding window $w$ of only recent tokens to fit target model's language style. Without loss of generality, we follow EAGLE-3~\cite{li2025eagle3} to construct our drafter by only feeding recent $w$ tokens, which shrinks both its KV-cache footprint and per-step attention cost thereby supplying more drafts and freeing up resources for target model.}
+
+\noindent\textbf{Locality-driven sliding-window drafter.}
+As observed in \S~\ref{sec:oppo_draft}, compact drafters attend differently from colossal LLMs, as their attention concentrates heavily on recent tokens. We harness this locality by restricting the drafter to a sliding window of the $w$ most recent tokens---sufficient to track the target model's language style. Following EAGLE-3~\cite{li2025eagle3}, without loss of generality, for the drafter architecture, this truncation shrinks both the KV-cache footprint and the per-step attention cost, supplying more drafts per unit time while freeing memory and compute for the target model.
+
+\noindent\textbf{Break-even analysis of window truncation.} \label{sec:draft_analysis}
+The end-to-end impact of truncation is hard to quantify directly, as batch latency is entangled with context length and the runtime scheduling policy. We instead analyze the per-token latency, which amortizes one round of drafting and verification over the tokens it accepts:
+\begin{equation}
+\operatorname{TPOT}(w)=\frac{D\,T_{\mathsf G}(w)+T_{\mathsf V}}{\tau(w)},
+\label{equ:window_tpot}
+\end{equation}
+where $D$ is the number of drafting steps per iteration, $T_{\mathsf G}(w)$ the per-step drafting latency with attention window $w$, $T_{\mathsf V}$ the target verification latency, and $\tau(w)$ the expected accepted length. Since the target's output distribution must remain provably intact, $T_{\mathsf V}$ admits only system-level optimization. 
+
+Relative to the full-context drafter $w_0$, a window $w$ trades acceptance for drafting speed. We capture this with the acceptance ratio, drafter speedup, and the drafting-to-verification time ratio under $w_0$:
+\begin{equation}
+ r_A(w)=\frac{\tau(w)}{\tau(w_0)},
+ \ 
+ r_G(w)=\frac{T_{\mathsf G}(w_0)}{T_{\mathsf G}(w)},
+ \ 
+ \rho_0=\frac{D\,T_{\mathsf G}(w_0)}{T_{\mathsf V}}.
+\label{equ:window_ratios}
+\end{equation}
+With the tree shape held fixed ($T_{\mathsf V}$ unchanged), the throughput gain is
+\begin{equation}
+\Gamma(w;w_0)=\frac{\operatorname{TPOT}(w_0)}{\operatorname{TPOT}(w)}
+ =r_A(w)\,\frac{1+\rho_0}{1+\rho_0/r_G(w)}.
+\label{equ:window_gain}
+\end{equation}
+Truncation pays off only when $\Gamma(w;w_0)>1$, i.e.,
+\begin{equation}
+r_G(w)>\frac{\rho_0}{r_A(w)(1+\rho_0)-1},
+\quad
+r_A(w)>\frac{1}{1+\rho_0},
+\label{equ:window_break_even}
+\end{equation}
+where the second condition bounds the tolerable acceptance loss: beyond it, no speedup can compensate. Eq.~\eqref{equ:window_gain} also reveals when truncation matters---as $\rho_0$ grows, $\Gamma \to r_A r_G$, whereas as $\rho_0 \to 0$, $\Gamma \to r_A$; the window helps precisely in the drafting-bound regime that on-device serving occupies. We therefore profile $\tau(w)$ and $T_{\mathsf G}(w)$ offline over candidate windows and select the feasible $w^*$ maximizing $\Gamma$ (Table~\ref{tab:window_tradeoff} shows result on CPU backend, validating the feasibility of this approach).
+
+\begin{table}[t]
+\caption{{Sliding-window trade-off on Qwen3-1.7B using MNN CPU inference ($K/D/B=10/7/32$).}}
+\label{tab:window_tradeoff}
+\centering
+\setlength{\tabcolsep}{5pt}
+\begin{tabular}{ccccc}
+\toprule
+\textbf{Window} & $\boldsymbol{T_\mathsf G}$ (ms) & $\boldsymbol{T_\mathsf V}$ (ms) &
+$\boldsymbol{\tau}$ & $\boldsymbol{\Gamma}$ \\
+\midrule
+$w_0$ (full) & {\color{red}XX} & {\color{red}XX} & {\color{red}XX} & $1.00$ \\
+$64$         & {\color{red}XX} & {\color{red}XX} & {\color{red}XX} & {\color{red}XX} \\
+$128$        & {\color{red}XX} & {\color{red}XX} & {\color{red}XX} & {\color{red}XX} \\
+$256$        & {\color{red}XX} & {\color{red}XX} & {\color{red}XX} & {\color{red}XX} \\
+$512$        & {\color{red}XX} & {\color{red}XX} & {\color{red}XX} & {\color{red}XX} \\
+$768$        & {\color{red}XX} & {\color{red}XX} & {\color{red}XX} & {\color{red}XX} \\
+$1024$       & {\color{red}XX} & {\color{red}XX} & {\color{red}XX} & {\color{red}XX} \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+
+\noindent\textbf{Probability-thresholded branch stopping.}
+\begin{table}[t]
+\caption{Stopping signals for dynamic-tree methods.}
+\vspace{-10pt}
+\label{tab:signals}
+\centering
+\footnotesize
+\setlength{\tabcolsep}{3pt}
+\renewcommand{\arraystretch}{1.18}
+\resizebox{1.0\columnwidth}{!}{%
+\begin{tabular}{@{}>{\centering\arraybackslash}m{0.38\columnwidth}!{\vrule width 0.45pt}>{\raggedright\arraybackslash}m{0.64\columnwidth}@{}}
+\toprule
+\textbf{Formula} & \textbf{Explanation} \\
+\midrule
+\makebox[\linewidth][c]{\ensuremath{p(u)}} &
+\textbf{(Basic Metrics) Node Probability.} \newline
+$p(u)$: conditional probability of node $u$. \\
+\hline
+\makebox[\linewidth][c]{\ensuremath{\displaystyle \mathcal P(u)=\mathcal P\!\left(\operatorname{pa}(u)\right)p(u)}} &
+\textbf{(Eagle-2 Metrics) Cumulative Probability.} \newline 
+$\operatorname{pa}(u)$: parent node of node $u$. \\
+\hline
+\makebox[\linewidth][c]{%
+\scalebox{0.92}{$\displaystyle
+\operatorname{Ent}(u)=-\sum_{a\in\mathcal V}\mathbf{z}_u[a]\log \mathbf{z}_u[a]$}%
+} &
+\textbf{(SVIP Metrics) Entropy.} \newline 
+$\mathbf z_u[a]$: probability of token $a$ in vocabulary $\mathcal V$. \\
+\hline
+\makebox[\linewidth][c]{\ensuremath{\displaystyle \operatorname{PSL}_{d}=\sum_{v\in\mathcal L_{d}^{K}}\mathcal P(u)}} &
+\textbf{(DEAGLE Metric) Top-$K$ Leaf Probability}. \newline
+$\mathcal L_d^K$: selected K leaves' nodes. \\
+\hline
+\makebox[\linewidth][c]{\ensuremath{\displaystyle \operatorname{SM}_{d}=\frac{\operatorname{PSL}_{d}}{\operatorname{PSL}_{d-1}}}} &
+\textbf{(DEAGLE Metric) Survival Momentum.} \newline
+Adjacent-depth cumulative probability drop. \\
+\hline
+\makebox[\linewidth][c]{\ensuremath{\displaystyle \Psi(\mathcal T(d))=1+\sum_{u\in\mathcal T(d)}\mathcal P(u)}} &
+\textbf{(DEAGLE Metric) Expected Accept Length.} $\mathcal T(d)$: draft tree after $d$ step draft process. \\
+\hline
+\makebox[\linewidth][c]{\ensuremath{\displaystyle \operatorname{MG}(u)=p(u^{1})-p(u^{2})}} &
+\textbf{(Basic Metric) Node Margin.} \newline
+$p(u^j)$: top-$j$ child probability of node $u$. \\
+\hline
+\makebox[\linewidth][c]{\ensuremath{\displaystyle \operatorname{FR}(u)=\operatorname{rank}(u)}} &
+\textbf{(Basic Metric) Frontier Rank.} \newline
+Expansion rank of node $u$'s branch. \\
+\bottomrule
+\end{tabular}
+}
+\end{table}
+
+\begin{figure}[t]
+  \centering
+  \resizebox{0.99\columnwidth}{!}{%
+      \includegraphics{img/design/posterior-result.pdf}%
+  }
+  \vspace{-10pt}
+  \caption{Posterior Signals across Different Threshold Percentiles.}
+  \label{fig:posterior-result}
+\end{figure}
+
+\begin{figure}[t]
+  \centering
+  \resizebox{0.98\columnwidth}{!}{%
+      \includegraphics{img/design/draft-ecdf/draft-ecdf-depth4.pdf}%
+  }
+  \vspace{-10pt}
+  \caption{ECDFs for stopping signals.}
+  \label{fig:draft-ecdf}
+\end{figure}
+
+
+
+% Existing methods determine when to terminate draft tree's expansion using signals of varied design, such as SVIP's entropy~\cite{zhang2025svip} and DEAGLE's probability sum of the top-$K$ leaves, survival momentum, and expected accepted length~\cite{deagle2025}. 
+{\color{blue}
+Existing methods determine when to terminate draft tree's expansion using signals of varied design 
+as mentioned in \S~\ref{sec:spec}, yet, their reported results may show a non-negligible loss in accepted length. 
+Leveraging prior draft traces from a sampled GSM8K dataset, we analyze the candidate signals  whose definitions are tabulated in Table~\ref{tab:signals}, and present the results in Fig.~\ref{fig:posterior-result}. Notably, only cumulative path probability $\mathcal P(\cdot)$ and expected accepted length $\Psi(\cdot)$ consistently achieve a favorable trade-off between draft-tree size and acceptance performance, whereas the other signals tend to degenerate toward two undesirable extremes: overly aggressive pruning with low acceptance or excessive expansion with marginal gains.
+% todo: appendix
+We further examine the empirical cumulative distribution functions (ECDF) of these signals across tree depths. Figure~\ref{fig:draft-ecdf} presents the results at depth $d=4$, with other depths deferred to the {\color{red}appendix ~\ref{}). The ECDFs reveal that, $\mathcal P(\cdot)$ and $\Psi(\cdot)$ exhibit substantially stronger separation between accepted and rejected tokens than the other training-free signals. Moreover, as equation suggests that the effectiveness of $\Psi(\cdot)$ is closely tied to its dependence on $\mathcal P(\cdot)$, \name exploits this separability to early-terminate drafting, shortening the generation stage without sacrificing accepted length.
+}
+Concretely, \name adopts $\mathcal P(\cdot)$ as the branch score and determines each depth's threshold $\theta_d$ from a small profiling sample; a frontier node $u$ is expanded only when $\mathcal P(u)\geq\theta_d$.
+
+% {\color{red}shows that the {\color{red}cumulative root-to-node path probability $\mathcal P(u)$} separates accepted from unaccepted nodes far more cleanly {\color{red}(a threshold of $xx$ filters out $xx\%$ of unaccepted nodes while sacrificing only $xx\%$ of accepted nodes)}, whereas the other signals' distributions overlap substantially (results for other depths are deferred to {\color{red}the appendix}). {\color{red}\name exploits this separability to early-terminate drafting, shortening the generation stage without sacrificing accepted length.} Concretely, \name adopts $\mathcal P(u)$ as the branch score and determines each depth's threshold $\theta_d$ from a small profiling sample; a frontier node $u$ is expanded only when $\mathcal P(u)\geq\theta_d$.}
+
+\subsection{Runtime Manager} \label{sec:runtime_manager}
+Finally, we describe how the \name runtime realizes the preceding designs on mobile SoCs.
+
+\subsubsection{Budget-Bounded Memory Residency} \label{sec:memory_manager}
+% todo cite check
+%Mobile DRAM is shared by the operating system, foreground applications, and all CPU/GPU/NPU allocators, which leads to the inability of the LLM service to assume exclusive access to the device's DRAM capacity~\cite{yuan2024mobilefoundation,yin2024systemservice}. 
+% On our testbeds, the system and ordinary foreground processes consume {\color{red}[XX--XX]~GB} before model loading.
+% todo 符号修改统一
+%We therefore assign the LLM service a bounded memory budget $M_{\mathrm{budget}}$ and require every admitted request and execution plan to remain within this budget, where the core management lies in the execution state, QNN graphs, and KV caches.
+Mobile DRAM is shared by the operating system, foreground applications, and all CPU/GPU/NPU allocators, so the LLM service cannot assume exclusive access to DRAM capacity~\cite{yuan2024mobilefoundation,yin2024systemservice}. \name therefore operates under a bounded budget $M_{\mathrm{budget}}$ and keeps every admitted request and execution plan within it, managing three classes of state: pinned execution state, KV caches, and QNN graphs.
+
+
+% TODO: Insert the manually drawn memory-layout figure here.
+%\noindent\textbf{Pinned execution state.} \name pins two critical components: the compact draft model and the execution memory buffers. The former remains resident to facilitate multi-step tree drafting, while the latter are pre-allocated to maximum sizes to eliminate dynamic allocation overhead across layers and iterations.
+\noindent\textbf{Pinned execution state.}
+\name pins the compact drafter (\S~\ref{sec:execution_draft}), which must stay resident for multi-step tree drafting, and the execution buffers, pre-allocated to the worst case implied by the {\color{red}largest bucket $(c_{M-1},h_{M-1})$} to eliminate dynamic allocation across layers and iterations.
+
+%\noindent\textbf{Priority-ordered KV residency.} \name exploits the asymmetric memory footprints between KV caches and QNN graphs, where offloading QNN graphs is significantly more challenging due to their larger sizes(for Qwen3-1.7B, a single-layer QNN graph of shape $c_j=\textcolor{red}{XX}$ occupies \textcolor{red}{$XX$~MB}, whereas the corresponding KV cache of shape $h_j=\textcolor{red}{XX}$ requires only \textcolor{red}{$XX$~MB}). Furthermore, since the contexts of batched requests are bounded and processed in a priority order, \name could easy to selectively retains and prefetches KV caches for higher-priority requests,  thereby establishing KV caches as the preferred eviction targets under memory pressure. These evicted caches are subsequently prefetched back based on available headroom, overlapping with the attention and FFN computations across one or more layers.
+
+\noindent\textbf{Priority-ordered KV residency.}
+KV caches and QNN graphs have sharply asymmetric footprints. For Qwen3-1.7B, a single-layer QNN graph of capacity $c=\textcolor{red}{XX}$ occupies \textcolor{red}{$XX$~MB}, whereas the KV cache under the paired context bound $H=\textcolor{red}{XX}$ needs only \textcolor{red}{$XX$~MB}. Moreover, since batched contexts are bounded by $H$ and requests are served in the scheduler's priority order (\S~\ref{sec:schedule_prefill}), \name knows which KV caches the upcoming batch requires and selectively retains them, making lower-priority KV caches the preferred eviction targets under memory pressure. Evicted caches are prefetched back by the CPU as headroom returns, hidden behind the attention and FFN stages of one or more layers (\S~\ref{sec:pipeline_schedule}).
+
+
+%\noindent\textbf{Selective graph offload.} QNN graph swapping cannot normally be hidden by one FFN or attention stage: for Qwen3-1.7B, loading/offloading a graph of shape takes {\color{red}$XX$~ms}, whereas its QNN execution and the paired GPU attention take only {\color{red}$XX$~ms} and {\color{red}$XX$~ms}, respectively.  This substantial time disparity means that swapping a qnn graph inevitably introduces a significant bubble into the dual pipeline, hence \name treats graph offload and prefetch as a last resort, evicting a non-current graph only when the KV policy above cannot satisfy the memory budget.
+\noindent\textbf{Selective graph offload.}
+Graph swapping, by contrast, cannot hide behind a single stage. For Qwen3-1.7B, loading a graph of capacity $C=\textcolor{red}{XX}$ takes {\color{red}$XX$~ms}, whereas its QNN execution and the paired GPU attention take only {\color{red}$XX$~ms} and {\color{red}$XX$~ms}, so a swap necessarily opens a bubble in the dual-lane pipeline (Eq.~\eqref{equ:duallane_round}). \name thus treats graph offload as a last resort, evicting only graphs outside the active configuration---typically the smaller warmup and draining buckets $c_j<c_{M-1}$ once steady state is reached---and only when the KV policy alone cannot meet.
+
+{\color{red}
+\subsubsection{QNN W4}
+
+\label{sec:runtime_qnn_w4}
+% \noindent\textbf{QNN's supported encoding must not erase asymmetry.}
+% Our target model stores linear-layer weights using asymmetric W4 quantization with group size $G=64$. Each group has its own scale and zero point, whereas the validated QNN MatMul path combines a signed fixed-point weight tensor with BLOCK scale metadata and an integer offset of zero. Directly mapping the unsigned codes onto this path would therefore discard the asymmetric term; falling back to a dense floating-point weight tensor would instead forfeit low-precision NPU execution. We preserve the original dequantized weight exactly. For input channel $k$, output channel $n$, and group $g(k)=\lfloor k/G\rfloor$, the weight is
+% \begin{equation}
+% W_{k,n}=\bigl(q_{k,n}-z_{g(k),n}\bigr)s_{g(k),n},
+% \qquad q_{k,n}\in[0,15],
+% \label{equ:qnn_w4_dequant}
+% \end{equation}
+% where $s_{g,n}$ and $z_{g,n}$ are the scale and zero point of a group. We translate the unsigned code into a signed carrier $a_{k,n}=q_{k,n}-8$ and retain the displaced asymmetric term as $d_{g,n}=(8-z_{g,n})s_{g,n}$. This gives
+% \begin{equation}
+% W_{k,n}=a_{k,n}s_{g(k),n}+d_{g(k),n},
+% \label{equ:qnn_w4_decomposition}
+% \end{equation}
+% which is algebraically identical to Eq.~\eqref{equ:qnn_w4_dequant}: the constant 8 only maps all 16 unsigned codes to $[-8,7]$ and introduces neither requantization nor zero-point rounding.
+
+% \noindent\textbf{Group structure turns asymmetry into a narrow QNN branch.}
+% The correction $d_{g,n}$ is constant over the 64 input channels in group $g$. Hence, for an activation matrix $\bm X$, we first form one sum per row and group, $R_{r,g}=\sum_{k:g(k)=g}X_{r,k}$, and lower the original linear layer to
+% \begin{equation}
+% \bm Y=\operatorname{BlockMatMul}(\bm X,\bm a;\bm s)
+%       +\bm R\bm d+\bm b.
+% \label{equ:qnn_w4_matmul}
+% \end{equation}
+% The main MatMul therefore retains every per-group scale, while the correction MatMul reduces its inner dimension from $d_{\mathrm{in}}$ to $d_{\mathrm{in}}/64$. Exact asymmetric execution costs only a group reduction, a $64\times$ narrower correction MatMul, and an element-wise addition; when all $d_{g,n}=0$, the correction branch is removed entirely.
+
+% \noindent\textbf{QNN context compilation absorbs the transformation.}
+% QNN binds tensor shapes, constant weights, and quantization encodings when compiling a context. \name exploits this property during offline context generation: it unpacks the source W4 codes, transposes them into QNN's MatMul layout, and stores $\bm a$ in an \texttt{SFIXED\_POINT\_8} tensor with BLOCK shape $[1,1,64,1]$, per-group scale $s_{g,n}$, and integer offset zero. The correction branch is compiled into the same fixed-shape graph as \texttt{Reshape+ReduceSum}, a floating-point \texttt{MatMul}, and \texttt{ElementWiseAdd}. Device execution therefore neither unpacks W4 codes nor reconstructs quantization metadata per invocation, while preserving asymmetric W4/G64 semantics without materializing the full weight matrix in floating point. QNN datatype availability alone does not imply that every datatype--encoding--operator combination is executable on HTP; accordingly, W4 here denotes the packed source weights, while the validated QNN main path uses an S8 BLOCK carrier rather than claiming a native packed-W4 kernel.
+
+
+\section{Implementation}
+This section maps the policy in \S~\ref{sec:pipeline_schedule} to the
+implementation used in our MNN prototype.  The implementation keeps request
+state on the host and treats the accelerator backends as bounded, asynchronous
+stages.  Consequently, a scheduling decision never mutates a running graph:
+it creates an immutable batch description, reserves the required resources,
+and then submits the description to the selected lane.
+
+\subsection{Runtime State and Request Lifecycle}
+Each request is represented by a record containing its prompt cursor, committed
+target KV length, draft-tree state, TTFT/TPOT deadlines, and current phase
+($\mathsf P$, $\mathsf G$, or $\mathsf V$).  The scheduler owns three FIFO-ready
+sets $\mathcal Q_{\mathsf P}$, $\mathcal Q_{\mathsf G}$, and
+$\mathcal Q_{\mathsf V}$, but selects from them by deadline slack rather than
+arrival order.  A request enters $\mathcal Q_{\mathsf P}$ once admission
+control has reserved its worst-case KV, candidate-tree, workspace, and graph
+budget.  A prefill chunk advances the prompt cursor only after its command has
+completed; this makes a retry or cancellation idempotent.  The final prefill
+chunk publishes the first target token and moves the record to
+$\mathcal Q_{\mathsf G}$.  Generation publishes exactly one complete draft
+tree, while verification commits the accepted path before returning an
+unfinished request to $\mathcal Q_{\mathsf G}$.  Finished or cancelled records
+release candidate KV and graph-use references before they leave the scheduler.
+
+\subsection{Deadline and Inventory Controller}
+At every lane boundary the scheduler computes the prefill slack
+$\sigma_{\mathsf P,i}$ from Eq.~\eqref{equ:prefill_slack} and the generation
+slack $\sigma_{\mathsf G,i}$ from Eq.~\eqref{equ:g_slack}.  It first selects
+the smallest non-negative (or most overdue) slack, then packs only the next
+ready chunk/tree of each request.  Thus, later prompt chunks cannot bypass an
+unfinished earlier chunk, and a request cannot occupy both lanes in one
+iteration.  Verification uses the two-dimensional DP in Eq.~\eqref{equ:verify_dp};
+the selected bucket is the largest feasible $(c_j,h_j)$ whose measured stage
+rate satisfies Eq.~\eqref{equ:verify_bucket}.
+
+The controller maintains the ready-tree inventory $Z_k$ in Eq.~\eqref{equ:inventory_dynamics}.
+If $Z_k<Z^-$ it assigns both lanes to $\mathsf G$ (subject to pending
+prefill); if $Z_k>Z^+$ it drains with $\mathsf V\mid\mathsf V$; otherwise it
+uses $\mathsf G\mid\mathsf V$.  A non-empty prefill queue overrides one lane
+with $\mathsf P$ to protect TTFT, while the peer lane continues decode work or
+performs a disjoint prefill batch.  Thresholds are updated from an exponential
+moving average of consumed trees, which avoids oscillation when request
+arrival rates change.
+
+\subsection{Dual-Lane Submission and Synchronization}
+The two logical lanes have independent command queues and KV ownership, but
+share the physical OpenCL and QNN devices.  A lane submits its attention
+commands first, waits for its own attention event, and then submits the QNN
+FFN command for the same batch.  The peer lane may submit its attention while
+the first lane is in QNN, producing the staggered execution in
+Eq.~\eqref{equ:duallane_round}.  A per-stage semaphore limits concurrent Host
+and QNN work to one command each; lane completion is joined only at the round
+boundary.  The join publishes accepted tokens, updates $Z_k$, and wakes the
+next scheduling iteration.  If a stage fails, the join marks every member of
+the affected wave cancelled, removes pending graph work, and releases all
+unconsumed reservations before returning an error to the caller.
+
+\subsection{Shape-Aware QNN Graph Residency}
+For every exported graph shape $c_j$, the runtime stores immutable metadata
+(binary path, byte range, graph name, and token capacity) and a reference count
+for active requests.  A bounded prefetch window is advanced by the execution
+cursor rather than loading all graphs eagerly.  Pending loads are prioritized
+by distance from the live lane cursor; a graph is released only when its
+reference count and both lanes' window references reach zero.  The memory
+manager admits a batch only when graph bytes, committed/candidate KV, and
+workspace fit the configured $M_{\mathrm{budget}}$.  Under pressure it first
+evicts idle candidate KV, then non-current graph records; the current graph
+and committed KV are never evicted during a command.
+
+\subsection{Instrumentation and Reproducibility}
+Every scheduling iteration records the lane id, phase, request ids, selected
+$(c_j,h_j)$ bucket, queue slacks, $Z_k$, graph load/release events, and Host,
+OpenCL, and QNN durations.  The Android profiler aggregates these records into
+one row per $(\text{model},\text{backend},c_j,h_j,\text{prompt},\text{decode})$
+case, retaining graph bytes and effective padded prefill tokens.  These fields
+are sufficient to reproduce Eq.~\eqref{equ:lane_capacity}, identify pipeline
+bubbles in Eq.~\eqref{equ:duallane_round}, and reject shape-miss reports before
+they enter the performance tables.
+
+\section{Performance Evaluation}
+In this section, we present a series of experiments on \name to evaluate its performance.
+
+\subsection{Evaluation Setup}
+\noindent\textbf{Testbed.}
+We evaluate \name\ on two commercial smartphones that span distinct NPU generations: (i)~a Realme GT7 Pro Racing Edition powered by a Qualcomm Snapdragon 8~Elite SoC (Hexagon NPU, HTP~v79) with 16\,GB RAM; and (ii)~a Redmi K70 Pro powered by a Qualcomm Snapdragon 8~Gen~3 SoC (Hexagon NPU, HTP~v75) with 24\,GB RAM. \emph{Theoretical} peaek hardware specifications are detailed in Table~\ref{tab:device}.
+% todo: cite
+% https://www.qualcomm.com/content/dam/qcomm-martech/dm-assets/documents/Snapdragon-8-Gen-3-SM8650-Q-AB-Product-Brief.pdf
+% https://www.qualcomm.com/content/dam/qcomm-martech/dm-assets/documents/Snapdragon-8-Gen-3-SM8650-Q-AB-Product-Brief.pdf
+\begin{table}[t]
+  \centering
+  \caption{Testbed specifications.}
+  \label{tab:device}
+  \vspace{-10pt}
+  \resizebox{0.95\columnwidth}{!}{%
+  \begin{tabular}{@{}lccccc@{}}
+    \toprule
+    \textbf{Device} & \textbf{CPU (GHz)} & \textbf{GPU} & \textbf{HTP} & \textbf{RAM} & \textbf{UFS} \\
+    \midrule
+    Realme 
+      & $2\!\times\!4.32\!+\!5\!\times\!3.53$ 
+      & \textcolor{red}{1.1\,GHz} 
+      & \textcolor{red}{XX\,TFLOPS} 
+      & \textcolor{red}{8.5\,GB/s} 
+      & \textcolor{red}{2.8\,GB/s} \\
+    Redmi 
+      & $3.3\!+\!4\!\times\!2.95\!+\!2.1$ 
+      & \textcolor{red}{0.9\,GHz} 
+      & \textcolor{red}{XX\,TFLOPS} 
+      & \textcolor{red}{X.X\,GB/s} 
+      & \textcolor{red}{2.8\,GB/s} \\
+    \bottomrule
+  \end{tabular}%
+  }
+\end{table}
+
+
+\noindent\textbf{Models and Datasets}
+% todo reference papper or project diretory
+We evaluate Qwen3-1.7B~\cite{yang2025qwen3}, Llama-3.2-3B-Instruct~\cite{grattafiori2024llama3}, and Qwen3-4B-Instruct~\cite{yang2025qwen3} on GSM8K~\cite{Karl2021GSM8K}, MATH-500~\cite{Dan2021MATH-500}, MT-Bench~\cite{Dan2021MATH-500}, and HumanEval~\cite{Chen2021HumanEval} datasets, which cover mathematical reasoning, multi-turn instruction following, and code generation task. 
+
+However, the limited token throughput of on-device LLM inference makes exhaustive replay of the full datasets across all evaluate configs prohibitively time-consuming. To keep the evaluation tractable, we follow a length-aware workload construction method~\cite{DistServe2024Zhong} and sample a representative subset of each dataset: run Qwen3-1.7B in FP16 AR mode with SGLang to obtain each request's input and output lengths, partition the requests into a $4\times4$ grid using their P25/P50/P75 boundaries, and proportionally sample from the resulting 16 strata. As shown in Table~\ref{tab:dataset-counts} and Fig.~\ref{fig:dataset-length-cdf}, the sampled workloads closely match the source length distributions.
+
+
+
+\begin{table}[t]
+  \centering
+  \caption{Dataset sample result. $N$: number of requests; input/output lengths shown as P50\,/\,P90\,/\,P99.}
+  \label{tab:dataset-counts}
+  \vspace{-10pt}
+  \resizebox{1\columnwidth}{!}{%
+  \scriptsize
+  \setlength{\tabcolsep}{2pt}
+  \begin{tabular}{lccc@{\hspace{4pt}}ccc}
+    \toprule
+    & \multicolumn{3}{c}{Source} & \multicolumn{3}{c}{Sampled} \\
+    \cmidrule(lr){2-4}\cmidrule(lr){5-7}
+    Dataset & $N$ & Input & Output & $N$ & Input & Output \\
+    \midrule
+    GSM8K & 1,319 & 731/766/801.64 & 131/265.4/438.74 & 100 & 730.5/767.4/815 & 129.5/242.3/506.53 \\
+    MATH-500 & 500 & 78/168.1/369.06 & 553.5/2068.9/5143.5 & 100 & 78/140.6/273.32 & 552/1795.1/5255.41 \\
+    MT-Bench & 80 & 576.5/1097.1/1649.91 & 886/1811.7/2459.47 & 80 & 576.5/1097.1/1649.91 & 886/1811.7/2459.47 \\
+    HumanEval & 164 & 129/237.4/332.37 & 403.5/653.6/1024 & 164 & 129/237.4/332.37 & 403.5/653.6/1024 \\
+    \bottomrule
+  \end{tabular}%
+  }
+\end{table}
+
+\begin{figure}[t]
+  \centering
+  \includegraphics[width=\columnwidth]{img/exp/setup/dataset_length_cdf.pdf}
+  \caption{Input/output distribution variance of sample data.}
+  \vspace{-10pt}
+  \label{fig:dataset-length-cdf}
+\end{figure}
+
+\noindent\textbf{Baselines} 
+We compare \name\ with six on-device inference frameworks: llama.cpp (\textcolor{red}{[commit]}), MLLM (\textcolor{red}{[commit]}), ExecuTorch (\textcolor{red}{[commit]}), MLC-LLM (\textcolor{red}{[commit]}), MNN (\textcolor{red}{[commit]}), and LiteRT-LM (\textcolor{red}{[commit]}). We enable continuous batching on HTP backend when supported; otherwise, requests are served serially from a common queue on OpenCL backend. We report results under W4A16 precision with greedy decoding for both autoregression and EAGLE-3 drafter, where unsupported backend/model/method combinations may be marked N/A and omitted from the corresponding figures.
+
+\noindent\textbf{Metrics}
+We report five metrics spanning SLO-aware performance and raw generation 
+efficiency:
+(i)~\emph{token goodput}, the output token rate of requests satisfying 
+both TTFT and TPOT SLOs;
+(ii)~\emph{tail latency}, the P50/P90/P99 of TTFT and TPOT;
+(iii)~\emph{{\color{red}SLO attainment}}, the fraction of tokens meeting both targets;
+% todo 这里要考虑一下用token slo attainment还是request
+(iv)~\emph{raw throughput}, the total output tokens per second without 
+SLO filtering; and
+(v)~\emph{acceptance length}, the mean tokens accepted per verification 
+round.
+
+\noindent\textbf{Parameters}
+Unless otherwise stated, all experiments share the following default configuration.  On the device side, \name employs a drafter window of 256~tokens, a tree node budget of 32, a maximum speculation depth of 7, and a top-$K$ of 10. On the workload side, requests arrive according to a Poisson process with rpm {\color{red}$4$}, consistent with prior serving evaluations~\cite{Efficient2023Woosuk,DistServe2024Zhong,agrawal2024sarathi}. For each request configuration, we set the TTFT and TPOT SLO targets to {\color{red}$3\times$ and $1.5\times$} the P90 latency of the unloaded W4A16-AR baseline, respectively, following the methodology of Splitwise~\cite{splitwise2024patel}; these targets are held fixed across all compared frameworks to ensure a level comparison.
+% todo: 是否需要补充超参数 例如memory budget/qnn graph max shape
+% 是否使用thinking遵循模型在specforge下训练时的默认行为:qwen3-1.7b空think qwen3-4b-inst/llama3.2-3b-inst无think标记
+% 都使用对话模板
+% gsm8k参考huggingface使用5-shot模板
+% 
+
+% todo: 根据实际情况修改最后叙述
+\subsection{End-to-End Performance} \label{sec:end2end}
+\noindent\textbf{Overall goodput.}
+Across all method, \name\ remains on the upper envelope as the request rate increases (Fig.~\ref{fig:end2end-goodput}), which outperforms llama.cpp, MLLM, ExecuTorch, MLC-LLM, MNN, and LiteRT-LM by up to
+textcolor{red}{[XX--XX$\times$]},
+\textcolor{red}{[XX--XX$\times$]}, \textcolor{red}{[XX--XX$\times$]},
+\textcolor{red}{[XX--XX$\times$]}, \textcolor{red}{[XX--XX$\times$]}, and
+\textcolor{red}{[XX--XX$\times$]}, respectively. 
+The gains are larger for smaller models and on faster SoCs:  Qwen3-1.7B delivers
+\textcolor{red}{[XX--XX$\times$]} and \textcolor{red}{[XX--XX$\times$]} the peak
+goodput of Qwen3-4B-Instruct and Llama-3.2-3B-Instruct, respectively; Snapdragon 8 Elite delivers \textcolor{red}{[XX--XX$\times$]} the
+peak goodput of Snapdragon 8 Gen 3. {\color{red} At low request
+rates, limited concurrency leaves little room for overlap or packing;
+near saturation, however, \name\ overlaps GPU and NPU execution and
+fills otherwise idle verification slots with useful candidates,
+further widening the gap. } 
+% todo check
+
+\begin{comment}
+\begin{figure*}[t]
+  \centering
+  % \includegraphics[width=\textwidth]{figures/end2end_token_goodput.pdf}
+  \caption{SLO-aware token goodput on GSM8K as the request rate increases. The six panels are arranged in one row: the three models on the Realme device, followed by the same models on the Redmi device. Each line denotes one framework; unsupported configurations are omitted. The x-axis is request rate (RPM), and the y-axis is token goodput (tokens/s).}
+  \label{fig:end2end-goodput}
+\end{figure*}
+\end{comment}
+
+\noindent\textbf{Goodput across workloads.}
+The benefit is not confined to the GSM8K workload used above. At the headline
+request rate, \name\ improves token goodput over the baseline by
+\textcolor{red}{[XX--XX$\times$]} on GSM8K, \textcolor{red}{[XX--XX$\times$]} on
+MATH-500, \textcolor{red}{[XX--XX$\times$]} on MT-Bench, and
+\textcolor{red}{[XX--XX$\times$]} on HumanEval
+(Fig.~\ref{fig:end2end-workloads}).\textcolor{red}{[The larger gain on [workload] is attributable to [validated
+cause], whereas [validated condition] limits the gain on [workload].]}.
+
+\begin{comment}
+\begin{figure*}[t]
+  \centering
+  % \includegraphics[width=\textwidth]{figures/end2end_workloads.pdf}
+  \caption{SLO-aware token goodput across GSM8K, MATH-500, MT-Bench, and HumanEval. Each of the four panels reports the six combinations of the two devices and three models at \textcolor{red}{[headline RPM]}; grouped bars compare \name\ with the strongest supported baseline.}
+  \label{fig:end2end-workloads}
+\end{figure*}
+\end{comment}
+
+\noindent\textbf{Goodput over time.}
+At a fixed request rate of \textcolor{red}{[XX RPM]}, \name\ maintains
+\textcolor{red}{[XX--XX tokens/s]} over the \textcolor{red}{[XX-minute]} run,
+with a coefficient of variation of \textcolor{red}{[XX\%]}; the strongest
+baseline instead varies between \textcolor{red}{[XX--XX tokens/s]}
+(Fig.~\ref{fig:goodput-timeseries}). This steadier goodput indicates that the
+ready-tree inventory keeps drafting and verification balanced instead of
+alternating between starvation and backlog.
+
+\begin{comment}
+\begin{figure}[t]
+  \centering
+  % \includegraphics[width=\columnwidth]{figures/goodput_timeseries.pdf}
+  \caption{Token goodput over time on GSM8K using \textcolor{red}{[model]} on the Snapdragon 8 Elite device at \textcolor{red}{[XX RPM]}. Goodput is aggregated over non-overlapping \textcolor{red}{[XX-second]} windows, and each line denotes one framework.}
+  \label{fig:goodput-timeseries}
+\end{figure}
+\end{comment}
+
+\noindent\textbf{Goodput over time.}
+\name\ initially trails the baseline by
+\textcolor{red}{[XX--XX\%]}. It overtakes the baseline after
+\textcolor{red}{[XX seconds]} and then sustains
+\textcolor{red}{[XX--XX$\times$]} the baseline's token goodput for the remainder
+of the \textcolor{red}{[XX-minute]} run (Fig.~\ref{fig:goodput-timeseries}).
+The initial gap reflects the time needed
+to populate the ready-tree inventory and fill the pipeline. Once sufficient
+work is available, cross-request packing and GPU--NPU overlap amortize this
+startup cost and produce the sustained advantage.
+
+\begin{comment}
+\begin{figure}[t]
+  \centering
+  % \includegraphics[width=\columnwidth]{figures/goodput_timeseries.pdf}
+  \caption{Token goodput over time on GSM8K using \textcolor{red}{[model]} on the Snapdragon 8 Elite device at \textcolor{red}{[XX RPM]}. Goodput is aggregated over non-overlapping \textcolor{red}{[XX-second]} windows; each line denotes one framework, and the vertical dashed line marks when \name\ overtakes the baseline.}
+  \label{fig:goodput-timeseries}
+\end{figure}
+\end{comment}
+
+\noindent\textbf{Tail latency.}
+As presented in Table~\ref{tab:tail-latency}, \name\ changes P99
+TTFT by \textcolor{red}{[--XX\% to +XX\%]}, reduces P99 TPOT by
+\textcolor{red}{[XX--XX\%]}, and improves SLO attainment by
+\textcolor{red}{[XX--XX percentage points]} relative to the baselines. The
+P50/P90 results follow the same ordering, showing that higher goodput does not
+come from relaxing tail latency or excluding slow requests.
+
+\begin{table}[t]
+  \centering
+  \caption{Request latency of P50/P90/P99 TTFT/TPOT and SLO attainment.}
+  \label{tab:tail-latency}
+  \scriptsize
+  \setlength{\tabcolsep}{3pt}
+  \resizebox{0.97\columnwidth}{!}{%
+  \begin{tabular}{lccc}
+    \toprule
+    System & TTFT & TPOT & SLO attainment \\
+    \midrule
+    \name & \textcolor{red}{[XX/XX/XX]} & \textcolor{red}{[XX/XX/XX]} & \textcolor{red}{[XX\%]} \\
+    llama.cpp & \textcolor{red}{[XX/XX/XX]} & \textcolor{red}{[XX/XX/XX]} & \textcolor{red}{[XX\%]} \\
+    MLLM & \textcolor{red}{[XX/XX/XX]} & \textcolor{red}{[XX/XX/XX]} & \textcolor{red}{[XX\%]} \\
+    ExecuTorch & \textcolor{red}{[XX/XX/XX]} & \textcolor{red}{[XX/XX/XX]} & \textcolor{red}{[XX\%]} \\
+    MLC-LLM & \textcolor{red}{[XX/XX/XX]} & \textcolor{red}{[XX/XX/XX]} & \textcolor{red}{[XX\%]} \\
+    MNN & \textcolor{red}{[XX/XX/XX]} & \textcolor{red}{[XX/XX/XX]} & \textcolor{red}{[XX\%]} \\
+    LiteRT-LM & \textcolor{red}{[XX/XX/XX]} & \textcolor{red}{[XX/XX/XX]} & \textcolor{red}{[XX\%]} \\
+    \bottomrule
+  \end{tabular}
+  }
+\end{table}
+
+
+\subsubsection{Ablation Study}
+\noindent\textbf{System components.}
+To isolate the sources of \name's end-to-end gains, we disable one component at
+a time while keeping all other settings unchanged. The results in Fig.~\ref{fig:ablation} shows, both penalties increase with the
+request rate: without the dual pipeline, ready operations from different
+requests can no longer overlap; without packing, useful candidates can no
+longer reclaim otherwise padded verification slots. Removing sliding-window
+drafting, dynamic stopping, or inventory control incurs an additional
+\textcolor{red}{[XX--XX\%]} loss by admitting low-value proposals or leaving
+too little ready work for verification.
+
+\begin{comment}
+\begin{figure}[t]
+  \centering
+  % \includegraphics[width=\columnwidth]{figures/ablation_goodput.pdf}
+  \caption{Ablation on \textcolor{red}{[device, model, and workload]}. The x-axis is request rate (RPM), the y-axis is SLO-aware token goodput, and each line disables one component of \name.}
+  \label{fig:ablation}
+\end{figure}
+\end{comment}
+
+\noindent\textbf{Dynamic stopping.}
+Compared with \name\ without stopping, dynamic stopping reduces average tree
+size and depth by \textcolor{red}{[XX--XX\%]} and
+\textcolor{red}{[XX--XX\%]}, respectively, while changing average accepted
+length by only \textcolor{red}{[XX--XX\%]} as shown in Table~\ref{tab:stopping-accepted-length}. Under the relaxed threshold, tuned SVIP and DEAGLE retain \textcolor{red}{[XX--XX\%]} and \textcolor{red}{[XX--XX\%]} more nodes than \name; while pruning further reduces their accepted length by \textcolor{red}{[XX--XX\%]} with a permissive threshold. By selectively removing
+low-value branches, \name\ better balances draft work and accepted progress,
+accounting for the goodput gain in Fig.~\ref{fig:ablation}.
+
+% todo 参数+表格细节
+\begin{table*}[t]
+  \centering
+  \color{red}
+  \newcommand{\stoppingtablewidth}{0.97\textwidth}
+  \caption{Dynamic stopping result. AL/ATS/ATD: average accepted length/tree size/tree depth.}
+  \vspace{-10pt}
+  \label{tab:stopping-accepted-length}
+  \scriptsize
+  \setlength{\tabcolsep}{2.5pt}
+  \renewcommand{\arraystretch}{0.82}
+  \resizebox{\stoppingtablewidth}{!}{%
+  \begin{tabular}{ll*{12}{c}}
+    \toprule
+    & & \multicolumn{3}{c}{GSM8K} & \multicolumn{3}{c}{MATH-500} & \multicolumn{3}{c}{MT-Bench} & \multicolumn{3}{c}{HumanEval} \\
+    \cmidrule(lr){3-5} \cmidrule(lr){6-8} \cmidrule(lr){9-11} \cmidrule(lr){12-14}
+    Method & Threshold & AL & ATS & ATD & AL & ATS & ATD & AL & ATS & ATD & AL & ATS & ATD \\
+    \midrule
+    AR & -- & 1.00 & [N/A] & [N/A] & 1.00 & [N/A] & [N/A] & 1.00 & [N/A] & [N/A] & 1.00 & [N/A] & [N/A] \\
+    Eagle3 & -- & [XX] & [XX] & [XX] & [XX] & [XX] & [XX] & [XX] & [XX] & [XX] & [XX] & [XX] & [XX] \\
+    \addlinespace[0pt]
+    \multirow{3}{*}{SVIP~\cite{zhang2025svip}}
+      & $\theta_H=[XX]$ & [XX] & [XX] & [XX] & [XX] & [XX] & [XX] & [XX] & [XX] & [XX] & [XX] & [XX] & [XX] \\
+      & $\theta_H=[XX]$ & [XX] & [XX] & [XX] & [XX] & [XX] & [XX] & [XX] & [XX] & [XX] & [XX] & [XX] & [XX] \\
+      & $\theta_H=[XX]$ & [XX] & [XX] & [XX] & [XX] & [XX] & [XX] & [XX] & [XX] & [XX] & [XX] & [XX] & [XX] \\
+    \addlinespace[0pt]
+    \multirow{3}{*}{DEAGLE~\cite{deagle2025}}
+      & $\boldsymbol\theta_D=[XX/XX/XX]$ & [XX] & [XX] & [XX] & [XX] & [XX] & [XX] & [XX] & [XX] & [XX] & [XX] & [XX] & [XX] \\
+      & $\boldsymbol\theta_D=[XX/XX/XX]$ & [XX] & [XX] & [XX] & [XX] & [XX] & [XX] & [XX] & [XX] & [XX] & [XX] & [XX] & [XX] \\
+      & $\boldsymbol\theta_D=[XX/XX/XX]$ & [XX] & [XX] & [XX] & [XX] & [XX] & [XX] & [XX] & [XX] & [XX] & [XX] & [XX] & [XX] \\
+    \midrule
+    \name\ (dynamic) & learned & [XX] & [XX] & [XX] & [XX] & [XX] & [XX] & [XX] & [XX] & [XX] & [XX] & [XX] & [XX] \\
+    \bottomrule
+  \end{tabular}
+  }
+\end{table*}
+
+
+\subsection{Sensitivity Study}
+% todo 考虑做成2*2的图
+\subsubsection{Drafter Window Size}
+Fig.~\ref{fig:sensitivity-window} compares the end-to-end goodput of
+different drafter window sizes across request rates. The
+\textcolor{red}{[XX-token]} window achieves the highest goodput over
+the evaluated loads, outperforming the full-context
+configuration by \textcolor{red}{[XX--XX\%]}. Its advantage becomes
+\textcolor{red}{[larger/smaller]} as the request rate increases, indicating
+that \textcolor{red}{[result-based explanation]}. Overall, the selected window
+provides the most robust goodput across load levels.
+
+\begin{comment}
+\begin{figure}[t]
+  \centering
+  % \includegraphics[width=\columnwidth]{figures/window_sensitivity.pdf}
+  \caption{Sensitivity to drafter window size on \textcolor{red}{[device, model, and workload]}. The x-axis is request rate (RPM), the y-axis is SLO-aware token goodput, and each line denotes one window size.}
+  \label{fig:sensitivity-window}
+\end{figure}
+\end{comment}
+
+\subsubsection{Draft Tree Space}
+As illustrated in Fig.~\ref{fig:sensitivity-tree}, the configuration of $B/D/K=XXX$ achieves the optimal goodput across various draft tree budgets by balancing exploration and overhead. Smaller trees under-explore high-probability paths, advancing only \textcolor{red}{[XX]} tokens per verification, while larger or wider trees incur \textcolor{red}{[XX\%]} higher drafting and state-evaluation costs by over-probing low-value branches.
+
+\begin{comment}
+\begin{figure}[t]
+  \centering
+  % \includegraphics[width=\columnwidth]{figures/tree_sensitivity.pdf}
+  \caption{Sensitivity to tree configuration on \textcolor{red}{[device, model, and workload]}. The x-axis is request rate (RPM), the y-axis is SLO-aware token goodput, and each line denotes one $(B,D,k)$ configuration.}
+  \label{fig:sensitivity-tree}
+\end{figure}
+\end{comment}
+
+\subsubsection{Memory Budget}
+Additional memory helps only until the execution units become saturated.
+Increasing the runtime budget from \textcolor{red}{[XX]} to
+\textcolor{red}{[XX GB]} improves goodput by up to \textcolor{red}{[XX\%]}, as
+more active requests and ready trees remain resident; beyond
+\textcolor{red}{[XX GB]}, the change is below \textcolor{red}{[XX\%]}
+(Fig.~\ref{fig:sensitivity-memory}). Under the smallest budget, \name\ lowers
+admission and tree inventory to remain within the memory limit.
+
+\begin{comment}
+\begin{figure}[t]
+  \centering
+  % \includegraphics[width=\columnwidth]{figures/memory_sensitivity.pdf}
+  \caption{Sensitivity to runtime memory budget on \textcolor{red}{[device, model, and workload]}. The x-axis is request rate (RPM), the y-axis is SLO-aware token goodput, and each line denotes one memory budget.}
+  \label{fig:sensitivity-memory}
+\end{figure}
+\end{comment}
+
+\subsubsection{Maximum QNN Graph Shape}
+Fig.~\ref{fig:sensitivity-qnn-shape} shows a non-monotonic relationship
+between the maximum QNN shape and goodput. Increasing the shape from
+\textcolor{red}{[XX]} to \textcolor{red}{[XX]} improves goodput by
+\textcolor{red}{[XX\%]} because a wider invocation verifies more useful
+candidates while amortizing fixed execution overhead. Beyond
+\textcolor{red}{[XX]} QNN shape, however, goodput decreases by
+\textcolor{red}{[XX\%]}: the additional token rows push verification past the
+hardware throughput knee, so the increase in QNN and attention latency
+outweighs the diminishing gain in committed tokens. We therefore use the
+peak-performing \textcolor{red}{[XX-token]} shape as the default maximum.
+
+\begin{comment}
+\begin{figure}[t]
+  \centering
+  % \includegraphics[width=\columnwidth]{figures/qnn_shape_sensitivity.pdf}
+  \caption{Sensitivity to the maximum compiled QNN verification shape on \textcolor{red}{[device, model, and workload]}. The x-axis is request rate (RPM), the y-axis is SLO-aware token goodput, and each line denotes one maximum shape.}
+  \label{fig:sensitivity-qnn-shape}
+\end{figure}
+\end{comment}
+
+\section{Related Work}
+\noindent\textbf{LLM Inference Serving.} Modern serving systems coordinate scheduling, batching, and memory management to improve throughput and latency. Orca introduced iteration-level scheduling for requests of differing lengths, and vLLM's PagedAttention reduces KV-cache fragmentation through paged allocation~\cite{Orca2022Gyeong,Efficient2023Woosuk}. DistServe disaggregates prefill from decoding to optimize goodput, and Mooncake further disaggregates KV-cache storage and transfer~\cite{DistServe2024Zhong,Mooncake2025Qin}; for long contexts, LoongServe elastically adjusts sequence parallelism and vAttention manages growing KV caches via virtual-memory primitives~\cite{LoongServe2024Wu,vAttention2025Prabhu}. All target server-class GPU clusters with dynamic-shape kernels and scalable resources; none addresses the fixed-shape and precision constraints of mobile NPUs, or coordinates drafting and verification across a mobile SoC's heterogeneous processors.
+
+\noindent\textbf{Speculative Decoding.} Speculative decoding reduces target-model invocations by verifying drafted tokens in parallel while preserving the output distribution~\cite{leviathan2023fast,chen2023accelerating}. SpecInfer merges proposals into token trees for one-shot verification; Medusa and the EAGLE family replace the draft model with prediction heads or feature-level drafters, with EAGLE-2 adding probability-aware dynamic trees and EAGLE-3 multi-layer feature fusion~\cite{miao2024specinfer,cai2024medusa,li2024eagle,li2024eagle2,li2025eagle3}. Sequoia derives hardware-aware tree topologies, FastTree specializes kernels for tree-structured inference, and others adapt the drafting horizon to avoid low-value candidates~\cite{chen2024sequoia,pan2025fasttree,zhang2025svip,brown2024dynamicdepth,chen2026dflash}. Prefix caches such as SGLang's RadixAttention also organize KV blocks as trees~\cite{sglang2024}, but these index validated prefixes rather than uncommitted futures requiring verification and rollback. EdgeLLM brings adaptive token trees to constrained devices~\cite{xu2025edgellm}, yet no existing system packs trees from multiple requests into fixed-shape NPU graphs or pipelines drafting and verification across heterogeneous backends.
+
+\noindent\textbf{On-Device LLM.} On-device systems pursue private, responsive inference under tight memory, energy, and thermal budgets. Mobile Foundation Model as Firmware shares an NPU-resident model across tasks, and system-service abstractions amortize loading and memory across applications~\cite{yuan2024mobilefoundation,yin2024systemservice}. PowerInfer-2 co-designs sparse execution with the smartphone memory hierarchy~\cite{xue2024powerinfer2}; \textsc{llm.npu} decomposes variable-length prompts into fixed-size NPU graphs, isolates accuracy-sensitive outliers, and overlaps CPU/GPU with NPU execution~\cite{xu2025fastondevice}. HeteroLLM and HeteroInfer partition operators or tensors across GPU and NPU under unified memory~\cite{chen2025heterollm,chen2025heteroinfer}, and ShadowAttn overlaps NPU-based importance estimation with sparse attention on the CPU/GPU~\cite{yin2025shadowattn}. These works optimize placement, memory movement, or individual operators; EdgeLLM adds per-request speculation~\cite{xu2025edgellm}. \name instead jointly manages speculative state, fixed-shape graph occupancy, and multi-request scheduling across the heterogeneous SoC.
+%\noindent\textbf{LLM Inference Serving.} Modern LLM serving systems improve throughput and latency by coordinating request scheduling, batching, memory management, and phase-specific execution. Orca introduced iteration-level scheduling to dynamically batch requests with different generation lengths, while vLLM's PagedAttention enables fine-grained KV-cache allocation and substantially reduces memory fragmentation~\cite{Orca2022Gyeong,Efficient2023Woosuk}. DistServe separates compute-intensive prefill from memory-bound decoding to optimize goodput, whereas Mooncake further disaggregates KV-cache storage and transfer from model execution~\cite{DistServe2024Zhong,Mooncake2025Qin}. For long-context workloads, LoongServe elastically adjusts sequence parallelism, and vAttention uses virtual-memory primitives to manage dynamically growing KV caches~\cite{LoongServe2024Wu,vAttention2025Prabhu}. These systems primarily target server-class GPU clusters, where kernels accept dynamic batch shapes and resources can be scaled across devices. They neither account for the fixed-shape execution and precision constraints of mobile NPUs nor coordinate draft generation and tree verification across the heterogeneous processors of a mobile SoC.
+
+%\noindent\textbf{Speculative Decoding.} Speculative decoding reduces target-model invocations by using a lightweight drafter to propose several tokens that are verified in parallel without changing the target model's output distribution~\cite{leviathan2023fast,chen2023accelerating}. Subsequent work reduces drafting and verification overhead at different layers. SpecInfer combines proposals into token trees for one-shot verification, while Medusa and the EAGLE family replace a conventional draft model with lightweight prediction heads or feature-level drafters; EAGLE-2 further constructs probability-aware dynamic trees, and EAGLE-3 improves proposal quality through multi-layer feature fusion~\cite{miao2024specinfer,cai2024medusa,li2024eagle,li2024eagle2,li2025eagle3}. Sequoia derives hardware-aware tree topologies, and FastTree specializes attention kernels and runtime execution for tree-structured inference~\cite{chen2024sequoia,pan2025fasttree}. Other approaches adapt the drafting horizon or parallelize proposal generation to avoid low-value candidates~\cite{zhang2025svip,brown2024dynamicdepth,chen2026dflash}. Prefix-cache systems such as SGLang's RadixAttention also organize KV blocks in a radix tree to reuse computation across requests with shared committed prefixes~\cite{sglang2024}; unlike speculative trees, however, these trees index previously validated prefixes rather than mutually exclusive, uncommitted futures requiring verification and rollback. EdgeLLM brings adaptive token trees and provisional generation to resource-constrained devices~\cite{xu2025edgellm}, but existing systems do not jointly pack trees from multiple requests into fixed-shape NPU graphs or pipeline drafting and verification across CPU, GPU, and NPU backends.
+
+%\noindent\textbf{On-Device LLM.} On-device LLM systems seek to provide private and responsive inference within tight memory, energy, and thermal budgets. Mobile Foundation Model as Firmware shares an NPU-resident foundation model across language, vision, audio, sensing, and multimodal tasks, while system-service abstractions amortize model loading and memory consumption across applications~\cite{yuan2024mobilefoundation,yin2024systemservice}. At the runtime level, PowerInfer-2 co-designs sparse execution with the smartphone memory hierarchy to accommodate larger models~\cite{xue2024powerinfer2}. \textsc{llm.npu} accelerates prefill-heavy workloads by decomposing variable-length prompts into fixed-size NPU graphs, separating accuracy-sensitive outliers, and overlapping CPU/GPU and NPU execution~\cite{xu2025fastondevice}. HeteroLLM and HeteroInfer further exploit unified memory through GPU--NPU operator or tensor partitioning and lightweight synchronization, adapting execution to the stage-, shape-, and precision-dependent behavior of mobile accelerators~\cite{chen2025heterollm,chen2025heteroinfer}. ShadowAttn addresses NPU-unfriendly attention by overlapping NPU-based importance estimation with sparse attention on the CPU or GPU~\cite{yin2025shadowattn}. These techniques optimize model placement, memory movement, or individual operators, while EdgeLLM focuses on per-request speculative execution~\cite{xu2025edgellm}. In contrast, \name jointly manages speculative state, request-dependent tree shapes, fixed-shape graph occupancy, and multi-request producer--consumer scheduling across the heterogeneous mobile SoC.
+
+
+\section{Conclusion}
+%In this paper, we propose \name, an online diagnosis system for distributed LLM serving that localizes inference faults without instrumenting the latency-sensitive serving path. \name collects lightweight cross-layer metrics from the serving engine, GPU, CPU, and network, then applies causal metric selection to filter workload-correlated noise while retaining fault-discriminative signals. Under dynamic workloads, \name organizes resource counters into sliding windows and hierarchically narrows diagnosis from the anomalous layer to the likely fault path and suspect device. Extensive evaluations  show that \name achieves over 0.99 localization accuracy, identifies faults within 0.4 milliseconds, and incurs under 2\% overhead on the serving system.
+\bibliographystyle{ACM-Reference-Format}
+\bibliography{sample-base}
+
+
+%%
+%% If your work has an appendix, this is the place to put it.
+\appendix \label{sec:appendix}
+\section{Draft ECDFs for different depth.} \label{sec:app_draft_ecdf}
+\end{document}
+\endinput
+%%
+%% End of file `sample-sigplan.tex'.

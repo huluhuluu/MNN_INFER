@@ -612,6 +612,7 @@ std::vector<DualPipelineScheduler::GraphRequest> buildQnnGraphRequestsForSize(
         if (request.allGraphName.empty()) {
             request.allGraphName = op.qnn.allGraphName;
         }
+        request.residentBytes = request.size;
         request.draftGraph = op.qnn.draft;
         request.pinResident = op.qnn.pin;
         requests.push_back(request);

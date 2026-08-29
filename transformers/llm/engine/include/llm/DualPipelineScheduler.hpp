@@ -66,6 +66,9 @@ public:
         std::string graphPath;
         uint64_t offset;
         uint64_t size;
+        // Resident device bytes. If zero, the scheduler treats the graph size
+        // as unknown and preserves legacy count-only admission behavior.
+        uint64_t residentBytes;
         std::vector<std::string> allGraphName;
         std::string reason;
         bool draftGraph;
@@ -82,6 +85,7 @@ public:
         bool pinned;
         int activeUseCount;
         uint64_t lastUseSequence;
+        uint64_t residentBytes;
 
         GraphRecord();
     };
@@ -113,6 +117,18 @@ public:
         GraphWindowSnapshot();
     };
 
+    struct MemorySnapshot {
+        size_t budgetBytes;
+        size_t pinnedBytes;
+        size_t kvCacheBytes;
+        size_t workspaceBytes;
+        size_t residentGraphBytes;
+        size_t residentGraphCount;
+        size_t accountedBytes;
+
+        MemorySnapshot();
+    };
+
     struct Callbacks {
         std::function<bool(const GraphRequest&)> onGraphLoad;
         std::function<void(const GraphRequest&)> onGraphRelease;
@@ -121,6 +137,12 @@ public:
     struct Config {
         size_t maxResidentGraphs;
         int graphPrefetchLookahead;
+        // Zero keeps the pre-budget behavior for deployments without a
+        // reliable device-memory budget.
+        size_t memoryBudgetBytes;
+        size_t pinnedMemoryBytes;
+        size_t kvCacheBytes;
+        size_t workspaceBytes;
         Callbacks callbacks;
 
         Config();
@@ -139,6 +161,11 @@ public:
     void cancelGraphPrefetchWave();
     bool finishGraphPrefetchWave();
     GraphWindowSnapshot graphWindowSnapshot() const;
+    MemorySnapshot memorySnapshot() const;
+    // Update non-graph reservations before admitting the next graph wave.
+    // Values are owned by the caller's runtime manager and are not evicted by
+    // this scheduler.
+    bool setMemoryUsage(size_t kvCacheBytes, size_t workspaceBytes);
     bool releaseResidentGraph(const std::string& graphId);
 
     bool beginStageWave(const std::vector<int>& pipelineIds);
@@ -199,8 +226,11 @@ private:
     void _processGraphRequest(const GraphRequest& request);
     void _processGraphComplete(const std::string& graphId);
     bool _planEvictionsLocked(const std::string& incomingGraphId,
+                              uint64_t incomingGraphBytes,
                               std::vector<GraphRequest>* releaseRequests);
     size_t _residentGraphCountLocked() const;
+    size_t _residentGraphBytesLocked() const;
+    size_t _accountedBytesLocked() const;
     void _grantReadyStagesLocked();
 
     mutable std::mutex mMutex;
@@ -218,6 +248,8 @@ private:
     bool mGraphPrefetchWaveActive;
     bool mGraphPrefetchCancelled;
     bool mQnnExecutionActive;
+    size_t mKvCacheBytes;
+    size_t mWorkspaceBytes;
 
     mutable std::mutex mStageMutex;
     std::condition_variable mStageCondition;

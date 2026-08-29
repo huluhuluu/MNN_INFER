@@ -249,6 +249,10 @@ void Llm::configureDualPipelineMode() {
         config.maxResidentGraphs = static_cast<size_t>(maxResidentGraphs);
     }
     config.graphPrefetchLookahead = std::max(0, mConfig->dual_pipeline_prefetch_window());
+    config.memoryBudgetBytes = mConfig->dual_pipeline_memory_budget_bytes();
+    config.pinnedMemoryBytes = mConfig->dual_pipeline_pinned_memory_bytes();
+    config.kvCacheBytes = mConfig->dual_pipeline_kv_cache_bytes();
+    config.workspaceBytes = mConfig->dual_pipeline_workspace_bytes();
     config.callbacks.onGraphLoad = [](const DualPipelineScheduler::GraphRequest& request) {
 #ifdef MNN_QNN_ENABLED
         if (request.graphPath.empty()) {
